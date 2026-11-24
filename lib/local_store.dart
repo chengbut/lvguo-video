@@ -906,8 +906,9 @@ class LocalStore extends ChangeNotifier {
     });
   }
 
+  // 管理员概念已移除：仅保留锁定检查，单用户下全部功能直接可用。
   void _requireAdmin() {
-    if (locked || !profile.admin) throw StateError('仅管理员可以修改此设置');
+    if (locked) throw StateError('当前用户已锁定');
   }
 
   Future<void> _checkPin(LocalProfile target, String pin) async {
