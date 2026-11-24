@@ -131,7 +131,7 @@ class _RegistrationDialogState extends State<_RegistrationDialog> {
                   ),
                   Flexible(
                     child: Text(
-                      '正在注册${widget.sources.map((site) => site.name).join('、')}的设备，完成后自动进入',
+                      '正在注册${widget.sources.map((site) => site.displayName).join('、')}的设备，完成后自动进入',
                     ),
                   ),
                 ],
