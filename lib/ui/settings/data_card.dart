@@ -156,7 +156,6 @@ class _DataCardState extends State<DataCard> {
 
   @override
   Widget build(BuildContext context) {
-    final admin = widget.store.profile.admin;
     final bytes = _cacheBytes;
     return SettingsCard(
       children: [
@@ -171,8 +170,8 @@ class _DataCardState extends State<DataCard> {
         ),
         SettingsTile(
           title: '删除全部数据',
-          subtitle: admin ? '删除用户、记录、设置、模块、缓存和已下载的视频，完成后退出应用' : '需要管理员',
-          enabled: admin,
+          subtitle: '删除用户、记录、设置、模块、缓存和已下载的视频，完成后退出应用',
+          enabled: !_clearing,
           onTap: _deleteAll,
         ),
       ],
