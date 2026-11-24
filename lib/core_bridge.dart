@@ -276,9 +276,10 @@ class NativeRepository extends AppRepository {
   int _readSequence = 0;
   final _activeReads = <String, int>{};
 
+  // 管理员概念已移除：仅保留锁定检查，单用户下资源设置直接可用。
   void _adminPermission() {
-    if (access != null && (access!.locked || !access!.profile.admin)) {
-      throw AppFailure('仅管理员可修改本机资源设置');
+    if (access != null && access!.locked) {
+      throw AppFailure('当前用户已锁定');
     }
   }
 
@@ -557,9 +558,6 @@ class NativeRepository extends AppRepository {
   @override
   Future<({String path, String reason})> moveDownloads(String directory) async {
     _downloadPermission();
-    if (access != null && !access!.profile.admin) {
-      throw AppFailure('仅管理员可更改下载目录');
-    }
     await BackgroundDownloads.ensureStarted();
     await workLease('storage', 'start');
     try {
@@ -597,9 +595,6 @@ class NativeRepository extends AppRepository {
 
   @override
   Future<List<String>> deleteAllData() async {
-    if (access != null && !access!.profile.admin) {
-      throw AppFailure('仅管理员可删除全部数据');
-    }
     await workLease('storage', 'start');
     try {
       final result = await _call({'action': 'deleteAllData'});
@@ -641,9 +636,10 @@ class NativeRepository extends AppRepository {
       }))['ready'] ==
       true;
 
+  // 管理员概念已移除：仅保留锁定检查。
   void _soraniPermission() {
-    if (access != null && (access!.locked || !access!.profile.admin)) {
-      throw AppFailure('仅管理员可登录或退出青空次元账号');
+    if (access != null && access!.locked) {
+      throw AppFailure('当前用户已锁定');
     }
   }
 
@@ -1178,24 +1174,6 @@ class NativeRepository extends AppRepository {
     _downloadPermission();
     if (command == 'resume' || command == 'resumeAll') {
       await BackgroundDownloads.ensureStarted();
-    }
-    if (access != null && !access!.profile.admin) {
-      final visible = await downloads();
-      if (command == 'pauseAll' || command == 'resumeAll') {
-        for (final job in visible.where(
-          (job) => command == 'pauseAll' ? job.active : job.resumable,
-        )) {
-          await _call({
-            'action': 'controlDownloads',
-            'command': command == 'pauseAll' ? 'pause' : 'resume',
-            'jobId': job.id,
-          });
-        }
-        return;
-      }
-      if (!visible.any((job) => job.id == id)) {
-        throw AppFailure('当前用户没有此下载任务权限');
-      }
     }
     await _call({
       'action': 'controlDownloads',
