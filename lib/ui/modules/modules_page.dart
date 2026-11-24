@@ -234,6 +234,17 @@ class _ModulesPageState extends State<ModulesPage>
       ? (value) => _toggle(module, value)
       : null;
 
+  /// 点行上的“设为当前”切当前站源：走 LocalStore.setSource（写 user 设置
+  /// 的 source 字段），当前站源存在 store.source 里；saveSetting 会把
+  /// 失败吞成 SnackBar，所以成功与否事后核对 store.source 再报，失败
+  /// 时不报“已切换”。ListenableBuilder 会重建，“当前”标记自动挪过去。
+  Future<void> _switchSource(SourceModule module) async {
+    if (_store.source == module.id) return;
+    await saveSetting(context, () => _store.setSource(module.id));
+    if (!mounted || _store.source != module.id) return;
+    _show('已切换到 ${module.name}');
+  }
+
   Future<void> _details(SourceModule module) => showDialog<void>(
     context: context,
     builder: (_) => _ModuleDialog(module: module, install: false),
@@ -327,6 +338,13 @@ class _ModulesPageState extends State<ModulesPage>
       module: module,
       update: null,
       enabled: _store.sourceEnabled(module.id),
+      // 只有无错、可访问且已开启的源才能切成当前源；已经是当前源的不给按钮。
+      isCurrent: _store.source == module.id,
+      onSwitch: _toggleFor(module) != null &&
+              _store.sourceEnabled(module.id) &&
+              _store.source != module.id
+          ? () => _switchSource(module)
+          : null,
       onToggle: _toggleFor(module),
       onDetails: AppScope.of(context).television
           ? () => _menu(module, null)
@@ -717,6 +735,8 @@ class _InstalledCard extends StatelessWidget {
     required this.module,
     required this.update,
     required this.enabled,
+    required this.isCurrent,
+    required this.onSwitch,
     required this.onToggle,
     required this.onDetails,
     required this.onUpdate,
@@ -725,6 +745,8 @@ class _InstalledCard extends StatelessWidget {
   final SourceModule module;
   final ModuleIndexEntry? update;
   final bool enabled;
+  final bool isCurrent;
+  final VoidCallback? onSwitch;
   final ValueChanged<bool>? onToggle;
   final VoidCallback onDetails;
   final VoidCallback? onUpdate;
@@ -750,6 +772,15 @@ class _InstalledCard extends StatelessWidget {
               style: TextStyle(color: colors.primary),
             ),
         ],
+        // 当前站源的轻标记：切源后 ListenableBuilder 重建，标记自动挪行。
+        if (isCurrent)
+          Text(
+            '当前站源',
+            style: TextStyle(
+              color: colors.primary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
       ],
       trailing: television
           ? null
@@ -762,6 +793,17 @@ class _InstalledCard extends StatelessWidget {
       actions: television
           ? const []
           : [
+              // 点一下就切成当前站源（已开启且不是当前源的行才显示）。
+              if (onSwitch != null)
+                FocusRing(
+                  radius: 20,
+                  child: FilledButton.tonalIcon(
+                    style: _cardButton(colors, primary: true),
+                    onPressed: onSwitch,
+                    icon: const Icon(Icons.check_circle_outline_rounded),
+                    label: const Text('设为当前'),
+                  ),
+                ),
               if (update != null) ...[
                 FocusRing(
                   radius: 20,
