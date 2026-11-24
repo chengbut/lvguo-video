@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
@@ -37,12 +38,14 @@ class ExploreFeed extends ChangeNotifier {
   List<CatalogCategory> get tabs {
     final catalog = _catalog;
     if (catalog == null) return const [];
-    final [all, ...genres] = catalog.categories;
+    final all = catalog.categories.first;
+    // 只留推荐 + 模块给的前 3 个榜单；全部与分类 tab 隐藏（代码保留，
+    // 只是界面上不显示），榜单少于 2 个时保留全部，避免发现页被掏空。
+    final boards = catalog.boards.take(3).toList();
     return [
       if (catalog.recommends) recommendTab,
-      all,
-      for (final board in catalog.boards) rankingTab(board),
-      ...genres,
+      if (boards.length < 2) all,
+      for (final board in boards) rankingTab(board),
     ];
   }
 
@@ -65,12 +68,108 @@ class ExploreFeed extends ChangeNotifier {
 
   Drama? featuredIn(CatalogCategory tab) =>
       tab.id == recommendTab.id && resumeIn(tab) == null
-      ? _feeds[tab.id]?.items.firstOrNull
+      ? _orderedRecommendItems().firstOrNull
       : null;
 
   List<Drama> itemsIn(CatalogCategory tab) {
-    final items = _feeds[tab.id]?.items ?? const <Drama>[];
+    final items = tab.id == recommendTab.id
+        ? _orderedRecommendItems()
+        : _feeds[tab.id]?.items ?? const <Drama>[];
     return featuredIn(tab) == null ? items : items.skip(1).toList();
+  }
+
+  // 换一换后的推荐展示顺序（null 表示按模块原顺序展示）。
+  List<Drama>? _shuffled;
+  // 上一批换出来的剧 id，下次抽样时排除，避免连续两次重复。
+  Set<String> _lastBatchIds = {};
+  bool _shuffling = false;
+  bool get shuffling => _shuffling;
+
+  List<Drama> _orderedRecommendItems() {
+    final items = _feeds[recommendTab.id]?.items ?? const <Drama>[];
+    final shuffled = _shuffled;
+    if (shuffled == null) return items;
+    final known = {for (final drama in shuffled) drama.id};
+    return [
+      ...shuffled,
+      // 后加载/加载更多的内容跟在后面，不丢内容。
+      for (final drama in items)
+        if (known.add(drama.id)) drama,
+    ];
+  }
+
+  /// 换一换：本地随机重排推荐。
+  ///
+  /// 随机池优先用源模块的榜单（现成的热度数据），按排名加权抽样——越热
+  /// 的剧出现概率越高；没有榜单时退回普通随机。每次抽出的这一批排除
+  /// 上一批刚展示过的；池子不够大时允许重叠，但顺序仍会打乱。
+  Future<void> shuffleRecommendations() async {
+    final catalog = _catalog;
+    if (catalog == null || !recommending || _shuffling) return;
+    _shuffling = true;
+    _notify();
+    try {
+      final weighted = <({Drama drama, double weight})>[];
+      final seen = <String>{};
+      for (final board in catalog.boards.take(3)) {
+        try {
+          final page = await catalog.ranking(board, page: 1);
+          final count = page.items.length;
+          for (final item in page.items) {
+            if (item.drama.id.isEmpty || !seen.add(item.drama.id)) continue;
+            weighted.add((
+              drama: item.drama,
+              weight: (count - item.rank + 1).toDouble(),
+            ));
+          }
+        } catch (_) {}
+      }
+      // 当前推荐列表作补充池，基础权重。
+      final feed = _feeds[recommendTab.id];
+      if (feed != null) {
+        for (final drama in feed.items) {
+          if (seen.add(drama.id)) weighted.add((drama: drama, weight: 1));
+        }
+      }
+      if (weighted.isEmpty) return;
+      final fresh = weighted
+          .where((entry) => !_lastBatchIds.contains(entry.drama.id))
+          .toList();
+      final candidates = fresh.isNotEmpty ? fresh : weighted;
+      final feedCount = feed?.items.length ?? 0;
+      final batchSize = (feedCount > 0 ? feedCount : 20).clamp(10, 20);
+      final batch = _weightedSample(candidates, batchSize);
+      if (batch.isEmpty) return;
+      _lastBatchIds = {for (final drama in batch) drama.id};
+      _shuffled = batch;
+    } finally {
+      _shuffling = false;
+      _notify();
+    }
+  }
+
+  List<Drama> _weightedSample(
+    List<({Drama drama, double weight})> entries,
+    int count,
+  ) {
+    final pool = List.of(entries);
+    final result = <Drama>[];
+    final random = math.Random();
+    while (result.length < count && pool.isNotEmpty) {
+      var total = 0.0;
+      for (final entry in pool) total += entry.weight;
+      var roll = random.nextDouble() * total;
+      var picked = pool.length - 1;
+      for (var i = 0; i < pool.length; i++) {
+        roll -= pool[i].weight;
+        if (roll <= 0) {
+          picked = i;
+          break;
+        }
+      }
+      result.add(pool.removeAt(picked).drama);
+    }
+    return result;
   }
 
   void select(String id) {
@@ -80,6 +179,9 @@ class ExploreFeed extends ChangeNotifier {
   }
 
   Future<void> refresh() async {
+    // 下拉刷新向模块要新一批，换一换的旧顺序作废。
+    _shuffled = null;
+    _lastBatchIds = {};
     final catalog = _catalog;
     if (catalog == null) return;
     if (catalog.categories.length == 1) {
@@ -113,6 +215,10 @@ class ExploreFeed extends ChangeNotifier {
     if (_disposed || catalog != _catalog) return;
     _prefetch();
     _notify();
+    // 榜单加载后，当前 tab 可能已被隐藏（全部/分类），切到第一个可见 tab。
+    if (tabs.isNotEmpty && !tabs.any((tab) => tab.id == _tab.id)) {
+      _select(tabs.first);
+    }
   }
 
   void _select(CatalogCategory tab) {
@@ -227,6 +333,8 @@ class ExploreFeed extends ChangeNotifier {
   }
 
   void _dropFeeds() {
+    _shuffled = null;
+    _lastBatchIds = {};
     for (final feed in _feeds.values) {
       feed.dispose();
     }
