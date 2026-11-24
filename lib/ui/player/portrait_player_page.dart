@@ -939,9 +939,12 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
   );
 
   // 贴底的液态玻璃通条，里面是一条细进度线，可拖动。
+  // 底色透明：玻璃底色去掉，只留模糊 + 细边框，视频从下面透出来，
+  // 只剩进度线本身可见。
   Widget _progressBand(BuildContext context) => LiquidGlass(
     borderRadius: BorderRadius.zero,
     blur: 14,
+    tint: 0,
     child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: _progress(context),
@@ -971,7 +974,9 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
         padding: EdgeInsets.zero,
         activeTrackColor: Colors.white,
         thumbColor: Colors.white,
-        inactiveTrackColor: Colors.white.withValues(alpha: .25),
+        // 未播的背景条透明：只留已播的白线、缓冲的淡白线和拇指，
+        // 已播/未播靠白线本身分得清。
+        inactiveTrackColor: Colors.transparent,
         secondaryActiveTrackColor: Colors.white.withValues(alpha: .4),
         thumbShape: RoundSliderThumbShape(
           enabledThumbRadius: dragging ? 10 : 6,
