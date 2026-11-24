@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../native_text_input.dart';
 import '../app_scope.dart';
 import 'letter_keyboard.dart';
+import 'liquid_glass.dart';
 
 class SearchField extends StatelessWidget {
   const SearchField({
@@ -33,8 +34,8 @@ class SearchField extends StatelessWidget {
     return InputDecoration(
       hintText: hint,
       isDense: true,
-      filled: true,
-      fillColor: colors.surfaceContainerHigh,
+      // 玻璃质感由外层 LiquidGlass 提供，输入框本身透明。
+      filled: false,
       contentPadding: EdgeInsets.zero,
       prefixIcon: Icon(
         Icons.search_rounded,
@@ -56,32 +57,36 @@ class SearchField extends StatelessWidget {
   Widget build(BuildContext context) {
     final decoration = _decoration(Theme.of(context).colorScheme);
     final television = AppScope.of(context).television;
-    return SizedBox(
-      height: height,
-      child:
-          television &&
-              (letterKeyboard ||
-                  defaultTargetPlatform == TargetPlatform.android)
-          ? _TelevisionSearchField(
-              decoration: decoration,
-              controller: controller,
-              focusNode: focusNode,
-              autofocus: autofocus,
-              onSubmitted: onSubmitted,
-              onChanged: onChanged,
-              letters: letterKeyboard,
-              matches: matches,
-            )
-          : TextField(
-              controller: controller,
-              focusNode: focusNode,
-              autofocus: autofocus,
-              onChanged: onChanged,
-              onSubmitted: onSubmitted,
-              textInputAction: TextInputAction.search,
-              style: const TextStyle(fontSize: 14),
-              decoration: decoration,
-            ),
+    return LiquidGlass(
+      borderRadius: BorderRadius.circular(height / 2),
+      blur: 14,
+      child: SizedBox(
+        height: height,
+        child:
+            television &&
+                (letterKeyboard ||
+                    defaultTargetPlatform == TargetPlatform.android)
+            ? _TelevisionSearchField(
+                decoration: decoration,
+                controller: controller,
+                focusNode: focusNode,
+                autofocus: autofocus,
+                onSubmitted: onSubmitted,
+                onChanged: onChanged,
+                letters: letterKeyboard,
+                matches: matches,
+              )
+            : TextField(
+                controller: controller,
+                focusNode: focusNode,
+                autofocus: autofocus,
+                onChanged: onChanged,
+                onSubmitted: onSubmitted,
+                textInputAction: TextInputAction.search,
+                style: const TextStyle(fontSize: 14),
+                decoration: decoration,
+              ),
+      ),
     );
   }
 }
