@@ -59,8 +59,10 @@ class SourceSite {
   final bool vipPrompt;
   bool get onlineSearch => pagedSearch;
   String get groupId => group.isEmpty ? id : group;
-  String get groupName => groupLabel.isEmpty ? name : groupLabel;
-  String get entryName => entryLabel.isEmpty ? name : entryLabel;
+  /// 界面上显示的站源名：hongguo 源显示为“绿果”。只改显示，不改 id。
+  String get displayName => id == hongguoSourceId ? '绿果' : name;
+  String get groupName => groupLabel.isEmpty ? displayName : groupLabel;
+  String get entryName => entryLabel.isEmpty ? displayName : entryLabel;
 
   static List<SourceSite> _installed = const [];
   static List<String> _order = const [];
