@@ -2,6 +2,10 @@
 
 每个版本一节，标题为 `pubspec.yaml` 中的完整版本号。发布工作流会把对应一节写入 GitHub Release 说明。
 
+## 1.4.0+4
+
+- 修复 Android 构建失败：日志确认是 `android/app/src/main/res/` 下残留的 16 个 `.b64` 文件导致，AAPT 资源合并要求 res/ 里的文件名以 .xml 或 .png 结尾，`.png.b64` 直接让 `:app:packageReleaseResources` 失败。`scripts/decode_assets.py` 现在解码后会删掉 res/ 下的 `.b64` 源文件（解码失败时保留原文件），其它位置的 `.b64` 不动。
+
 ## 1.4.0+3
 
 - 重新触发构建：上次 Android 构建失败，本地排查未发现确定性原因（Dart 代码、图标资源、构建脚本均正常，iOS 同一份代码已编过），重新编一次验证。
