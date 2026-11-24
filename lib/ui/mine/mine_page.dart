@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../download_converter.dart';
+import '../../merge_queue.dart';
+import '../../download_overview.dart';
 import '../../local_store.dart';
 import '../app_scope.dart';
 import '../downloads/downloads_page.dart';
