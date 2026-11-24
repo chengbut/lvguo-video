@@ -12,7 +12,7 @@ import '../settings/settings_page.dart';
 import '../settings/settings_sections.dart';
 import '../widgets/fade_in.dart';
 import '../widgets/focus_ring.dart';
-import '../widgets/native_glass.dart';
+import '../widgets/liquid_glass.dart';
 import '../widgets/page_header.dart';
 
 class MinePage extends StatelessWidget {
@@ -94,7 +94,8 @@ class MinePage extends StatelessWidget {
   Widget _phone(BuildContext context) {
     return ListView(
       // 末尾多留一个胶囊底栏的高度，最后一行能滑到胶囊上方。
-      padding: EdgeInsets.only(bottom: 24 + capsuleBarClearance(context)),
+      // 40 的余量：末卡滑到底时卡底离胶囊顶还有一段空隙，不会贴着盖住。
+      padding: EdgeInsets.only(bottom: 40 + capsuleBarClearance(context)),
       children: [
         const PageHeader(title: '我的'),
         Padding(
@@ -194,7 +195,7 @@ class _Entry extends StatelessWidget {
     final subtitle = this.subtitle;
     return FocusRing(
       radius: 20,
-      child: AdaptiveGlass(
+      child: LiquidGlass(
         borderRadius: BorderRadius.circular(20),
         child: Material(
           color: Colors.transparent,
@@ -278,7 +279,7 @@ class _TelevisionEntry extends StatelessWidget {
     return FocusRing(
       radius: 20,
       scale: 1,
-      child: AdaptiveGlass(
+      child: LiquidGlass(
         borderRadius: BorderRadius.circular(20),
         child: Material(
           color: Colors.transparent,
