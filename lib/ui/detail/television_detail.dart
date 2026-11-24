@@ -555,7 +555,7 @@ class TelevisionDetailState extends State<TelevisionDetail> {
         ),
       if (year != null) TextSpan(text: year),
       if (status.isNotEmpty) TextSpan(text: status),
-      TextSpan(text: SourceSite.byId(drama.source).name),
+      TextSpan(text: SourceSite.byId(drama.source).displayName),
     ];
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
