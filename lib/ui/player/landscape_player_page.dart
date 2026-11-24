@@ -359,6 +359,43 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     }
   }
 
+  // 上下黑边空白区的手势：与视频区一致——点按切换播控显示/隐藏，
+  // 上下滑切集（同款 60px 阈值），长按加速。锁定态不响应。
+  // 选集展开时不出现（下方是选集网格，手势归它），底部选集条本身不动。
+  Widget _barGestures() {
+    final locked = _session.locked;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        if (locked) {
+          _say('已锁定，点屏幕显示锁图标');
+          return;
+        }
+        _toggleControls();
+      },
+      onVerticalDragStart: locked ? null : (_) => _episodeDragOffset = 0,
+      onVerticalDragUpdate: locked
+          ? null
+          : (details) => _episodeDragOffset += details.delta.dy,
+      onVerticalDragEnd: locked ? null : (_) => _episodeDragEnd(),
+      onVerticalDragCancel: locked ? null : () => _episodeDragOffset = 0,
+      onLongPressStart: locked ? null : (_) => _pressStart(),
+      onLongPressEnd: locked ? null : (_) => _pressEnd(),
+      onLongPressCancel: locked ? null : _pressEnd,
+    );
+  }
+
+  // 选集条正上方的常驻进度线：播控隐藏时也一直显示、实时更新，可拖动；
+  // 用 active: true 的 PlaybackProgressBuilder 保证清屏时仍在走进度。
+  Widget _bottomProgress() => PlaybackProgressBuilder(
+    player: _session.player,
+    active: true,
+    builder: (context) => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: SizedBox(height: 20, child: _progressBar(context, thumb: 6)),
+    ),
+  );
+
   void _rotate(bool full) => unawaited(
     desktopPlatform
         ? setWindowFullScreen(!full)
@@ -469,8 +506,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                       // 点选集展开时平滑推到最上面，收起时同样平滑移回中间。
                       final expanded = _episodesExpanded || _selecting;
                       final locked = _session.locked;
-                      final topVisible =
-                          !locked && (_visible || _pinned) && !expanded;
+                      final topVisible = !locked && !expanded;
                       final videoHeight =
                           MediaQuery.sizeOf(context).width * 9 / 16;
                       return Stack(
@@ -487,30 +523,68 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                                 ),
                               ),
                               Expanded(
-                                child: Stack(
-                                  children: [
-                                    if (expanded)
-                                      Positioned(
-                                        top: videoHeight,
-                                        left: 0,
-                                        right: 0,
-                                        bottom: 0,
-                                        child: _details(context),
-                                      ),
-                                    AnimatedAlign(
-                                      alignment: expanded
-                                          ? Alignment.topCenter
-                                          : Alignment.center,
-                                      duration: Motion.long,
-                                      curve: Motion.standard,
-                                      child: AspectRatio(
-                                        aspectRatio: 16 / 9,
-                                        child: video,
-                                      ),
-                                    ),
-                                  ],
+                                child: LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    // 上下黑边：16:9 视频居中后，剩余空间上下各一半。
+                                    final barHeight = expanded
+                                        ? 0.0
+                                        : math.max(
+                                            0.0,
+                                            (constraints.maxHeight -
+                                                    videoHeight) /
+                                                2,
+                                          );
+                                    return Stack(
+                                      children: [
+                                        // 黑边手势区（只在选集没展开时）：与视频区同手势；
+                                        // 展开时下方是选集网格，手势归它，这里不出现。
+                                        if (barHeight > 0) ...[
+                                          Positioned(
+                                            top: 0,
+                                            left: 0,
+                                            right: 0,
+                                            height: barHeight,
+                                            child: _barGestures(),
+                                          ),
+                                          Positioned(
+                                            bottom: 0,
+                                            left: 0,
+                                            right: 0,
+                                            height: barHeight,
+                                            child: _barGestures(),
+                                          ),
+                                        ],
+                                        if (expanded)
+                                          Positioned(
+                                            top: videoHeight,
+                                            left: 0,
+                                            right: 0,
+                                            bottom: 0,
+                                            child: _details(context),
+                                          ),
+                                        AnimatedAlign(
+                                          alignment: expanded
+                                              ? Alignment.topCenter
+                                              : Alignment.center,
+                                          duration: Motion.long,
+                                          curve: Motion.standard,
+                                          child: AspectRatio(
+                                            aspectRatio: 16 / 9,
+                                            child: video,
+                                          ),
+                                        ),
+                                      ],
+                                    );
+                                  },
                                 ),
                               ),
+                              // 选集条正上方的常驻进度线（像红果那样贴着选集条）：
+                              // 从悬浮控制条里移出来后这里是唯一一处进度条，可拖动。
+                              if (_session
+                                  .store
+                                  .playbackPreferences
+                                  .progressLine)
+                                _bottomProgress(),
                               SafeArea(
                                 top: false,
                                 child: Padding(
@@ -568,11 +642,21 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     return Stack(
       fit: StackFit.expand,
       children: [
-        PlayerVideo(
-          key: ValueKey(session.player),
-          handle: widget.handle,
-          player: session.player,
-          fit: session.videoFit,
+        // 切集交叉淡化：换集时旧画面 300ms 内淡出、新画面淡入，不硬切。
+        // 预加载已备好下一集首帧时是真交叉淡化；备播没跟上时退化为
+        // 从黑场平滑淡入，仍比硬切柔和。PiP 走 session.player，不受影响。
+        AnimatedSwitcher(
+          duration: Motion.of(context, Motion.long),
+          switchInCurve: Motion.standard,
+          switchOutCurve: Motion.standard,
+          transitionBuilder: (child, animation) =>
+              FadeTransition(opacity: animation, child: child),
+          child: PlayerVideo(
+            key: ValueKey(session.player),
+            handle: widget.handle,
+            player: session.player,
+            fit: session.videoFit,
+          ),
         ),
         DanmakuOverlay(
           controller: session.danmaku,
@@ -784,34 +868,26 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Transform.translate(
-                offset: const Offset(0, 7),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: SizedBox(
-                    height: 20,
-                    child: _progress(context, thumb: 6),
+                // 进度条已从悬浮条里移出，改成选集条正上方的常驻细进度线
+                //（见 _bottomProgress），这里只留播放/时间/弹幕/全屏。
+                SizedBox(
+                  height: 44,
+                  child: Row(
+                    children: [
+                      _playButton(size: 40, iconSize: 26),
+                      const SizedBox(width: 4),
+                      _clock(13),
+                      const Spacer(),
+                      if (session.danmakuSupported) _danmakuButton(context),
+                      _icon(
+                        Icons.fullscreen_rounded,
+                        '全屏',
+                        widget.onFullscreen ?? () => _rotate(false),
+                        size: 40,
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              SizedBox(
-                height: 44,
-                child: Row(
-                  children: [
-                    _playButton(size: 40, iconSize: 26),
-                    const SizedBox(width: 4),
-                    _clock(13),
-                    const Spacer(),
-                    if (session.danmakuSupported) _danmakuButton(context),
-                    _icon(
-                      Icons.fullscreen_rounded,
-                      '全屏',
-                      widget.onFullscreen ?? () => _rotate(false),
-                      size: 40,
-                    ),
-                  ],
-                ),
-              ),
             ],
           ),
           ),
