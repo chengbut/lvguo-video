@@ -127,6 +127,10 @@ class PlaybackPreferences {
     this.autoPictureInPicture = false,
     this.backgroundPlayback = false,
     this.videoFit = VideoFit.auto,
+    this.skipIntroSeconds = 0,
+    this.skipOutroSeconds = 0,
+    this.keepScreenAwake = true,
+    this.recordHistory = true,
   });
 
   final double speed;
@@ -163,6 +167,14 @@ class PlaybackPreferences {
   final bool autoPictureInPicture;
   final bool backgroundPlayback;
   final VideoFit videoFit;
+  // 每集开播自动跳过的片头秒数，0 表示关闭。
+  final int skipIntroSeconds;
+  // 片尾剩余秒数：播到这里自动切下一集，0 表示关闭。
+  final int skipOutroSeconds;
+  // 播放时禁止自动熄屏。
+  final bool keepScreenAwake;
+  // 关闭后不再保存观看进度与历史。
+  final bool recordHistory;
 
   bool preopens({required bool television}) => preopen ?? !television;
 
@@ -198,6 +210,10 @@ class PlaybackPreferences {
     bool? autoPictureInPicture,
     bool? backgroundPlayback,
     VideoFit? videoFit,
+    int? skipIntroSeconds,
+    int? skipOutroSeconds,
+    bool? keepScreenAwake,
+    bool? recordHistory,
   }) => PlaybackPreferences(
     speed: speed ?? this.speed,
     quality: quality ?? this.quality,
@@ -230,6 +246,10 @@ class PlaybackPreferences {
     autoPictureInPicture: autoPictureInPicture ?? this.autoPictureInPicture,
     backgroundPlayback: backgroundPlayback ?? this.backgroundPlayback,
     videoFit: videoFit ?? this.videoFit,
+    skipIntroSeconds: skipIntroSeconds ?? this.skipIntroSeconds,
+    skipOutroSeconds: skipOutroSeconds ?? this.skipOutroSeconds,
+    keepScreenAwake: keepScreenAwake ?? this.keepScreenAwake,
+    recordHistory: recordHistory ?? this.recordHistory,
   );
 
   Map<String, dynamic> toJson() => {
@@ -264,6 +284,10 @@ class PlaybackPreferences {
     'autoPictureInPicture': autoPictureInPicture,
     'backgroundPlayback': backgroundPlayback,
     'videoFit': videoFit.name,
+    'skipIntroSeconds': skipIntroSeconds,
+    'skipOutroSeconds': skipOutroSeconds,
+    'keepScreenAwake': keepScreenAwake,
+    'recordHistory': recordHistory,
   };
 
   factory PlaybackPreferences.fromJson(Map<String, dynamic> value) {
@@ -330,6 +354,12 @@ class PlaybackPreferences {
       autoPictureInPicture: value['autoPictureInPicture'] as bool? ?? false,
       backgroundPlayback: value['backgroundPlayback'] as bool? ?? false,
       videoFit: VideoFit.values.asNameMap()[value['videoFit']] ?? VideoFit.auto,
+      skipIntroSeconds:
+          (value['skipIntroSeconds'] as num? ?? 0).toInt().clamp(0, 60),
+      skipOutroSeconds:
+          (value['skipOutroSeconds'] as num? ?? 0).toInt().clamp(0, 300),
+      keepScreenAwake: value['keepScreenAwake'] as bool? ?? true,
+      recordHistory: value['recordHistory'] as bool? ?? true,
     );
   }
 }
