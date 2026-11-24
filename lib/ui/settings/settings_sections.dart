@@ -66,15 +66,11 @@ const _androidDecoders = {
   TelevisionDecoder.hardwareDirect: '硬解（直通）',
 };
 const _links = [
-  [
-    ('GitHub · 重建版', String.fromEnvironment('PROJECT_URL')),
-    ('GitHub · 原作者', 'https://github.com/fish2018'),
-  ],
+  [('GitHub · 重建版', String.fromEnvironment('PROJECT_URL'))],
   [
     ('Telegram · 交流群组', String.fromEnvironment('TELEGRAM_GROUP_URL')),
     ('Telegram · 更新频道', String.fromEnvironment('TELEGRAM_CHANNEL_URL')),
   ],
-  [('感谢赞助 · mnyyds', 'https://github.com/mnyyds')],
 ];
 
 class SettingsSection extends StatelessWidget {
