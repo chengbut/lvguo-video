@@ -117,7 +117,12 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
   }
 
   // 把集数标签画到已拷贝好的画中画帧的左上角。32BGRA 缓冲对应
-  // premultipliedFirst + byteOrder32Little；先翻转坐标系再画，文字不上下颠倒。
+  // premultipliedFirst + byteOrder32Little。注意：CGContext 的坐标原点在
+  // 左下角（y 向上），而视频帧内存是上到下（第 0 行就是画面顶部）；
+  // CGContextDrawImage 是按 CG 坐标把图画正的，所以直接把图画在顶部
+  // 的 CG 矩形里（y = height - margin - labelHeight），文字就是正的。
+  // 千万不要翻转坐标系——之前 translate + scale(1,-1) 的翻转正是字
+  // 上下颠倒的原因：翻转后图的顶边落到了内存里偏下的行，字就倒过来了。
   private func drawEpisodeLabel(into buffer: CVPixelBuffer, width: Int, height: Int) {
     episodeLabelLock.lock()
     let text = episodeLabelText
@@ -148,14 +153,10 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
     let scale = Double(labelHeight) / Double(image.height)
     let labelWidth = Int(Double(image.width) * scale)
     let margin = max(8, Int(Double(height) * 0.02))
-    context.saveGState()
-    context.translateBy(x: 0, y: CGFloat(height))
-    context.scaleBy(x: 1, y: -1)
     context.draw(
       image,
-      in: CGRect(x: margin, y: margin, width: labelWidth, height: labelHeight)
+      in: CGRect(x: margin, y: height - margin - labelHeight, width: labelWidth, height: labelHeight)
     )
-    context.restoreGState()
   }
 
   private func attachLayer() {
