@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../app_scope.dart';
 import 'focus_ring.dart';
+import 'liquid_glass.dart';
 
 class ChoiceOption<T> {
   const ChoiceOption(this.value, this.label);
@@ -52,17 +53,21 @@ Future<T?> showChoicePanel<T>({
   ChoiceAction? action,
 }) {
   final form = AppScope.formFactorOf(context);
-  Widget panel(BuildContext context) => _ChoicePanel<T>(
-    form: form,
-    title: title,
-    options: options,
-    selected: selected,
-    columns: switch (form) {
-      FormFactor.phone => grid.phone,
-      FormFactor.pad || FormFactor.window => grid.wide,
-      FormFactor.television => grid.television,
-    },
-    action: action,
+  Widget panel(BuildContext context) => LiquidGlass(
+    borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+    blur: 18,
+    child: _ChoicePanel<T>(
+      form: form,
+      title: title,
+      options: options,
+      selected: selected,
+      columns: switch (form) {
+        FormFactor.phone => grid.phone,
+        FormFactor.pad || FormFactor.window => grid.wide,
+        FormFactor.television => grid.television,
+      },
+      action: action,
+    ),
   );
   switch (form) {
     case FormFactor.phone:
@@ -72,7 +77,7 @@ Future<T?> showChoicePanel<T>({
         showDragHandle: true,
         useSafeArea: true,
         constraints: const BoxConstraints(maxHeight: 640),
-        backgroundColor: Theme.of(context).colorScheme.surfaceContainerLow,
+        backgroundColor: Colors.transparent,
         builder: panel,
       );
     case FormFactor.pad || FormFactor.window:
@@ -93,7 +98,7 @@ Future<T?> showChoicePanel<T>({
         pageBuilder: (context, _, _) => Align(
           alignment: Alignment.centerRight,
           child: Material(
-            color: Theme.of(context).colorScheme.surfaceContainerLow,
+            color: Colors.transparent,
             elevation: 8,
             child: SizedBox(
               width: grid.televisionWidth,
