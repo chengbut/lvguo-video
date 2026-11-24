@@ -890,7 +890,7 @@ class _DetailPageState extends State<DetailPage> {
       color: Theme.of(context).colorScheme.onSurfaceVariant,
     );
     final meta = [
-      SourceSite.byId(drama.source).name,
+      SourceSite.byId(drama.source).displayName,
       if (drama.episodes > 0) '共 ${drama.episodes} 集',
       if (drama.releaseStatus.isNotEmpty && drama.releaseStatus != 'unknown')
         drama.releaseLabel,
