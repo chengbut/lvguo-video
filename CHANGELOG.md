@@ -2,6 +2,10 @@
 
 每个版本一节，标题为 `pubspec.yaml` 中的完整版本号。发布工作流会把对应一节写入 GitHub Release 说明。
 
+## 1.4.0+2
+
+- 修复构建失败：补 liquid_glass.dart 漏掉的 tint 字段声明（构造函数和 build() 都在用 tint，类里却没有 `final double tint;`，Dart 编译不过，v1.4.0 的 iOS 构建因此失败）。
+
 ## 1.4.0+1
 
 - 底栏三个键恢复可点：之前胶囊外层包 IgnorePointer(ignoring: true) 会挡掉全部点按，改成 Stack 悬浮，胶囊本身正常接手势、周围留白仍穿透到底层列表滑动。
