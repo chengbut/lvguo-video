@@ -508,7 +508,8 @@ class ExplorePageState extends State<ExplorePage> {
                 inset,
                 8,
                 inset,
-                television ? 27 : 16,
+                // 末尾多留一个胶囊底栏的高度，最后一行能滑到胶囊上方。
+                television ? 27 : 16 + capsuleBarClearance(context),
               ),
               sliver: SliverToBoxAdapter(child: FeedFooter(feed: feed)),
             ),
