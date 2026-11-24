@@ -269,6 +269,15 @@ class PlaybackSettingsList extends StatelessWidget {
               title: const Text('小窗播放'),
               onTap: onMiniWindow,
             ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.lock_rounded),
+            title: const Text('锁定屏幕'),
+            onTap: () {
+              Navigator.pop(context);
+              session.setLocked(true);
+            },
+          ),
           if (castSupported)
             ListTile(
               contentPadding: EdgeInsets.zero,
