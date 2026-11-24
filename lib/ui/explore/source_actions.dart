@@ -16,14 +16,12 @@ Future<void> pickSource(BuildContext anchor, LocalStore store) async {
     ],
     selected: store.source,
     grid: ChoiceGrid.sources,
-    action: store.profile.admin
-        ? (
-            label: '管理站源',
-            icon: Icons.tune_rounded,
-            onPressed: () =>
-                openPage<void>(anchor, (_) => ModulesPage(store: store)),
-          )
-        : null,
+    action: (
+      label: '管理站源',
+      icon: Icons.tune_rounded,
+      onPressed: () =>
+          openPage<void>(anchor, (_) => ModulesPage(store: store)),
+    ),
   );
   if (value == null || value == store.source) return;
   try {
