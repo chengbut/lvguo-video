@@ -16,7 +16,6 @@ import '../theme/app_theme.dart';
 import '../theme/motion.dart';
 import '../widgets/contained_slider.dart';
 import '../widgets/liquid_glass.dart';
-import '../widgets/native_glass.dart';
 import 'danmaku_overlay.dart';
 import 'episode_grid.dart';
 import 'fade_presence.dart';
@@ -914,19 +913,16 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     return Row(
       spacing: 8,
       children: [
-        AdaptiveGlassIconButton(
+        LiquidGlassIconButton(
           size: 40,
           onPressed: () => unawaited(Navigator.maybePop(context)),
           tooltip: '返回',
           child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
         ),
         Expanded(
-          child: AdaptiveGlass(
+          child: LiquidGlass(
             borderRadius: BorderRadius.circular(20),
             blur: 14,
-            // 胶囊留 regular 底色保文字可读，只去掉额外那圈白边
-            //（白边 + 玻璃折射边叠在一起显粗、像槽）。
-            showBorder: false,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
             child: Text(
               '第${session.episode.number}集',
@@ -1074,7 +1070,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
               children: [
                 Expanded(
                   child: Text(
-                    '选集 · 全$count集 · 免费观看',
+                    '${_session.detail.drama.title.isNotEmpty ? _session.detail.drama.title : '选集'} · 全$count集 · 第${_session.episode.number}集',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
