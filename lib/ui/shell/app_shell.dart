@@ -347,6 +347,12 @@ class _AppShellState extends State<AppShell> {
     final television = AppScope.of(context).television;
     final tabs = _tabs;
     if (!tabs.contains(_tab)) _tab = AppTab.explore;
+    // 手机底栏只保留发现、历史、我的；追剧页本身保留，从电视端与侧栏进入。
+    final phoneTabs = tabs.where((tab) => tab != AppTab.follow).toList();
+    if (AppScope.formFactorOf(context) == FormFactor.phone &&
+        !phoneTabs.contains(_tab)) {
+      _tab = AppTab.explore;
+    }
     final covered = _navigator?.canPop() ?? false;
     return PopScope(
       canPop:
@@ -369,25 +375,16 @@ class _AppShellState extends State<AppShell> {
                 ? null
                 : HideOnScroll(
                     alignment: Alignment.topCenter,
-                    child: LiquidGlass(
-                      borderRadius: const BorderRadius.vertical(
-                        top: Radius.circular(24),
-                      ),
-                      child: NavigationBar(
-                        height: 72,
-                        backgroundColor: Colors.transparent,
-                        elevation: 0,
-                        selectedIndex: tabs.indexOf(_tab),
-                      onDestinationSelected: (index) => _tap(tabs[index]),
-                      destinations: [
-                        for (final tab in tabs)
-                          NavigationDestination(
-                            key: ValueKey('nav-${tab.name}'),
-                            icon: _badged(tab, Icon(tab.icon)),
-                            selectedIcon: _badged(tab, Icon(tab.selectedIcon)),
-                            label: tab.label,
-                          ),
-                        ],
+                    child: SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                        child: _CapsuleBar(
+                          tabs: phoneTabs,
+                          selected: _tab,
+                          onTap: _tap,
+                          badged: _badged,
+                        ),
                       ),
                     ),
                   ),
@@ -553,6 +550,154 @@ class _TabFade extends StatelessWidget {
     curve: Motion.enter,
     child: child,
   );
+}
+
+/// 手机端悬浮胶囊底栏：每个 tab 是一个胶囊按钮，选中态是实心玻璃胶囊
+/// （图标 + 文字），未选中只显示图标；切换时指示胶囊滑动到位。
+class _CapsuleBar extends StatelessWidget {
+  const _CapsuleBar({
+    required this.tabs,
+    required this.selected,
+    required this.onTap,
+    required this.badged,
+  });
+
+  final List<AppTab> tabs;
+  final AppTab selected;
+  final ValueChanged<AppTab> onTap;
+  final Widget Function(AppTab tab, Widget icon) badged;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final selectedIndex = tabs
+        .indexOf(selected)
+        .clamp(0, tabs.length - 1);
+    return LiquidGlass(
+      borderRadius: BorderRadius.circular(32),
+      blur: 18,
+      child: SizedBox(
+        height: 64,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final segment = constraints.maxWidth / tabs.length;
+            return Stack(
+              children: [
+                AnimatedAlign(
+                  alignment: Alignment(
+                    tabs.length > 1
+                        ? -1 + 2 * selectedIndex / (tabs.length - 1)
+                        : 0,
+                    0,
+                  ),
+                  duration: Motion.of(context, Motion.medium),
+                  curve: Motion.standard,
+                  child: SizedBox(
+                    width: segment,
+                    height: 64,
+                    child: Center(
+                      child: Container(
+                        width: segment - 8,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(24),
+                          color: colors.secondaryContainer,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                Material(
+                  type: MaterialType.transparency,
+                  child: Row(
+                    children: [
+                      for (final tab in tabs)
+                        Expanded(
+                          child: _CapsuleTab(
+                            tab: tab,
+                            selected: tab == selected,
+                            onTap: () => onTap(tab),
+                            badged: badged,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _CapsuleTab extends StatelessWidget {
+  const _CapsuleTab({
+    required this.tab,
+    required this.selected,
+    required this.onTap,
+    required this.badged,
+  });
+
+  final AppTab tab;
+  final bool selected;
+  final VoidCallback onTap;
+  final Widget Function(AppTab tab, Widget icon) badged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final color = selected
+        ? colors.onSecondaryContainer
+        : colors.onSurfaceVariant;
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: InkWell(
+        key: ValueKey('nav-${tab.name}'),
+        onTap: onTap,
+        customBorder: const StadiumBorder(),
+        child: Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              badged(
+                tab,
+                ToggleIconSwitcher(
+                  child: Icon(
+                    selected ? tab.selectedIcon : tab.icon,
+                    key: ValueKey(selected),
+                    color: color,
+                    size: 24,
+                  ),
+                ),
+              ),
+              AnimatedSize(
+                duration: Motion.of(context, Motion.medium),
+                curve: Motion.standard,
+                alignment: Alignment.centerLeft,
+                child: selected
+                    ? Padding(
+                        padding: const EdgeInsets.only(left: 6),
+                        child: Text(
+                          tab.label,
+                          maxLines: 1,
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            color: color,
+                          ),
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _SideBar extends StatefulWidget {
