@@ -26,7 +26,7 @@
 
 ## 液态玻璃（Liquid Glass）风格
 
-目标是 iOS 26 的液态玻璃质感。**如实说明：这不是原生 Liquid Glass。**
+目标是 iOS 26 的液态玻璃质感。**如实说明：这不是原生 Liquid Glass，液态玻璃是 Flutter 模拟效果。**
 Flutter 3.47 没有暴露 iOS 26 的原生 Liquid Glass API（SwiftUI
 `.glassEffect()`），原生层也没有可直接接的现成接口；本项目用玻璃拟态
 模拟最接近的效果，不引入新依赖：
@@ -44,6 +44,11 @@ Flutter 3.47 没有暴露 iOS 26 的原生 Liquid Glass API（SwiftUI
     包在玻璃胶囊里。
   - 播放器底部弹窗（`lib/ui/player/playback_sheets.dart` 的
     `showPlayerSheet`）：弹窗背景透明，内容包在顶部圆角的玻璃面板里。
+  - v1.0.0 扩展：顶部 AppBar 全局半透明（`lib/ui/theme/app_theme.dart`）、
+    搜索框（`lib/ui/widgets/search_field.dart`）、首页海报卡片
+    （`lib/ui/widgets/drama_tile.dart`）、选择面板/底部弹窗
+    （`lib/ui/widgets/choice_panel.dart`）、设置页分组卡片
+    （`lib/ui/widgets/group_card.dart`）。只换容器质感，配色与布局结构不变。
 - 未改动：播放流程、画中画逻辑、按钮的点击行为与尺寸均未动，只换了
   视觉包装；竖屏播放器的图标按钮未包玻璃（与横屏实现不同，后续可按
   同样方式包）。
