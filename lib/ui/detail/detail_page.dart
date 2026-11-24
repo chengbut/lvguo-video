@@ -17,6 +17,7 @@ import '../widgets/cover_backdrop.dart';
 import '../widgets/cover_image.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/follow_button.dart';
+import '../widgets/liquid_glass.dart';
 import '../theme/motion.dart';
 import '../widgets/motion/motion_widgets.dart';
 import '../widgets/pull_refresh.dart';
@@ -417,20 +418,38 @@ class _DetailPageState extends State<DetailPage> {
       _groupTarget = null;
       pager.jumpToPage(group);
     }
+    // 新分段的页面要下一帧才建好，最多等 3 帧；拿到当前集的格子后
+    // 按全局坐标算出它相对纵向滚动视图的位置，直接滚过去（对齐到
+    // 可视区约 30% 处），并保持高亮。
+    _locateAfterFrames(3);
+  }
+
+  void _locateAfterFrames(int remaining) {
+    if (remaining <= 0 || !mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final target = _currentEpisode.currentContext;
-      if (target == null || !target.mounted) return;
-      final box = target.findRenderObject();
-      final position = Scrollable.maybeOf(
-        target,
-        axis: Axis.vertical,
-      )?.position;
+      if (target == null || !target.mounted) {
+        _locateAfterFrames(remaining - 1);
+        return;
+      }
+      final box = target.findRenderObject() as RenderBox?;
+      final position =
+          Scrollable.maybeOf(target, axis: Axis.vertical)?.position;
       if (box == null || position == null) return;
+      // 注意：不能直接调 position.ensureVisible——当前集格子最近的视口
+      // 是横向的选集 PageView，ensureVisible 会按横向视口算偏移，
+      // 纵向列表根本不会动（这就是之前点了没作用的原因）。这里按全局
+      // 坐标自己算纵向偏移。
+      final cellTop = box.localToGlobal(Offset.zero).dy;
+      final targetLine = MediaQuery.sizeOf(context).height * 0.3;
+      final offset = (position.pixels + cellTop - targetLine)
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
       unawaited(
-        position.ensureVisible(
-          box,
-          alignment: 0.3,
-          duration: const Duration(milliseconds: 180),
+        position.animateTo(
+          offset,
+          duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
         ),
       );
@@ -524,7 +543,9 @@ class _DetailPageState extends State<DetailPage> {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: _appBar(details, kToolbarHeight),
-      body: PullRefresh(
+      body: Stack(
+        children: [
+          PullRefresh(
         edgeOffset: top,
         onRefresh: _refresh,
         child: CustomScrollView(
@@ -614,7 +635,13 @@ class _DetailPageState extends State<DetailPage> {
                   ),
                 ),
               SliverPadding(
-                padding: const EdgeInsets.fromLTRB(0, 12, 0, 24),
+                padding: EdgeInsets.fromLTRB(
+                  0,
+                  12,
+                  0,
+                  // 底部悬浮胶囊条占的高度，最后一行选集能滑到胶囊上方。
+                  24 + capsuleBarClearance(context),
+                ),
                 sliver: SliverToBoxAdapter(
                   child: _swipeGroups(details, m, gutter: 20),
                 ),
@@ -623,29 +650,48 @@ class _DetailPageState extends State<DetailPage> {
           ],
         ),
       ),
-      bottomNavigationBar: Material(
-        color: Theme.of(context).colorScheme.surfaceContainerLow,
-        child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-            child: Row(
-              spacing: 12,
-              children: [
-                if (_canDownload)
-                  FocusRing(
-                    radius: m.button / 2,
-                    child: IconButton.filledTonal(
-                      tooltip: '下载选集',
-                      onPressed: _ready ? _download : null,
-                      style: IconButton.styleFrom(
-                        minimumSize: Size.square(m.button),
+          _phoneBottomBar(details, m),
+        ],
+      ),
+    );
+  }
+
+  // 手机端底部悬浮胶囊条：和主页底栏胶囊同一套方案（圆角胶囊、
+  // 悬浮在内容上方、左右留边），里面放下载 + 继续播放。材质用模拟
+  // 玻璃——这页底色是白的，原生玻璃在白底上会洗白没边。
+  Widget _phoneBottomBar(DramaDetails details, _Metrics m) {
+    return Positioned(
+      left: 16,
+      right: 16,
+      bottom: 10,
+      child: SafeArea(
+        top: false,
+        child: LiquidGlass(
+          borderRadius: BorderRadius.circular(32),
+          blur: 28,
+          tint: 0.85,
+          child: SizedBox(
+            height: 64,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Row(
+                spacing: 12,
+                children: [
+                  if (_canDownload)
+                    FocusRing(
+                      radius: m.button / 2,
+                      child: IconButton.filledTonal(
+                        tooltip: '下载选集',
+                        onPressed: _ready ? _download : null,
+                        style: IconButton.styleFrom(
+                          minimumSize: Size.square(m.button),
+                        ),
+                        icon: const Icon(Icons.download_rounded),
                       ),
-                      icon: const Icon(Icons.download_rounded),
                     ),
-                  ),
-                Expanded(child: _playButton(details, m)),
-              ],
+                  Expanded(child: _playButton(details, m)),
+                ],
+              ),
             ),
           ),
         ),
@@ -1520,7 +1566,7 @@ class _EpisodeCell extends StatelessWidget {
           ? FontWeight.w400
           : FontWeight.w600,
       color: current
-          ? colors.onPrimaryContainer
+          ? Colors.white
           : watched
           ? colors.onSurfaceVariant
           : colors.onSurface,
@@ -1533,10 +1579,18 @@ class _EpisodeCell extends StatelessWidget {
             '${named ? episode.label : '第 ${episode.number} 集'}'
             '${episode.vip ? '，VIP' : ''}',
         excludeSemantics: true,
-        child: Material(
-          color: current ? colors.primaryContainer : colors.surfaceContainer,
+        // 集数格子用模拟液态玻璃（白底页面，原生玻璃会洗白没边）；
+        // 当前集保持选中态：深底 + 白字，和胶囊选中态一个意思。
+        child: LiquidGlass(
           borderRadius: radius,
-          clipBehavior: Clip.antiAlias,
+          blur: 14,
+          tint: current ? 0 : 1.0,
+          child: Material(
+            color: current
+                ? Colors.black.withValues(alpha: .72)
+                : Colors.transparent,
+            borderRadius: radius,
+            clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: onPressed,
             child: Stack(
@@ -1578,6 +1632,7 @@ class _EpisodeCell extends StatelessWidget {
               ],
             ),
           ),
+        ),
         ),
       ),
     );
