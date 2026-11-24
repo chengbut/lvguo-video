@@ -373,34 +373,35 @@ class _AppShellState extends State<AppShell> {
       child: switch (AppScope.formFactorOf(context)) {
         FormFactor.phone => ShellBars(
           notifier: _barsShown,
-          child: Scaffold(
-            // 内容延伸到底栏下方：胶囊下方的区域是透明的，手指可穿透到底层列表滑动。
-            extendBody: true,
-            body: NotificationListener<ScrollNotification>(
-              onNotification: _scrolled,
-              child: pages,
-            ),
-            // 滑动时底栏不再消失；只有胶囊本身接手势，周围留白全部穿透到下层。
-            bottomNavigationBar: covered
-                ? null
-                : IgnorePointer(
-                    ignoring: true,
-                    child: SafeArea(
-                      top: false,
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                        child: IgnorePointer(
-                          ignoring: false,
-                          child: _CapsuleBar(
-                            tabs: phoneTabs,
-                            selected: _tab,
-                            onTap: _tap,
-                            badged: _badged,
-                          ),
-                        ),
-                      ),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: Scaffold(
+                  body: NotificationListener<ScrollNotification>(
+                    onNotification: _scrolled,
+                    child: pages,
+                  ),
+                ),
+              ),
+              // 胶囊栏悬浮在内容之上：它本身就是 Stack 里的一层，正常接
+              // 手势；胶囊之外的区域本来就是空的，手指直接穿透到底层列
+              // 表滑动。滑动时底栏不消失（不再用 HideOnScroll 包它）。
+              if (!covered)
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 10,
+                  child: SafeArea(
+                    top: false,
+                    child: _CapsuleBar(
+                      tabs: phoneTabs,
+                      selected: _tab,
+                      onTap: _tap,
+                      badged: _badged,
                     ),
                   ),
+                ),
+            ],
           ),
         ),
         FormFactor.pad || FormFactor.window => _wide(pages),
