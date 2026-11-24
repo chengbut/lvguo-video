@@ -100,6 +100,9 @@ import MediaPlayer
                 "pac": (settings["ProxyAutoConfigEnable"] as? NSNumber)?.boolValue == true])
       }
     }
+    if let glassRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "LvguoNativeGlass") {
+      glassRegistrar.register(NativeGlassViewFactory(messenger: glassRegistrar.messenger()), withId: "lvguo/native_glass")
+    }
   }
 }
 
@@ -216,5 +219,62 @@ final class MediaControls {
     resumeAfterInterruption = false
     let center = MPNowPlayingInfoCenter.default()
     center.nowPlayingInfo = nil
+  }
+}
+
+// MARK: - Native Liquid Glass (iOS 26+ UIGlassEffect, fallback UIBlurEffect)
+//
+// Dart 侧 AdaptiveGlass（lib/ui/widgets/native_glass.dart）通过 PlatformView
+// 嵌这个原生玻璃视图：iOS 26+ 用系统 UIGlassEffect，老系统用 UIBlurEffect。
+// 视图本身不接收手势（isUserInteractionEnabled = false），点击由上层 Flutter 处理。
+// 放在本文件而不是单独的 .swift 文件，是为了不改 Runner.xcodeproj 的
+// PBXBuildFile 列表（新文件要手工加进工程才会编译）。
+
+final class NativeGlassViewFactory: NSObject, FlutterPlatformViewFactory {
+  private let messenger: FlutterBinaryMessenger
+
+  init(messenger: FlutterBinaryMessenger) {
+    self.messenger = messenger
+  }
+
+  func create(
+    withFrame frame: CGRect,
+    viewIdentifier viewId: Int64,
+    arguments args: Any?
+  ) -> FlutterPlatformView {
+    let style = (args as? [String: Any])?["style"] as? String
+    return NativeGlassView(frame: frame, style: style ?? "regular")
+  }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    FlutterStandardMessageCodec.sharedInstance()
+  }
+}
+
+final class NativeGlassView: NSObject, FlutterPlatformView {
+  private let container: UIView
+
+  init(frame: CGRect, style: String) {
+    let container = UIView(frame: frame)
+    container.backgroundColor = .clear
+    container.isUserInteractionEnabled = false
+    container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    self.container = container
+    super.init()
+    let effectView: UIVisualEffectView
+    if #available(iOS 26.0, *) {
+      let glassStyle: UIGlassEffect.Style = style == "clear" ? .clear : .regular
+      effectView = UIVisualEffectView(effect: UIGlassEffect(style: glassStyle))
+    } else {
+      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+    }
+    effectView.frame = container.bounds
+    effectView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    effectView.isUserInteractionEnabled = false
+    container.addSubview(effectView)
+  }
+
+  func view() -> UIView {
+    container
   }
 }
