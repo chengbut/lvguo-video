@@ -520,9 +520,11 @@ class PlaybackSession extends ChangeNotifier {
           DateTime.now().difference(_standbyAt) > const Duration(minutes: 8)) {
         _dropStandby();
       }
+      // 提前到片尾前 90 秒开始准备下一集：解析地址与备播打开都有余量，
+      // 切集时直接换台，衔接更顺。
       if (_standbyIndex >= 0 ||
           duration <= 0 ||
-          duration - position > 45000 ||
+          duration - position > 90000 ||
           ahead < 3000) {
         return;
       }
@@ -533,7 +535,7 @@ class PlaybackSession extends ChangeNotifier {
       }
       if (duration <= 0 ||
           position < 2000 ||
-          (position < duration ~/ 2 && duration - position > 45000) ||
+          (position < duration ~/ 2 && duration - position > 90000) ||
           ahead < 5000) {
         return;
       }
@@ -791,42 +793,49 @@ class PlaybackSession extends ChangeNotifier {
       _ when Platform.isMacOS => 'auto-safe',
       _ => null,
     };
-    if (hwdec != null) await platform.setProperty('hwdec', hwdec);
+    // 各 mpv 参数互相独立，并行下发，缩短播放器打开耗时；不改解码与播放流程。
+    final pending = <Future<void>>[];
+    if (hwdec != null) pending.add(platform.setProperty('hwdec', hwdec));
     if (Platform.isAndroid) {
-      await platform.setProperty('hwdec-codecs', 'all');
-      await platform.setProperty('vd-lavc-skiploopfilter', 'nonkey');
-      await platform.setProperty('vd-lavc-threads', '4');
-      await platform.setProperty('vd-lavc-fast', 'yes');
-      await platform.setProperty('video-sync', 'audio');
-      await platform.setProperty('framedrop', 'vo');
-      await platform.setProperty(
-        'glsl-shaders',
-        decoder == TelevisionDecoder.hardwareSwapUv
-            ? await _swapChromaShader()
-            : '',
+      pending.add(platform.setProperty('hwdec-codecs', 'all'));
+      pending.add(platform.setProperty('vd-lavc-skiploopfilter', 'nonkey'));
+      pending.add(platform.setProperty('vd-lavc-threads', '4'));
+      pending.add(platform.setProperty('vd-lavc-fast', 'yes'));
+      pending.add(platform.setProperty('video-sync', 'audio'));
+      pending.add(platform.setProperty('framedrop', 'vo'));
+      pending.add(
+        platform.setProperty(
+          'glsl-shaders',
+          decoder == TelevisionDecoder.hardwareSwapUv
+              ? await _swapChromaShader()
+              : '',
+        ),
       );
     }
-    await platform.setProperty(
-      'demuxer-lavf-o',
-      [
-        'seg_max_retry=3',
-        'strict=experimental',
-        'allowed_extensions=ALL',
-        plan.local
-            ? 'protocol_whitelist=[file,crypto,data]'
-            : 'protocol_whitelist=[http,https,tcp,tls,crypto,data,file]',
-        if (plan.decryptionKey.isNotEmpty)
-          'decryption_key=${plan.decryptionKey}',
-      ].join(','),
+    pending.add(
+      platform.setProperty(
+        'demuxer-lavf-o',
+        [
+          'seg_max_retry=3',
+          'strict=experimental',
+          'allowed_extensions=ALL',
+          plan.local
+              ? 'protocol_whitelist=[file,crypto,data]'
+              : 'protocol_whitelist=[http,https,tcp,tls,crypto,data,file]',
+          if (plan.decryptionKey.isNotEmpty)
+            'decryption_key=${plan.decryptionKey}',
+        ].join(','),
+      ),
     );
-    await platform.setProperty('network-timeout', '20');
+    pending.add(platform.setProperty('network-timeout', '20'));
     // 预读与缓存：多向前读 10 秒、缓存 30 秒，弱网起播更快、拖动后更少转圈。
     // 只调 mpv 缓冲参数，不改解码与播放流程。
-    await platform.setProperty('demuxer-readahead-secs', '10');
-    await platform.setProperty('cache-secs', '30');
+    pending.add(platform.setProperty('demuxer-readahead-secs', '10'));
+    pending.add(platform.setProperty('cache-secs', '30'));
     if (Platform.isIOS) {
-      await platform.setProperty('vid', _videoHidden ? 'no' : 'auto');
+      pending.add(platform.setProperty('vid', _videoHidden ? 'no' : 'auto'));
     }
+    await Future.wait(pending);
   }
 
   Future<void> play(
