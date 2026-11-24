@@ -237,6 +237,50 @@ class SettingsSection extends StatelessWidget {
             ),
         ],
       ),
+      SettingsCard(
+        children: [
+          ValueTile<int>(
+            title: '跳过片头',
+            subtitle: '每集开播时自动跳过片头',
+            options: const {0: '关闭', 5: '5 秒', 10: '10 秒', 15: '15 秒', 30: '30 秒'},
+            value: preferences.skipIntroSeconds,
+            onChanged: (seconds) => savePreferences(
+              preferences.copyWith(skipIntroSeconds: seconds),
+            ),
+          ),
+          ValueTile<int>(
+            title: '跳过片尾',
+            subtitle: '播到片尾前自动切下一集',
+            options: const {
+              0: '关闭',
+              10: '10 秒',
+              30: '30 秒',
+              60: '60 秒',
+              90: '90 秒',
+            },
+            value: preferences.skipOutroSeconds,
+            onChanged: (seconds) => savePreferences(
+              preferences.copyWith(skipOutroSeconds: seconds),
+            ),
+          ),
+          SwitchTile(
+            title: '播放时保持屏幕常亮',
+            subtitle: '播放中禁止自动熄屏，退出播放后恢复',
+            value: preferences.keepScreenAwake,
+            onChanged: (value) => savePreferences(
+              preferences.copyWith(keepScreenAwake: value),
+            ),
+          ),
+          SwitchTile(
+            title: '记录观看历史',
+            subtitle: '关闭后不再保存观看进度与历史',
+            value: preferences.recordHistory,
+            onChanged: (value) => savePreferences(
+              preferences.copyWith(recordHistory: value),
+            ),
+          ),
+        ],
+      ),
       if ((Platform.isAndroid || Platform.isIOS) && !television)
         SettingsCard(
           children: [
