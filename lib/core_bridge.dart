@@ -860,12 +860,8 @@ class NativeRepository extends AppRepository {
 
   @override
   Future<ModuleStore> moduleIndex() async {
-    _adminPermission();
-    final result = await _call({'action': 'moduleIndex'});
-    return ModuleStore([
-      for (final row in result['items'] as List? ?? const [])
-        ModuleIndexEntry.fromJson(Map<String, dynamic>.from(row as Map)),
-    ], warning: result['warning'] as String? ?? '');
+    // 在线仓库已移除：不再从网络拉取模块索引。
+    throw AppFailure('在线仓库已移除');
   }
 
   @override
