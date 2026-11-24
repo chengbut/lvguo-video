@@ -77,6 +77,8 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   bool _selecting = false;
   bool _holding = false;
   bool _dragging = false;
+  // 横版竖屏态视频区上下滑切集累计的纵向位移（SwipeControls 同款 60px 阈值）。
+  double _episodeDragOffset = 0;
   double? _seekValue;
   double? _seekTarget;
   int _streak = 0;
@@ -344,6 +346,19 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     setState(() => _holding = false);
   }
 
+  // 横版竖屏态：视频区域上下滑切集（和竖屏页方向一致：上滑下一集，
+  // 下滑上一集），走现有的 next()/previous()（预加载那套）。
+  void _episodeDragEnd() {
+    const threshold = 60.0;
+    final offset = _episodeDragOffset;
+    _episodeDragOffset = 0;
+    if (offset < -threshold) {
+      unawaited(_session.next());
+    } else if (offset > threshold) {
+      unawaited(_session.previous());
+    }
+  }
+
   void _rotate(bool full) => unawaited(
     desktopPlatform
         ? setWindowFullScreen(!full)
@@ -579,6 +594,21 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
               onLongPressStart: locked ? null : (_) => _pressStart(),
               onLongPressEnd: locked ? null : (_) => _pressEnd(),
               onLongPressCancel: locked ? null : _pressEnd,
+              // 只在横版竖屏态的视频区上下滑切集：全屏态仍走 SwipeControls
+              //（按亮度/音量或换集偏好），锁定态不响应。选集网格是视频
+              // 下方的独立区域，滑它仍是滚动列表，不会走到这里。
+              onVerticalDragStart: !full && !locked
+                  ? (_) => _episodeDragOffset = 0
+                  : null,
+              onVerticalDragUpdate: !full && !locked
+                  ? (details) => _episodeDragOffset += details.delta.dy
+                  : null,
+              onVerticalDragEnd: !full && !locked
+                  ? (_) => _episodeDragEnd()
+                  : null,
+              onVerticalDragCancel: !full && !locked
+                  ? () => _episodeDragOffset = 0
+                  : null,
             ),
           ),
         ),
@@ -1096,7 +1126,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
         padding: EdgeInsets.zero,
         activeTrackColor: colors.primary,
         thumbColor: colors.primary,
-        inactiveTrackColor: Colors.white.withValues(alpha: .25),
+        // 未播的背景条透明：只留已播的线、缓冲的淡白线和拇指，
+        // 已播/未播靠线本身分得清。
+        inactiveTrackColor: Colors.transparent,
         secondaryActiveTrackColor: Colors.white.withValues(alpha: .4),
         thumbShape: RoundSliderThumbShape(enabledThumbRadius: thumb),
         overlayShape: SliderComponentShape.noOverlay,
@@ -1155,7 +1187,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
         value: duration > 0 ? state.position.inMilliseconds / duration : 0,
         minHeight: 2,
         color: Theme.of(context).colorScheme.primary,
-        backgroundColor: Colors.white.withValues(alpha: .2),
+        backgroundColor: Colors.transparent,
       );
     },
   );
