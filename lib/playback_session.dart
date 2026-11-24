@@ -820,6 +820,10 @@ class PlaybackSession extends ChangeNotifier {
       ].join(','),
     );
     await platform.setProperty('network-timeout', '20');
+    // 预读与缓存：多向前读 10 秒、缓存 30 秒，弱网起播更快、拖动后更少转圈。
+    // 只调 mpv 缓冲参数，不改解码与播放流程。
+    await platform.setProperty('demuxer-readahead-secs', '10');
+    await platform.setProperty('cache-secs', '30');
     if (Platform.isIOS) {
       await platform.setProperty('vid', _videoHidden ? 'no' : 'auto');
     }
@@ -1268,6 +1272,13 @@ class PlaybackSession extends ChangeNotifier {
 
   Future<bool> seekTo(Duration target) async {
     if (!_usable || !ready) return false;
+    // 目标钳制到片长内：越界 seek 会让部分站源卡住不动。
+    final duration = player.state.duration;
+    if (duration > Duration.zero) {
+      target = Duration(
+        milliseconds: target.inMilliseconds.clamp(0, duration.inMilliseconds),
+      );
+    }
     _cancelResumeWatchdog();
     final ticket = ++_seekSequence;
     final generation = _generation;
