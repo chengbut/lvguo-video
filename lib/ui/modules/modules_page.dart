@@ -13,8 +13,6 @@ import '../../source_modules.dart';
 import '../app_scope.dart';
 import '../settings/settings_rows.dart';
 import 'module_install.dart';
-import '../settings/sorani_account_view.dart';
-import '../widgets/bar_button.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/form_text_field.dart';
 import '../widgets/group_card.dart';
@@ -26,13 +24,6 @@ class ModulesPage extends StatefulWidget {
   @override
   State<ModulesPage> createState() => _ModulesPageState();
 }
-
-ModuleIndexEntry? _updateFor(SourceModule module, ModuleIndexEntry? entry) =>
-    entry != null &&
-        module.error.isEmpty &&
-        isNewerModuleVersion(entry.version, module.version)
-    ? entry
-    : null;
 
 Map<String, String> _missingSources(
   LocalStore store,
@@ -58,7 +49,7 @@ List<SourceModule> _arranged(List<SourceModule> modules, List<String> order) {
   return [for (final id in order) ?byId.remove(id), ...byId.values];
 }
 
-const _tabLabels = ['已安装', '在线仓库', '内置', '手动'];
+const _tabLabels = ['已安装', '手动'];
 
 class _ModulesPageState extends State<ModulesPage>
     with SingleTickerProviderStateMixin {
@@ -67,8 +58,6 @@ class _ModulesPageState extends State<ModulesPage>
   List<SourceModule>? _modules;
   List<String>? _moving;
   String? _error;
-  ModuleStore? _index;
-  String? _indexError;
   bool _busy = false;
   final _groupsScope = FocusScopeNode(
     debugLabel: 'modules-groups',
@@ -92,7 +81,6 @@ class _ModulesPageState extends State<ModulesPage>
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _refresh();
-      _loadIndex();
     });
   }
 
@@ -125,19 +113,6 @@ class _ModulesPageState extends State<ModulesPage>
     }
   }
 
-  Future<void> _loadIndex() async {
-    setState(() {
-      _index = null;
-      _indexError = null;
-    });
-    try {
-      final index = await _repository.moduleIndex();
-      if (mounted) setState(() => _index = index);
-    } catch (failure) {
-      if (mounted) setState(() => _indexError = '$failure');
-    }
-  }
-
   void _show(String message) {
     if (mounted) {
       ScaffoldMessenger.of(
@@ -159,15 +134,6 @@ class _ModulesPageState extends State<ModulesPage>
     }
   }
 
-  Future<void> _installIndexed(ModuleIndexEntry entry) => _run(
-    () async => _install(
-      await _repository.prepareModule(
-        indexed: entry.id,
-        bundled: entry.bundled,
-      ),
-    ),
-  );
-
   Future<void> _install(SourceModule module) async {
     if (!mounted) return;
     final accepted = await showDialog<bool>(
@@ -180,22 +146,6 @@ class _ModulesPageState extends State<ModulesPage>
 
   Future<String?> _applyInstall(SourceModule module) =>
       applyModuleInstall(_repository, _store, module);
-
-  Future<void> _installAll(List<ModuleIndexEntry> entries) async {
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (_) => BatchInstallDialog(
-        entries: entries,
-        title: '安装 ${entries.length} 个站源？',
-        message: '这些站源会逐个安装并启用。',
-      ),
-    );
-    if (accepted != true) return;
-    await _run(
-      () async =>
-          _show(await installIndexedModules(_repository, _store, entries)),
-    );
-  }
 
   Future<void> _installFile() => _run(() async {
     final file = await FilePicker.pickFile(
@@ -304,12 +254,7 @@ class _ModulesPageState extends State<ModulesPage>
               enabled: _store.sourceEnabled(module.id),
               onToggle: _toggleFor(module),
               admin: _store.profile.admin,
-              onUpdate: update != null && enabled
-                  ? () {
-                      Navigator.pop(menu);
-                      _installIndexed(update);
-                    }
-                  : null,
+              onUpdate: null,
               onUninstall: enabled
                   ? () async {
                       if (!await _confirmUninstall(module) || !menu.mounted) {
@@ -381,24 +326,16 @@ class _ModulesPageState extends State<ModulesPage>
       null => null,
     };
     final enabled = _canInstall;
-    final latest = <String, ModuleIndexEntry>{};
-    for (final entry in _index?.entries ?? const <ModuleIndexEntry>[]) {
-      final current = latest[entry.id];
-      if (current == null ||
-          isNewerModuleVersion(entry.version, current.version)) {
-        latest[entry.id] = entry;
-      }
-    }
     Widget card(SourceModule module) => _InstalledCard(
       module: module,
-      update: _updateFor(module, latest[module.id]),
+      update: null,
       enabled: _store.sourceEnabled(module.id),
       onToggle: _toggleFor(module),
       admin: _store.profile.admin,
       onDetails: AppScope.of(context).television
-          ? () => _menu(module, _updateFor(module, latest[module.id]))
+          ? () => _menu(module, null)
           : () => _details(module),
-      onUpdate: enabled ? () => _installIndexed(latest[module.id]!) : null,
+      onUpdate: null,
       onUninstall: enabled ? () => _uninstall(module) : null,
     );
     final header = [if (_error case final error?) _Note(error)];
@@ -414,59 +351,9 @@ class _ModulesPageState extends State<ModulesPage>
       if (modules == null && _error == null)
         const _Loading()
       else if (modules != null && modules.isEmpty)
-        const _Note('还没有安装模块。站源以模块的形式提供，可以从在线仓库、内置或手动安装。')
+        const _Note('还没有安装模块。站源以模块的形式提供，可以手动安装（选择本地文件或输入下载地址）。')
       else if (modules != null)
         for (final module in modules) card(module),
-    ]);
-  }
-
-  Widget _catalogTab({required bool bundled}) {
-    final enabled = _canInstall;
-    final installed = {for (final module in _modules ?? const []) module.id};
-    final missing = _missingSources(_store, _repository);
-    final warning = bundled ? '' : _index?.warning ?? '';
-    final listed = [
-      for (final entry in _index?.entries ?? const <ModuleIndexEntry>[])
-        if (entry.bundled == bundled) entry,
-    ];
-    final entries =
-        [
-          for (final entry in listed)
-            if (!installed.contains(entry.id)) entry,
-        ]..sort(
-          (a, b) => (missing.containsKey(a.id) ? 0 : 1).compareTo(
-            missing.containsKey(b.id) ? 0 : 1,
-          ),
-        );
-    return _list([
-      if (warning.isNotEmpty) _Note(warning),
-      if (!bundled && entries.isNotEmpty)
-        SettingsCard(
-          children: [
-            SettingsTile(
-              icon: Icons.download_rounded,
-              title: '安装全部站源',
-              subtitle: '在线仓库里还有 ${entries.length} 个未安装',
-              enabled: enabled,
-              onTap: enabled ? () => _installAll(entries) : null,
-            ),
-          ],
-        ),
-      if (_indexError ?? _error case final error?)
-        _Note(error)
-      else if (_index == null || _modules == null)
-        const _Loading()
-      else if (listed.isEmpty && warning.isEmpty)
-        _Note(bundled ? '这个安装包没有内置模块。' : '仓库里还没有模块。')
-      else if (entries.isEmpty && listed.isNotEmpty)
-        _Note(bundled ? '内置模块都已安装。' : '仓库里的模块都已安装。')
-      else
-        for (final entry in entries)
-          _IndexCard(
-            entry: entry,
-            records: missing[entry.id],
-            onInstall: enabled ? () => _installIndexed(entry) : null,
-          ),
     ]);
   }
 
@@ -494,14 +381,6 @@ class _ModulesPageState extends State<ModulesPage>
     ]);
   }
 
-  Widget? _refreshButton() => _tabs.index == 1
-      ? BarButton(
-          icon: Icons.refresh_rounded,
-          tooltip: '刷新',
-          onPressed: _index == null && _indexError == null ? null : _loadIndex,
-        )
-      : null;
-
   Widget _tabBar() => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 4),
     child: TabBar(
@@ -523,12 +402,7 @@ class _ModulesPageState extends State<ModulesPage>
       Expanded(
         child: TabBarView(
           controller: _tabs,
-          children: [
-            _installedTab(),
-            _catalogTab(bundled: false),
-            _catalogTab(bundled: true),
-            _manualTab(),
-          ],
+          children: [_installedTab(), _manualTab()],
         ),
       ),
     ],
@@ -536,8 +410,6 @@ class _ModulesPageState extends State<ModulesPage>
 
   Widget _content() => switch (_tabs.index) {
     0 => _installedTab(),
-    1 => _catalogTab(bundled: false),
-    2 => _catalogTab(bundled: true),
     _ => _manualTab(),
   };
 
@@ -646,7 +518,6 @@ class _ModulesPageState extends State<ModulesPage>
                   ),
                 ),
               ),
-              ?_refreshButton(),
             ],
           ),
         ),
@@ -701,7 +572,7 @@ class _ModulesPageState extends State<ModulesPage>
         : Scaffold(
             appBar: AppBar(
               title: const Text('模块'),
-              actions: [?_refreshButton(), const SizedBox(width: 8)],
+              actions: const [SizedBox(width: 8)],
               bottom: PreferredSize(
                 preferredSize: const Size.fromHeight(48),
                 child: _tabBar(),
@@ -894,10 +765,7 @@ class _InstalledCard extends StatelessWidget {
               child: Switch(value: enabled, onChanged: onToggle),
             ),
       onTap: onDetails,
-      leading: [
-        if (!television && module.id == 'sorani' && soraniAccountAvailable())
-          SoraniAccountButton(admin: admin, style: _cardButton(colors)),
-      ],
+      leading: const [],
       actions: television
           ? const []
           : [
@@ -1301,8 +1169,6 @@ class _ModuleMenu extends StatelessWidget {
         ],
       ),
       actions: [
-        if (module.id == 'sorani' && soraniAccountAvailable())
-          SoraniAccountButton(admin: admin),
         if (update != null)
           FocusRing(
             radius: 20,
