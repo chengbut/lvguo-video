@@ -265,7 +265,7 @@ class _FollowPageState extends State<FollowPage> {
     if (view.sources.length < 2) return null;
     final chips = [
       _sourceChip('', '全部', view),
-      for (final site in view.sources) _sourceChip(site.id, site.name, view),
+      for (final site in view.sources) _sourceChip(site.id, site.displayName, view),
     ];
     if (scroll) {
       return SingleChildScrollView(
@@ -630,7 +630,7 @@ class _FollowPageState extends State<FollowPage> {
       focusNode: focusNode,
       progress: watch != null && total > 0 ? watch.episode / total : 0,
       caption: caption,
-      tag: SourceSite.byId(drama.source).name,
+      tag: SourceSite.byId(drama.source).displayName,
       badge: state != null && state.hasUpdates
           ? '${state.newEpisodes} 集更新'
           : null,
