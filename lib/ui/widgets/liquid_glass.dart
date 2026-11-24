@@ -24,6 +24,7 @@ class LiquidGlass extends StatelessWidget {
   final double blur;
   final EdgeInsetsGeometry? padding;
   final EdgeInsetsGeometry? margin;
+  final double tint;
 
   /// 玻璃底色的浓度：1 为默认，0 为完全透明（只留实时模糊 + 细边框，
   /// 后面的内容直接透出来）。
