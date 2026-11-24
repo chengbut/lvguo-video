@@ -5,6 +5,7 @@ import 'dart:ui' show Size;
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'core_bridge.dart';
 import 'danmaku_controller.dart';
@@ -108,6 +109,8 @@ class PlaybackSession extends ChangeNotifier {
     store.addListener(_syncDanmakuOptions);
     store.addListener(_syncMedia);
     _bind();
+    // 播放时保持屏幕常亮（默认开）；会话结束时恢复。
+    if (preferences.keepScreenAwake) unawaited(WakelockPlus.enable());
     _saveTimer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => saveProgress(quiet: true),
@@ -149,6 +152,7 @@ class PlaybackSession extends ChangeNotifier {
           if (position >= const Duration(seconds: 2)) {
             unawaited(_logVideoOutput(player.state.videoParams));
           }
+          _maybeSkipOutro();
         }
         _sync();
       }),
@@ -273,6 +277,8 @@ class PlaybackSession extends ChangeNotifier {
   bool _staleAudio = false;
   bool _audioDetected = false;
   bool _stalled = false;
+  // 本集片尾跳过已触发过一次，避免重复切集。
+  bool _outroSkipped = false;
   String _loadingMessage = '正在准备播放';
   String? _error;
   String? _saveWarning;
@@ -560,6 +566,26 @@ class PlaybackSession extends ChangeNotifier {
       'error_target=${_diagnosticPlaybackTarget(target)} plan_target=$planned',
     );
     _queueRecovery('player_error');
+  }
+
+  // 跳过片尾：播到片尾前指定秒数时自动切下一集；每集只触发一次。
+  void _maybeSkipOutro() {
+    final skip = store.playbackPreferences.skipOutroSeconds;
+    if (skip <= 0 ||
+        _outroSkipped ||
+        _loading ||
+        !_playIntent ||
+        !_foreground ||
+        _sleepAtEpisodeEnd ||
+        !hasNext) {
+      return;
+    }
+    final duration = player.state.duration;
+    if (duration <= Duration.zero) return;
+    if (duration - player.state.position > Duration(seconds: skip)) return;
+    _outroSkipped = true;
+    DiaryService.add('[Play] 片尾前 $skip 秒，自动切下一集');
+    unawaited(next());
   }
 
   void _completed(bool completed) {
@@ -878,8 +904,13 @@ class PlaybackSession extends ChangeNotifier {
       _recovery.reset();
       _playIntent = playWhenReady;
     }
-    _resumePosition = position;
-    _openedAt = position;
+    // 跳过片头：从头播或续播点还在片头内时，直接从片头后开始。
+    final skipIntro = store.playbackPreferences.skipIntroSeconds;
+    final startPosition = skipIntro > 0 && position < skipIntro
+        ? skipIntro.toDouble()
+        : position;
+    _resumePosition = startPosition;
+    _openedAt = startPosition;
     _index = index;
     _loading = true;
     _error = null;
@@ -938,14 +969,15 @@ class PlaybackSession extends ChangeNotifier {
           Media(
             plan.url,
             httpHeaders: plan.headers,
-            start: position > 0
-                ? Duration(milliseconds: (position * 1000).round())
+            start: startPosition > 0
+                ? Duration(milliseconds: (startPosition * 1000).round())
                 : null,
           ),
           play: _foreground && _playIntent,
         );
         if (!_current(ticket)) return;
         _openedIndex = index;
+        _outroSkipped = false;
         _health.reset();
         await _setRate(_rate);
         if (!_current(ticket)) return;
@@ -1011,6 +1043,7 @@ class PlaybackSession extends ChangeNotifier {
     _plan = plan;
     _bind();
     _openedIndex = index;
+    _outroSkipped = false;
     _acceptErrors = true;
     final stopping = previous.stop().catchError((Object _) {});
     if (previousPlan != null) unawaited(_release(previousPlan.session));
@@ -1024,6 +1057,11 @@ class PlaybackSession extends ChangeNotifier {
       await stopping;
       await _selectAudio(next, true);
       if (_current(ticket) && _foreground && _playIntent) await next.play();
+      // 预开的下一集从头开始播，同样跳过片头。
+      final skipIntro = store.playbackPreferences.skipIntroSeconds;
+      if (_current(ticket) && skipIntro > 0) {
+        unawaited(next.seek(Duration(seconds: skipIntro)).catchError((Object _) {}));
+      }
     } catch (_) {
       if (_current(ticket)) _queueRecovery('open_exception');
     }
@@ -1641,6 +1679,7 @@ class PlaybackSession extends ChangeNotifier {
 
   @override
   void dispose() {
+    unawaited(WakelockPlus.disable());
     unawaited(saveProgress());
     _closed = true;
     _generation++;
