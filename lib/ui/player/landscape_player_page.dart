@@ -17,7 +17,7 @@ import '../theme/app_theme.dart';
 import '../theme/motion.dart';
 import '../widgets/contained_slider.dart';
 import '../widgets/motion/motion_widgets.dart';
-import '../widgets/native_glass.dart';
+import '../widgets/liquid_glass.dart';
 import 'cast_page.dart';
 import 'danmaku_overlay.dart';
 import '../widgets/follow_button.dart';
@@ -718,11 +718,12 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                                 ),
                               ),
                               // 底部三合一控制块：控制行 + 进度行 + 选集行并进一个
-                              // 液态玻璃块，各自行手势互不干扰。清屏时整块淡出
-                              //（仍占位，布局不跳）；选集展开时控制行隐藏，进度行
-                              // 和选集行留着（选集行是收起开关）；锁定时不响应。
-                              // 展开时进度/选集行常驻（不管播控显隐），锁定后也留着
-                              // 仅显示进度和当前集。
+                              // 液态玻璃块，各自行手势互不干扰。清屏时控制行 +
+                              // 进度行收缩进选集条（300ms，块高跟着收、视频区
+                              // 变大），选集条常驻不消失；点按唤出时再展开回来。
+                              // 选集展开时控制行隐藏，进度行和选集行留着（选集行
+                              // 是收起开关）；锁定时不响应。展开时进度/选集行常驻
+                              //（不管播控显隐），锁定后也留着仅显示进度和当前集。
                               SafeArea(
                                 top: false,
                                 child: Padding(
@@ -733,23 +734,10 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                                     12,
                                   ),
                                   child: IgnorePointer(
-                                    ignoring:
-                                        locked ||
-                                        (!controlsVisible && !expanded),
-                                    child: AnimatedOpacity(
-                                      opacity:
-                                          controlsVisible ||
-                                                  expanded ||
-                                                  locked
-                                              ? 1
-                                              : 0,
-                                      duration: const Duration(
-                                        milliseconds: 180,
-                                      ),
-                                      child: Listener(
-                                        onPointerDown: (_) => _scheduleHide(),
-                                        child: _controlBlock(context),
-                                      ),
+                                    ignoring: locked,
+                                    child: Listener(
+                                      onPointerDown: (_) => _scheduleHide(),
+                                      child: _controlBlock(context),
                                     ),
                                   ),
                                 ),
@@ -1014,41 +1002,65 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   Widget _controlBlock(BuildContext context) {
     final session = _session;
     final expanded = _episodesExpanded || _selecting;
-    return AdaptiveGlass(
+    final locked = session.locked;
+    // 清屏时控制行 + 进度行收缩进选集条（高度 + 透明度，300ms，
+    // 向底部收），选集条本身常驻；选集展开或锁定时不收。
+    // 顶栏不参与收缩，仍是原来的淡入淡出。
+    final collapsed = !locked && !_visible && !_pinned && !expanded;
+    return LiquidGlass(
       borderRadius: BorderRadius.circular(20),
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 控制行：暂停、时间、弹幕、全屏；选集展开时隐藏。
-          // 行内按钮不套玻璃圈（块本身就是玻璃），只留白图标。
-          if (!expanded)
-            SizedBox(
-              height: 40,
-              child: Row(
-                children: [
-                  _playButton(size: 40, iconSize: 26, glass: false),
-                  const SizedBox(width: 8),
-                  _clock(13),
-                  const Spacer(),
-                  if (session.danmakuSupported)
-                    _danmakuButton(context, glass: false),
-                  const SizedBox(width: 4),
-                  _icon(
-                    Icons.fullscreen_rounded,
-                    '全屏',
-                    widget.onFullscreen ?? () => _rotate(false),
-                    size: 40,
-                    glass: false,
-                  ),
-                ],
+          // 控制行 + 进度行：一起收进选集条（向底部收，300ms）。
+          // 选集展开时控制行隐藏（老行为），进度行留着。
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(end: collapsed ? 0 : 1),
+            duration: Motion.of(context, Motion.long),
+            curve: Motion.standard,
+            builder: (context, factor, child) => ClipRect(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                heightFactor: factor,
+                child: Opacity(opacity: factor, child: child),
               ),
             ),
-          // 进度行：可拖动的进度条；受 progressLine 开关控制。
-          // PlaybackProgressBuilder 的 active: true 保证清屏时进度仍在走。
-          if (session.store.playbackPreferences.progressLine)
-            _bottomProgress(),
-          // 选集行：点开展开/收起选集网格。
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 控制行：暂停、时间、弹幕、全屏；选集展开时隐藏。
+                // 行内按钮不套玻璃圈（块本身就是玻璃），只留白图标。
+                if (!expanded)
+                  SizedBox(
+                    height: 40,
+                    child: Row(
+                      children: [
+                        _playButton(size: 40, iconSize: 26, glass: false),
+                        const SizedBox(width: 8),
+                        _clock(13),
+                        const Spacer(),
+                        if (session.danmakuSupported)
+                          _danmakuButton(context, glass: false),
+                        const SizedBox(width: 4),
+                        _icon(
+                          Icons.fullscreen_rounded,
+                          '全屏',
+                          widget.onFullscreen ?? () => _rotate(false),
+                          size: 40,
+                          glass: false,
+                        ),
+                      ],
+                    ),
+                  ),
+                // 进度行：可拖动的进度条；受 progressLine 开关控制。
+                // PlaybackProgressBuilder 的 active: true 保证清屏时进度仍在走。
+                if (session.store.playbackPreferences.progressLine)
+                  _bottomProgress(),
+              ],
+            ),
+          ),
+          // 选集行：常驻；点开展开/收起选集网格。
           _episodeBar(context, session.detail.episodes.length, expanded),
         ],
       ),
@@ -1295,7 +1307,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
   }
 
-  // 浮在视频上的圆钮：原生玻璃（.clear、无额外白边，和顶栏同款）。
+  // 浮在视频上的圆钮：模拟玻璃（和顶栏同款）。
   // 竖屏底块里 glass: false，不套圈只留白图标（块本身就是玻璃）。
   Widget _icon(
     IconData icon,
@@ -1319,11 +1331,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       ),
     );
     if (!glass) return button;
-    return AdaptiveGlass(
+    return LiquidGlass(
       borderRadius: BorderRadius.circular(size / 2),
       blur: 14,
-      style: NativeGlassStyle.clear,
-      showBorder: false,
       child: button,
     );
   }
@@ -1735,17 +1745,19 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
         ? ''
         : '第${session.episode.number}集';
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+      // 左边距 12：返回钮不再贴着屏幕边缘（之前 4pt + 透明 clear 玻璃，
+      // 黑底上看着像被左边缘切掉一半）；和集数文字留 8pt 间距。
+      padding: const EdgeInsets.symmetric(horizontal: 12),
       child: SizedBox(
         height: 48,
         child: Row(
           children: [
-            AdaptiveGlassIconButton(
+            LiquidGlassIconButton(
               onPressed: () => unawaited(Navigator.maybePop(context)),
               tooltip: '返回',
               child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
             ),
-            const SizedBox(width: 2),
+            const SizedBox(width: 8),
             Text(
               episodeLabel,
               style: const TextStyle(
@@ -1756,7 +1768,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
             ),
             const Spacer(),
             if (widget.onMiniWindow case final onMiniWindow?)
-              AdaptiveGlassIconButton(
+              LiquidGlassIconButton(
                 onPressed: onMiniWindow,
                 tooltip: '小窗',
                 child: const Icon(
@@ -1765,7 +1777,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                 ),
               ),
             const SizedBox(width: 8),
-            AdaptiveGlassIconButton(
+            LiquidGlassIconButton(
               onPressed: _openSettings,
               tooltip: '播放设置',
               child: const Icon(Icons.settings_rounded, color: Colors.white),
