@@ -47,9 +47,11 @@ class SourceBar extends StatelessWidget {
       onPressed: onOpenSearch,
     );
     return switch (form) {
+      // 手机顶栏不显示切换站源按钮（已删）；手机端改由底栏“模块”页切源——
+      // 每行已开启的站源有“设为当前”按钮，点一下就切过去（见 modules_page）。
       FormFactor.phone => PageHeader(
         title: source,
-        actions: [...leading, switcher, search, ...actions],
+        actions: [...leading, search, ...actions],
       ),
       FormFactor.pad || FormFactor.window => PageHeader(
         title: source,
