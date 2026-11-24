@@ -1,0 +1,60 @@
+# Build 绿果视频 Android APK
+#
+# Standalone workflow: no secrets, no private-module checkout, no release
+# gating. Builds the Flutter app on an Ubuntu runner and uploads the
+# release APK as an artifact.
+#
+# The app ships WITHOUT a bundled source module in this build (upstream CI
+# bundles the private hongguo module). After installing, add sources from
+# the in-app module store (manual install: local file or download URL).
+
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lvguo-android-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode binary assets
+        # Binary assets (PNG icons, emoji, .ico) are stored as base64 text
+        # (*.b64) because the push route used for this repo only accepts
+        # UTF-8 files. Restore them before building.
+        run: python3 scripts/decode_assets.py
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lvguo-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
