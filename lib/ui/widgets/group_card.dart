@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 
 import 'focus_ring.dart';
-import 'native_glass.dart';
+import 'liquid_glass.dart';
 
 class GroupCard extends StatelessWidget {
   const GroupCard({super.key, required this.children});
   final List<Widget> children;
 
   @override
-  Widget build(BuildContext context) => AdaptiveGlass(
+  Widget build(BuildContext context) => LiquidGlass(
     borderRadius: BorderRadius.circular(20),
     blur: 16,
     // 保留透明 Material：里面的 ListTile 需要 Material 祖先才有按压反馈。
