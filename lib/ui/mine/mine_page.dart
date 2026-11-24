@@ -14,9 +14,11 @@ import '../modules/modules_page.dart';
 import '../shell/app_shell.dart';
 import '../settings/settings_page.dart';
 import '../widgets/drama_tile.dart';
+import '../widgets/fade_in.dart';
 import '../widgets/focus_ring.dart';
-import '../widgets/page_header.dart';
 import '../widgets/group_card.dart';
+import '../widgets/liquid_glass.dart';
+import '../widgets/page_header.dart';
 
 class MinePage extends StatelessWidget {
   const MinePage({
@@ -36,16 +38,18 @@ class MinePage extends StatelessWidget {
   final VoidCallback onExitUp;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: SafeArea(
-      bottom: false,
-      child: ListenableBuilder(
-        listenable: store,
-        builder: (context, _) => switch (AppScope.formFactorOf(context)) {
-          FormFactor.phone => _phone(context),
-          FormFactor.pad || FormFactor.window => _wide(context),
-          FormFactor.television => _television(context),
-        },
+  Widget build(BuildContext context) => FadeInOnce(
+    child: Scaffold(
+      body: SafeArea(
+        bottom: false,
+        child: ListenableBuilder(
+          listenable: store,
+          builder: (context, _) => switch (AppScope.formFactorOf(context)) {
+            FormFactor.phone => _phone(context),
+            FormFactor.pad || FormFactor.window => _wide(context),
+            FormFactor.television => _television(context),
+          },
+        ),
       ),
     ),
   );
@@ -81,12 +85,11 @@ class MinePage extends StatelessWidget {
           title: '下载',
           onTap: () => _openDownloads(context),
         ),
-      if (store.profile.admin)
-        _Entry(
-          icon: Icons.extension_outlined,
-          title: '模块',
-          onTap: () => _openModules(context),
-        ),
+      _Entry(
+        icon: Icons.extension_outlined,
+        title: '模块',
+        onTap: () => _openModules(context),
+      ),
       _Entry(
         icon: Icons.settings_outlined,
         title: '设置',
@@ -292,15 +295,14 @@ class MinePage extends StatelessWidget {
                 Row(
                   spacing: 20,
                   children: [
-                    if (store.profile.admin)
-                      Expanded(
-                        child: _TelevisionEntry(
-                          icon: Icons.extension_outlined,
-                          title: '模块',
-                          subtitle: '安装与管理站源模块',
-                          onTap: () => _openModules(context),
-                        ),
+                    Expanded(
+                      child: _TelevisionEntry(
+                        icon: Icons.extension_outlined,
+                        title: '模块',
+                        subtitle: '安装与管理站源模块',
+                        onTap: () => _openModules(context),
                       ),
+                    ),
                     Expanded(
                       child: _TelevisionEntry(
                         icon: Icons.settings_outlined,
@@ -383,60 +385,49 @@ class _UserCard extends StatelessWidget {
     final profile = store.profile;
     return FocusRing(
       radius: 20,
-      child: Material(
-        color: colors.surfaceContainer,
+      child: LiquidGlass(
         borderRadius: BorderRadius.circular(20),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              spacing: 14,
-              children: [
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: colors.primaryContainer,
-                    shape: BoxShape.circle,
+        child: Material(
+          color: Colors.transparent,
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                spacing: 14,
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: colors.primaryContainer,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.person_rounded,
+                      size: 26,
+                      color: colors.onPrimaryContainer,
+                    ),
                   ),
-                  child: Icon(
-                    Icons.person_rounded,
-                    size: 26,
-                    color: colors.onPrimaryContainer,
-                  ),
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    spacing: 2,
-                    children: [
-                      Text(
-                        profile.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                        ),
+                  Expanded(
+                    child: Text(
+                      profile.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
                       ),
-                      Text(
-                        '${profile.admin ? '管理员' : '普通用户'}',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-                if (onTap != null)
-                  Icon(
-                    Icons.chevron_right_rounded,
-                    color: colors.onSurfaceVariant,
-                  ),
-              ],
+                  if (onTap != null)
+                    Icon(
+                      Icons.chevron_right_rounded,
+                      color: colors.onSurfaceVariant,
+                    ),
+                ],
+              ),
             ),
           ),
         ),
@@ -456,34 +447,36 @@ class _Entry extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     return FocusRing(
       radius: 20,
-      child: Material(
-        color: colors.surfaceContainer,
+      child: LiquidGlass(
         borderRadius: BorderRadius.circular(20),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: SizedBox(
-            height: 60,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                spacing: 14,
-                children: [
-                  Icon(icon, size: 22, color: colors.onSurfaceVariant),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
+        child: Material(
+          color: Colors.transparent,
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: SizedBox(
+              height: 60,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  spacing: 14,
+                  children: [
+                    Icon(icon, size: 22, color: colors.onSurfaceVariant),
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
-                  ),
-                  Icon(
-                    Icons.chevron_right_rounded,
-                    color: colors.onSurfaceVariant,
-                  ),
-                ],
+                    Icon(
+                      Icons.chevron_right_rounded,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -503,43 +496,45 @@ class _AllHistoryTile extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     return FocusRing(
       radius: 12,
-      child: Material(
-        color: colors.surfaceContainer,
+      child: LiquidGlass(
         borderRadius: BorderRadius.circular(12),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: AspectRatio(
-            aspectRatio: 2 / 3,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: colors.secondaryContainer,
-                    shape: BoxShape.circle,
+        child: Material(
+          color: Colors.transparent,
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: AspectRatio(
+              aspectRatio: 2 / 3,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: colors.secondaryContainer,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.chevron_right_rounded,
+                      color: colors.onSecondaryContainer,
+                    ),
                   ),
-                  child: Icon(
-                    Icons.chevron_right_rounded,
-                    color: colors.onSecondaryContainer,
+                  const SizedBox(height: 10),
+                  const Text(
+                    '全部',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                   ),
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  '全部',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '$count 部',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: colors.onSurfaceVariant,
+                  const SizedBox(height: 2),
+                  Text(
+                    '$count 部',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: colors.onSurfaceVariant,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -570,66 +565,68 @@ class _TelevisionEntry extends StatelessWidget {
     return FocusRing(
       radius: 20,
       scale: 1,
-      child: Material(
-        color: colors.surfaceContainer,
+      child: LiquidGlass(
         borderRadius: BorderRadius.circular(20),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          focusNode: focusNode,
-          focusColor: Colors.transparent,
-          onTap: onTap,
-          child: SizedBox(
-            height: 84,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Row(
-                spacing: 16,
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: primary
-                          ? colors.primaryContainer
-                          : colors.secondaryContainer,
-                      shape: BoxShape.circle,
+        child: Material(
+          color: Colors.transparent,
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            focusNode: focusNode,
+            focusColor: Colors.transparent,
+            onTap: onTap,
+            child: SizedBox(
+              height: 84,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(
+                  spacing: 16,
+                  children: [
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: primary
+                            ? colors.primaryContainer
+                            : colors.secondaryContainer,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        icon,
+                        size: primary ? 26 : 24,
+                        color: primary
+                            ? colors.onPrimaryContainer
+                            : colors.onSecondaryContainer,
+                      ),
                     ),
-                    child: Icon(
-                      icon,
-                      size: primary ? 26 : 24,
-                      color: primary
-                          ? colors.onPrimaryContainer
-                          : colors.onSecondaryContainer,
-                    ),
-                  ),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      spacing: 2,
-                      children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        spacing: 2,
+                        children: [
+                          Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
-                        Text(
-                          subtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: colors.onSurfaceVariant,
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: colors.onSurfaceVariant,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -646,22 +643,21 @@ class _EmptyHistory extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return Container(
-      height: height,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: colors.outlineVariant),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        spacing: 8,
-        children: [
-          Icon(Icons.history_rounded, size: 32, color: colors.onSurfaceVariant),
-          Text(
-            '还没有观看记录',
-            style: TextStyle(fontSize: 14, color: colors.onSurfaceVariant),
-          ),
-        ],
+    return LiquidGlass(
+      borderRadius: BorderRadius.circular(20),
+      child: SizedBox(
+        height: height,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          spacing: 8,
+          children: [
+            Icon(Icons.history_rounded, size: 32, color: colors.onSurfaceVariant),
+            Text(
+              '还没有观看记录',
+              style: TextStyle(fontSize: 14, color: colors.onSurfaceVariant),
+            ),
+          ],
+        ),
       ),
     );
   }
