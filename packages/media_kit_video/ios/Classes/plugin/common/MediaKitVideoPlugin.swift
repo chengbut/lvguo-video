@@ -41,6 +41,7 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
             handle: handle, playing: args?["playing"] as? Bool ?? false,
             autoEnter: args?["autoEnter"] as? Bool ?? false
           )
+          pip?.setEpisodeLabel(args?["episodeLabel"] as? String)
           if let pip, let handle, pip.needsFrame(handle: handle),
              let frame = instance?.videoOutputManager.currentFrame(handle: handle) {
             pip.enqueue(frame, handle: handle)
