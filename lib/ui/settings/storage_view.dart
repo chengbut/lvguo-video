@@ -194,7 +194,6 @@ class _StorageViewState extends State<StorageView> {
     final text = Theme.of(context).textTheme;
     final colors = Theme.of(context).colorScheme;
     final directory = info['directory'] as String? ?? '';
-    final admin = widget.store.profile.admin;
     final isDefault = info['default'] == true;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -238,19 +237,14 @@ class _StorageViewState extends State<StorageView> {
             const Divider(indent: 16, endIndent: 16),
             SettingsTile(
               title: '更改并迁移目录',
-              subtitle: admin ? '下载会先暂停，复制成功后清理旧目录' : '需要管理员',
-              enabled: admin,
+              subtitle: '下载会先暂停，复制成功后清理旧目录',
               onTap: _move,
             ),
             const Divider(indent: 16, endIndent: 16),
             SettingsTile(
               title: '恢复默认下载目录',
-              subtitle: !admin
-                  ? '需要管理员'
-                  : isDefault
-                  ? '正在使用默认目录'
-                  : '迁移回应用默认目录',
-              enabled: admin && !isDefault,
+              subtitle: isDefault ? '正在使用默认目录' : '迁移回应用默认目录',
+              enabled: !isDefault,
               onTap: _restore,
             ),
             const Divider(indent: 16, endIndent: 16),
