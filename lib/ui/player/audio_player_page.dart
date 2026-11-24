@@ -360,7 +360,7 @@ class _AudioPlayerPageState extends State<AudioPlayerPage>
         ),
         Expanded(
           child: Text(
-            SourceSite.byId(_session.detail.drama.source).name,
+            SourceSite.byId(_session.detail.drama.source).displayName,
             textAlign: TextAlign.center,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
