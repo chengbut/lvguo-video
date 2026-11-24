@@ -66,7 +66,7 @@ Future<void> offerRestoredModules(
   LocalStore store,
 ) async {
   final wanted = store.takeRestoredModules();
-  if (wanted.isEmpty || !store.profile.admin || store.locked) return;
+  if (wanted.isEmpty || store.locked) return;
   final repository = AppScope.of(context).repository;
   final messenger = ScaffoldMessenger.of(context);
   final List<ModuleIndexEntry> entries;
