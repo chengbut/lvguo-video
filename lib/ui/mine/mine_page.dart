@@ -114,7 +114,7 @@ class MinePage extends StatelessWidget {
       caption: total > 0 && entry.episode >= total && entry.finished
           ? '已看完'
           : '看到第 ${entry.episode} 集',
-      tag: SourceSite.byId(drama.source).name,
+      tag: SourceSite.byId(drama.source).displayName,
       onTap: () => openPage<void>(
         context,
         (_) => DetailPage(store: store, drama: drama),
