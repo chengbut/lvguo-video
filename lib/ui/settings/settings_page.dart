@@ -8,7 +8,6 @@ import '../../resource_settings_editor.dart';
 import '../app_scope.dart';
 import '../shell/app_shell.dart';
 import '../theme/motion.dart';
-import '../users/users_view.dart';
 import '../widgets/bar_button.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/group_card.dart';
@@ -17,24 +16,6 @@ import 'settings_rows.dart';
 import 'settings_sections.dart';
 
 typedef _Subpage = ({String title, WidgetBuilder body});
-
-void openUsers(BuildContext context, LocalStore store) => openPage<void>(
-  context,
-  (context) => settingsSplit(context)
-      ? SettingsPage(store: store, initialGroup: SettingsGroup.users)
-      : Scaffold(
-          appBar: AppBar(title: Text(SettingsGroup.users.label)),
-          body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-            children: [
-              UsersView(
-                store: store,
-                open: (title, body) => _openFullPage(context, title, body),
-              ),
-            ],
-          ),
-        ),
-);
 
 Future<void> openProxySettings(BuildContext context, LocalStore store) =>
     openPage<void>(context, (_) => _ProxySettingsPage(store: store));
@@ -158,7 +139,6 @@ class _SettingsPageState extends State<SettingsPage> {
         Platform.isAndroid ? '默认画质、同时下载数量、自动导出' : '默认画质、VIP 集、同时下载数量',
       SettingsGroup.storage => '下载目录、清理缓存、删除全部数据',
       SettingsGroup.proxy => '连接方式、代理地址',
-      SettingsGroup.users => '当前：${store.profile.name}',
       SettingsGroup.about =>
         scope.version.isEmpty ? '版本未知' : '版本 ${scope.version}',
       SettingsGroup.diagnostics => '播放调试日记、备份与恢复',
