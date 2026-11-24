@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../local_store.dart';
@@ -611,7 +613,7 @@ class _HistoryPageState extends State<HistoryPage> {
     final drama = entry.drama;
     final total = drama.episodes;
     final long = '看到第 ${entry.episode} 集 / 共 $total 集';
-    return ProgressPoster(
+    final poster = ProgressPoster(
       drama: drama,
       width: width,
       focusNode: focusNode,
@@ -632,6 +634,48 @@ class _HistoryPageState extends State<HistoryPage> {
       onMore: selection == null
           ? () => setState(() => _selection = {drama.id})
           : null,
+    );
+    // 收藏 = 追剧：海报右上角爱心，复用 store.toggleFavorite / isFavorite，
+    // 和追剧页同一份状态、同一份存储，双向同步（追剧里取消，历史里
+    // 灭掉；历史里取消，追剧里消失），重启 App 还在。点爱心只切换
+    // 收藏态，不进详情；批量选择模式和电视端不显示。
+    if (selection != null || AppScope.of(context).television) return poster;
+    final followed = widget.store.isFavorite(drama.id);
+    return Stack(
+      children: [
+        poster,
+        Positioned(
+          top: 4,
+          right: 4,
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: .55),
+              shape: BoxShape.circle,
+            ),
+            child: IconButton(
+              onPressed: () => unawaited(
+                saveSetting(
+                  context,
+                  () => widget.store.toggleFavorite(drama),
+                ),
+              ),
+              tooltip: followed ? '已收藏，轻点取消追剧' : '收藏到追剧',
+              iconSize: 18,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints.tightFor(
+                width: 32,
+                height: 32,
+              ),
+              icon: Icon(
+                followed
+                    ? Icons.favorite_rounded
+                    : Icons.favorite_border_rounded,
+                color: followed ? Colors.redAccent : Colors.white,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
