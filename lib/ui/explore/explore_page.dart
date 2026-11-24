@@ -204,7 +204,7 @@ class ExplorePageState extends State<ExplorePage> {
                 HideOnScroll(
                   alignment: Alignment.bottomCenter,
                   child: SourceBar(
-                    source: source.name,
+                    source: source.displayName,
                     searchController: _search,
                     recentSearches: widget.store.recentSearches,
                     onForgetSearch: (query) => widget.store
@@ -230,6 +230,16 @@ class ExplorePageState extends State<ExplorePage> {
                           ),
                     ],
                     actions: [
+                      if (explore.recommending)
+                        BarButton(
+                          icon: Icons.shuffle_rounded,
+                          tooltip: '换一换',
+                          onPressed: explore.shuffling
+                              ? null
+                              : () => unawaited(
+                                  explore.shuffleRecommendations(),
+                                ),
+                        ),
                       if (desktop)
                         BarButton(
                           icon: Icons.refresh_rounded,
