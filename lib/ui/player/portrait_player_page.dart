@@ -924,6 +924,9 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           child: AdaptiveGlass(
             borderRadius: BorderRadius.circular(20),
             blur: 14,
+            // 胶囊留 regular 底色保文字可读，只去掉额外那圈白边
+            //（白边 + 玻璃折射边叠在一起显粗、像槽）。
+            showBorder: false,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
             child: Text(
               '第${session.episode.number}集',
