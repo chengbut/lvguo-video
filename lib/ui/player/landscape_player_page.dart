@@ -77,7 +77,13 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   bool _selecting = false;
   bool _holding = false;
   bool _dragging = false;
-  // 横版竖屏态视频区上下滑切集累计的纵向位移（SwipeControls 同款 60px 阈值）。
+  // 横版竖屏态：抖音式竖向翻页。页面只负责视频画面本身，
+  // 播控、顶栏、弹幕开关等浮层仍在页面层只有一份。
+  late final _pages = PageController(initialPage: _session.index);
+  // 用户正在拖 PageView 时不同步翻页（避免外部切集和手势打架）。
+  bool _paging = false;
+  bool _edgeHinted = false;
+  // 黑边手势区上下滑翻页累计的纵向位移（SwipeControls 同款 60px 阈值）。
   double _episodeDragOffset = 0;
   double? _seekValue;
   double? _seekTarget;
@@ -129,6 +135,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _session.removeListener(_bind);
+    _pages.dispose();
     for (final subscription in _subscriptions) {
       unawaited(subscription.cancel());
     }
@@ -158,6 +165,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       _session.setForeground(playerVisible(state));
 
   void _bind() {
+    _syncPages();
     final player = _session.player;
     if (identical(player, _bound)) {
       _refresh();
@@ -187,6 +195,14 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       _subscriptions.add(changes.listen((_) => _refresh()));
     }
     _refresh();
+  }
+
+  // 外部切集（选集网格点选、自动连播、黑边滑动）后把 PageView 跟到当前集；
+  // 用户正在拖 PageView 时不动手，拖完 ScrollEnd 里自己会调 _session.play。
+  void _syncPages() {
+    if (_paging || !_pages.hasClients) return;
+    if (_pages.page?.round() == _session.index) return;
+    _pages.jumpToPage(_session.index);
   }
 
   void _refresh() {
@@ -346,22 +362,66 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     setState(() => _holding = false);
   }
 
-  // 横版竖屏态：视频区域上下滑切集（和竖屏页方向一致：上滑下一集，
-  // 下滑上一集），走现有的 next()/previous()（预加载那套）。
-  void _episodeDragEnd() {
+  // 黑边手势区上下滑：和视频区的 PageView 同一套翻页——拖够 60px 就
+  // 滑向上一集/下一集，不到就留在原地；到头时提示，不硬翻。
+  void _pageDragEnd() {
     const threshold = 60.0;
     final offset = _episodeDragOffset;
     _episodeDragOffset = 0;
-    if (offset < -threshold) {
-      unawaited(_session.next());
-    } else if (offset > threshold) {
-      unawaited(_session.previous());
+    if (!_pages.hasClients) return;
+    final target = _session.index +
+        (offset < -threshold ? 1 : offset > threshold ? -1 : 0);
+    if (target == _session.index) return;
+    if (target < 0) return _say('已经是第一集');
+    if (target >= _session.detail.episodes.length) {
+      return _say('已经是最后一集');
     }
+    unawaited(
+      _pages.animateToPage(
+        target,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOutCubic,
+      ),
+    );
+  }
+
+  // PageView 滚动通知：手指拖动时标 _paging，松手落稳后按落点切集；
+  // 超出两端 40px 提示已经是第一集/最后一集。
+  bool _scrolled(ScrollNotification notification) {
+    if (notification.depth != 0) return false;
+    final metrics = notification.metrics;
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _edgeHinted = false;
+      setState(() => _paging = true);
+    } else if (notification is ScrollUpdateNotification && _paging) {
+      if (!_edgeHinted && metrics.pixels < metrics.minScrollExtent - 40) {
+        _edgeHinted = true;
+        _say('已经是第一集');
+      } else if (!_edgeHinted &&
+          metrics.pixels > metrics.maxScrollExtent + 40) {
+        _edgeHinted = true;
+        _say('已经是最后一集');
+      }
+    } else if (notification is ScrollEndNotification) {
+      final page = (metrics.pixels / metrics.viewportDimension).round();
+      if (_paging) setState(() => _paging = false);
+      if (page != _session.index &&
+          page >= 0 &&
+          page < _session.detail.episodes.length) {
+        unawaited(_session.play(page));
+        // 切集时保持清屏状态：已清屏不把控制层弹回来；显示中则重计时。
+        if (_visible) _scheduleHide();
+      }
+    }
+    return false;
   }
 
   // 上下黑边空白区的手势：与视频区一致——点按切换播控显示/隐藏，
-  // 上下滑切集（同款 60px 阈值），长按加速。锁定态不响应。
-  // 选集展开时不出现（下方是选集网格，手势归它），底部选集条本身不动。
+  // 上下滑翻页（和视频区的 PageView 同一套翻页，不各搞一套），长按加速。
+  // 锁定态不响应。选集展开时不出现（下方是选集网格，手势归它），
+  // 底部选集条本身不动。控制条现在是 Column 里的正常子项、落在
+  // Expanded 下方，不占黑边手势区，两者不抢触摸。
   Widget _barGestures() {
     final locked = _session.locked;
     return GestureDetector(
@@ -377,7 +437,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       onVerticalDragUpdate: locked
           ? null
           : (details) => _episodeDragOffset += details.delta.dy,
-      onVerticalDragEnd: locked ? null : (_) => _episodeDragEnd(),
+      onVerticalDragEnd: locked ? null : (_) => _pageDragEnd(),
       onVerticalDragCancel: locked ? null : () => _episodeDragOffset = 0,
       onLongPressStart: locked ? null : (_) => _pressStart(),
       onLongPressEnd: locked ? null : (_) => _pressEnd(),
@@ -385,7 +445,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
   }
 
-  // 选集条正上方的常驻进度线：播控隐藏时也一直显示、实时更新，可拖动；
+  // 三合一控制块中间的进度行：播控隐藏时也一直显示、实时更新，可拖动；
   // 用 active: true 的 PlaybackProgressBuilder 保证清屏时仍在走进度。
   Widget _bottomProgress() => PlaybackProgressBuilder(
     player: _session.player,
@@ -395,6 +455,80 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       child: SizedBox(height: 20, child: _progressBar(context, thumb: 6)),
     ),
   );
+
+  // 横版竖屏态：抖音式竖向翻页。页面只负责视频画面本身（当前集走
+  // session.player，相邻集走预加载的 session.standby，没备好的页
+  // 先显示“第X集”），落稳后调 _session.play；播控、弹幕开关等浮层
+  // 仍在页面层只有一份，不跟着每页重复建。
+  Widget _pagedVideo(BuildContext context) {
+    final session = _session;
+    return NotificationListener<ScrollNotification>(
+      onNotification: _scrolled,
+      child: PageView.builder(
+        controller: _pages,
+        scrollDirection: Axis.vertical,
+        physics: session.locked
+            ? const NeverScrollableScrollPhysics()
+            : const _PagePhysics(),
+        itemCount: session.detail.episodes.length,
+        itemBuilder: _videoPage,
+      ),
+    );
+  }
+
+  Widget _videoPage(BuildContext context, int index) {
+    final session = _session;
+    final current = index == session.index;
+    final player = current
+        ? session.player
+        : index == session.standbyIndex
+        ? session.standby
+        : null;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (player != null)
+          // 换集时 300ms 交叉淡化（v1.5.1 那套）：加载中先淡出，
+          // 新集首帧到了再淡入，不硬切黑闪。
+          AnimatedOpacity(
+            opacity: current && session.loading ? 0 : 1,
+            duration: Motion.of(context, Motion.long),
+            curve: Motion.standard,
+            child: AnimatedSwitcher(
+              duration: Motion.of(context, Motion.long),
+              switchInCurve: Motion.standard,
+              switchOutCurve: Motion.standard,
+              transitionBuilder: (child, animation) =>
+                  FadeTransition(opacity: animation, child: child),
+              child: PlayerVideo(
+                key: ValueKey(player),
+                handle: widget.handle,
+                player: player,
+                fit: session.videoFit,
+              ),
+            ),
+          )
+        else
+          Center(
+            child: Text(
+              '第 ${session.detail.episodes[index].number} 集',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        if (current)
+          DanmakuOverlay(
+            controller: session.danmaku,
+            video: session.videoSize,
+            fit: session.videoFit,
+            style: session.danmakuStyle,
+          ),
+      ],
+    );
+  }
 
   void _rotate(bool full) => unawaited(
     desktopPlatform
@@ -507,6 +641,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                       final expanded = _episodesExpanded || _selecting;
                       final locked = _session.locked;
                       final topVisible = !locked && !expanded;
+                      // 控制条显隐跟视频里的浮层同一套：锁定、暂停等都算 pinned。
+                      final controlsVisible =
+                          !locked && (_visible || _pinned);
                       final videoHeight =
                           MediaQuery.sizeOf(context).width * 9 / 16;
                       return Stack(
@@ -578,26 +715,40 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                                   },
                                 ),
                               ),
-                              // 选集条正上方的常驻进度线（像红果那样贴着选集条）：
-                              // 从悬浮控制条里移出来后这里是唯一一处进度条，可拖动。
-                              if (_session
-                                  .store
-                                  .playbackPreferences
-                                  .progressLine)
-                                _bottomProgress(),
+                              // 底部三合一控制块：控制行 + 进度行 + 选集行并进一个
+                              // 液态玻璃块，各自行手势互不干扰。清屏时整块淡出
+                              //（仍占位，布局不跳）；选集展开时控制行隐藏，进度行
+                              // 和选集行留着（选集行是收起开关）；锁定时不响应。
+                              // 展开时进度/选集行常驻（不管播控显隐），锁定后也留着
+                              // 仅显示进度和当前集。
                               SafeArea(
                                 top: false,
                                 child: Padding(
                                   padding: const EdgeInsets.fromLTRB(
                                     16,
-                                    8,
+                                    4,
                                     16,
                                     12,
                                   ),
-                                  child: _episodeBar(
-                                    context,
-                                    _session.detail.episodes.length,
-                                    expanded,
+                                  child: IgnorePointer(
+                                    ignoring:
+                                        locked ||
+                                        (!controlsVisible && !expanded),
+                                    child: AnimatedOpacity(
+                                      opacity:
+                                          controlsVisible ||
+                                                  expanded ||
+                                                  locked
+                                              ? 1
+                                              : 0,
+                                      duration: const Duration(
+                                        milliseconds: 180,
+                                      ),
+                                      child: Listener(
+                                        onPointerDown: (_) => _scheduleHide(),
+                                        child: _controlBlock(context),
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),
@@ -642,34 +793,52 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     return Stack(
       fit: StackFit.expand,
       children: [
-        // 切集交叉淡化：换集时旧画面 300ms 内淡出、新画面淡入，不硬切。
-        // 预加载已备好下一集首帧时是真交叉淡化；备播没跟上时退化为
-        // 从黑场平滑淡入，仍比硬切柔和。PiP 走 session.player，不受影响。
-        AnimatedSwitcher(
-          duration: Motion.of(context, Motion.long),
-          switchInCurve: Motion.standard,
-          switchOutCurve: Motion.standard,
-          transitionBuilder: (child, animation) =>
-              FadeTransition(opacity: animation, child: child),
-          child: PlayerVideo(
-            key: ValueKey(session.player),
-            handle: widget.handle,
-            player: session.player,
-            fit: session.videoFit,
+        if (full) ...[
+          // 横屏全屏态不动：单画面 300ms 交叉淡化 + 弹幕 + 手势
+          //（亮度/音量或按偏好切集）。PiP 走 session.player，不受影响。
+          AnimatedSwitcher(
+            duration: Motion.of(context, Motion.long),
+            switchInCurve: Motion.standard,
+            switchOutCurve: Motion.standard,
+            transitionBuilder: (child, animation) =>
+                FadeTransition(opacity: animation, child: child),
+            child: PlayerVideo(
+              key: ValueKey(session.player),
+              handle: widget.handle,
+              player: session.player,
+              fit: session.videoFit,
+            ),
           ),
-        ),
-        DanmakuOverlay(
-          controller: session.danmaku,
-          video: session.videoSize,
-          fit: session.videoFit,
-          style: session.danmakuStyle,
-        ),
-        SwipeControls(
-          session: session,
-          enabled: full && !locked,
-          levels: session.store.playbackPreferences.swipeLevels,
-          episodes: session.store.playbackPreferences.swipeEpisodes,
-          child: LayoutBuilder(
+          DanmakuOverlay(
+            controller: session.danmaku,
+            video: session.videoSize,
+            fit: session.videoFit,
+            style: session.danmakuStyle,
+          ),
+          SwipeControls(
+            session: session,
+            enabled: full && !locked,
+            levels: session.store.playbackPreferences.swipeLevels,
+            episodes: session.store.playbackPreferences.swipeEpisodes,
+            child: LayoutBuilder(
+              builder: (context, constraints) => GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapUp: locked
+                    ? null
+                    : (details) =>
+                          _tapUp(details, constraints.maxWidth, full),
+                onLongPressStart: locked ? null : (_) => _pressStart(),
+                onLongPressEnd: locked ? null : (_) => _pressEnd(),
+                onLongPressCancel: locked ? null : _pressEnd,
+              ),
+            ),
+          ),
+        ] else
+          // 横版竖屏态：抖音式竖向翻页。点按/双击/长按仍走同一套
+          //（点按切播控、双击快进、长按加速），上下滑交给 PageView，
+          // 不再是拖够 60px 才切；选集网格是视频下方的独立区域，
+          // 滑它仍是滚动列表，不会走到这里。
+          LayoutBuilder(
             builder: (context, constraints) => GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTapUp: locked
@@ -678,24 +847,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
               onLongPressStart: locked ? null : (_) => _pressStart(),
               onLongPressEnd: locked ? null : (_) => _pressEnd(),
               onLongPressCancel: locked ? null : _pressEnd,
-              // 只在横版竖屏态的视频区上下滑切集：全屏态仍走 SwipeControls
-              //（按亮度/音量或换集偏好），锁定态不响应。选集网格是视频
-              // 下方的独立区域，滑它仍是滚动列表，不会走到这里。
-              onVerticalDragStart: !full && !locked
-                  ? (_) => _episodeDragOffset = 0
-                  : null,
-              onVerticalDragUpdate: !full && !locked
-                  ? (details) => _episodeDragOffset += details.delta.dy
-                  : null,
-              onVerticalDragEnd: !full && !locked
-                  ? (_) => _episodeDragEnd()
-                  : null,
-              onVerticalDragCancel: !full && !locked
-                  ? () => _episodeDragOffset = 0
-                  : null,
+              child: _pagedVideo(context),
             ),
           ),
-        ),
         FadePresence(
           duration: Motion.medium,
           child: session.ready && session.stalled
@@ -719,17 +873,20 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
           scaleFrom: .9,
           child: _streak != 0 ? _streakBadge(full) : null,
         ),
-        IgnorePointer(
-          ignoring: !visible,
-          child: AnimatedOpacity(
-            opacity: visible ? 1 : 0,
-            duration: const Duration(milliseconds: 180),
-            child: Listener(
-              onPointerDown: (_) => _scheduleHide(),
-              child: full ? _fullControls(context) : _miniControls(context),
+        // 悬浮控制条只在全屏态留在这里；竖屏分支的控制条已挪到视频
+        // 下方黑边里（见 build 里竖屏分支 Column 的 _controlBlock）。
+        if (full)
+          IgnorePointer(
+            ignoring: !visible,
+            child: AnimatedOpacity(
+              opacity: visible ? 1 : 0,
+              duration: const Duration(milliseconds: 180),
+              child: Listener(
+                onPointerDown: (_) => _scheduleHide(),
+                child: _fullControls(context),
+              ),
             ),
           ),
-        ),
         if (full && !visible && session.store.playbackPreferences.progressLine)
           Positioned(
             left: 0,
@@ -846,53 +1003,49 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   bool _sidePanel(_Panel panel) =>
       panel == _Panel.episodes || panel == _Panel.settings;
 
-  Widget _miniControls(BuildContext context) {
+  // 竖屏分支视频下方的控制条（暂停、时间、弹幕、全屏）：液态玻璃胶囊，
+  // 本来压在视频画面上，现挪到视频下方黑边里、进度条上面。
+  // 下面是黑底，不再需要压在画面上那层底影。
+  // 底部三合一控制块：控制行 + 进度行 + 选集行并进一个液态玻璃块。
+  // 三行各自手势互不干扰：按钮照常点、进度条照常拖、选集行照常点开；
+  // 选集展开时控制行隐藏，进度行和选集行留着（选集行是收起开关）。
+  Widget _controlBlock(BuildContext context) {
     final session = _session;
-    // 顶部栏（返回 + 第X集）已移到页面层固定在屏幕顶部，这里只留底部控制层。
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        const IgnorePointer(
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: _Shade(height: 96, top: false),
-          ),
-        ),
-        Positioned(
-          left: 4,
-          right: 4,
-          bottom: 4,
-          child: LiquidGlass(
-            borderRadius: BorderRadius.circular(20),
-            padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // 进度条已从悬浮条里移出，改成选集条正上方的常驻细进度线
-                //（见 _bottomProgress），这里只留播放/时间/弹幕/全屏。
-                SizedBox(
-                  height: 44,
-                  child: Row(
-                    children: [
-                      _playButton(size: 40, iconSize: 26),
-                      const SizedBox(width: 4),
-                      _clock(13),
-                      const Spacer(),
-                      if (session.danmakuSupported) _danmakuButton(context),
-                      _icon(
-                        Icons.fullscreen_rounded,
-                        '全屏',
-                        widget.onFullscreen ?? () => _rotate(false),
-                        size: 40,
-                      ),
-                    ],
+    final expanded = _episodesExpanded || _selecting;
+    return LiquidGlass(
+      borderRadius: BorderRadius.circular(20),
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 控制行：暂停、时间、弹幕、全屏；选集展开时隐藏。
+          if (!expanded)
+            SizedBox(
+              height: 44,
+              child: Row(
+                children: [
+                  _playButton(size: 40, iconSize: 26),
+                  const SizedBox(width: 4),
+                  _clock(13),
+                  const Spacer(),
+                  if (session.danmakuSupported) _danmakuButton(context),
+                  _icon(
+                    Icons.fullscreen_rounded,
+                    '全屏',
+                    widget.onFullscreen ?? () => _rotate(false),
+                    size: 40,
                   ),
-                ),
-            ],
-          ),
-          ),
-        ),
-      ],
+                ],
+              ),
+            ),
+          // 进度行：可拖动的进度条；受 progressLine 开关控制。
+          // PlaybackProgressBuilder 的 active: true 保证清屏时进度仍在走。
+          if (session.store.playbackPreferences.progressLine)
+            _bottomProgress(),
+          // 选集行：点开展开/收起选集网格。
+          _episodeBar(context, session.detail.episodes.length, expanded),
+        ],
+      ),
     );
   }
 
@@ -1590,47 +1743,47 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
   }
 
+  // 选集行（三合一控制块的最下面一行）：点开展开/收起选集网格。
+  // 外层玻璃由 _controlBlock 统一给，这里只留 Material + InkWell
+  //（LiquidGlass 里没有 Material，涟漪需要它）；文字是
+  // “短剧名 · 全N集 · 第X集”，拿不到剧名回退显示“选集”。
   Widget _episodeBar(BuildContext context, int count, bool expanded) {
     final colors = Theme.of(context).colorScheme;
-    return LiquidGlass(
+    return Material(
+      color: Colors.transparent,
       borderRadius: BorderRadius.circular(12),
-      blur: 14,
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () {
-            if (_selecting) _select(false);
-            setState(() => _episodesExpanded = !expanded);
-          },
-          child: SizedBox(
-            height: 48,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      '选集 · 全$count集 · 免费观看',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: colors.onSurface,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () {
+          if (_selecting) _select(false);
+          setState(() => _episodesExpanded = !expanded);
+        },
+        child: SizedBox(
+          height: 48,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${_session.detail.drama.title.isNotEmpty ? _session.detail.drama.title : '选集'} · 全$count集 · 第${_session.episode.number}集',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: colors.onSurface,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                  Icon(
-                    expanded
-                        ? Icons.keyboard_arrow_down_rounded
-                        : Icons.keyboard_arrow_up_rounded,
-                    size: 22,
-                    color: colors.onSurfaceVariant,
-                  ),
-                ],
-              ),
+                ),
+                Icon(
+                  expanded
+                      ? Icons.keyboard_arrow_down_rounded
+                      : Icons.keyboard_arrow_up_rounded,
+                  size: 22,
+                  color: colors.onSurfaceVariant,
+                ),
+              ],
             ),
           ),
         ),
@@ -1731,6 +1884,20 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
 }
 
 String _two(int value) => value.toString().padLeft(2, '0');
+
+// 竖向翻页的手感（竖屏页同款）：比默认回弹更硬的弹簧，
+// 手指拖动时视频跟着走，松手过半就翻过去、不到弹回来。
+class _PagePhysics extends BouncingScrollPhysics {
+  const _PagePhysics({super.parent});
+
+  @override
+  _PagePhysics applyTo(ScrollPhysics? ancestor) =>
+      _PagePhysics(parent: buildParent(ancestor));
+
+  @override
+  SpringDescription get spring =>
+      SpringDescription.withDampingRatio(mass: .5, stiffness: 400, ratio: 1);
+}
 
 class _Shade extends StatelessWidget {
   const _Shade({required this.height, required this.top});
