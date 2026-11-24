@@ -63,8 +63,7 @@ class MinePage extends StatelessWidget {
     ),
   );
 
-  Widget _userCard(BuildContext context) =>
-      _UserCard(store: store, onTap: () => openUsers(context, store));
+  Widget _userCard(BuildContext context) => _UserCard(store: store);
 
   void _openModules(BuildContext context) =>
       openPage<void>(context, (_) => ModulesPage(store: store));
@@ -293,17 +292,6 @@ class MinePage extends StatelessWidget {
                 Row(
                   spacing: 20,
                   children: [
-                    Expanded(
-                      child: _TelevisionEntry(
-                        icon: Icons.person_rounded,
-                        primary: true,
-                        focusNode: recent.isEmpty ? entryFocus : null,
-                        title: store.profile.name,
-                        subtitle:
-                            '${store.profile.admin ? '管理员' : '普通用户'} · 切换用户',
-                        onTap: () => openUsers(context, store),
-                      ),
-                    ),
                     if (store.profile.admin)
                       Expanded(
                         child: _TelevisionEntry(
@@ -384,9 +372,10 @@ class MinePage extends StatelessWidget {
 }
 
 class _UserCard extends StatelessWidget {
-  const _UserCard({required this.store, required this.onTap});
+  // 登录/切换用户已移除：只展示当前身份，不可点击。
+  const _UserCard({required this.store, this.onTap});
   final LocalStore store;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -433,7 +422,7 @@ class _UserCard extends StatelessWidget {
                         ),
                       ),
                       Text(
-                        '${profile.admin ? '管理员' : '普通用户'} · 轻点切换用户',
+                        '${profile.admin ? '管理员' : '普通用户'}',
                         style: TextStyle(
                           fontSize: 13,
                           color: colors.onSurfaceVariant,
@@ -442,10 +431,11 @@ class _UserCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                Icon(
-                  Icons.chevron_right_rounded,
-                  color: colors.onSurfaceVariant,
-                ),
+                if (onTap != null)
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    color: colors.onSurfaceVariant,
+                  ),
               ],
             ),
           ),
