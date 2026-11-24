@@ -16,6 +16,7 @@ import '../theme/app_theme.dart';
 import '../theme/motion.dart';
 import '../widgets/contained_slider.dart';
 import '../widgets/liquid_glass.dart';
+import '../widgets/native_glass.dart';
 import 'danmaku_overlay.dart';
 import 'episode_grid.dart';
 import 'fade_presence.dart';
@@ -768,16 +769,9 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           right: 12,
           top: padding.top,
           height: 48,
-          // 左上返回 + 集数常驻：清屏时也不隐藏，只在锁定时淡出。
-          child: IgnorePointer(
-            ignoring: _session.locked,
-            child: AnimatedOpacity(
-              opacity: _session.locked ? 0 : 1,
-              duration: Motion.of(context, Motion.medium),
-              curve: Motion.standard,
-              child: _header(),
-            ),
-          ),
+          // 顶栏跟底部播控同一套显隐：清屏时一起淡出，点按唤出时
+          // 一起回来（锁定时同样隐藏，系统状态栏常驻不受影响）。
+          child: _chrome(_header()),
         ),
         Positioned(
           left: 0,
@@ -920,14 +914,14 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     return Row(
       spacing: 8,
       children: [
-        LiquidGlassIconButton(
+        AdaptiveGlassIconButton(
           size: 40,
           onPressed: () => unawaited(Navigator.maybePop(context)),
           tooltip: '返回',
           child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
         ),
         Expanded(
-          child: LiquidGlass(
+          child: AdaptiveGlass(
             borderRadius: BorderRadius.circular(20),
             blur: 14,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
