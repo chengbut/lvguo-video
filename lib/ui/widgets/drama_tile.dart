@@ -6,6 +6,7 @@ import '../app_scope.dart';
 import '../theme/motion.dart';
 import 'cover_image.dart';
 import 'focus_ring.dart';
+import 'liquid_glass.dart';
 import 'motion/motion_widgets.dart';
 
 const _coverRadius = 12.0;
@@ -62,10 +63,13 @@ class _PosterButtonState extends State<_PosterButton> {
             child: FocusOutline(
               visible: visible,
               radius: _coverRadius,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  widget.cover,
+              child: LiquidGlass(
+                borderRadius: BorderRadius.circular(_coverRadius),
+                blur: 12,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    widget.cover,
                   IgnorePointer(
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 120),
@@ -78,6 +82,7 @@ class _PosterButtonState extends State<_PosterButton> {
                     ),
                   ),
                 ],
+              ),
               ),
             ),
           ),
