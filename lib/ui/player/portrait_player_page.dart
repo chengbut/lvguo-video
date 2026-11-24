@@ -87,6 +87,13 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     _session.addListener(_changed);
     _bind();
     _wake();
+    // 状态栏常驻：进页就恢复系统栏（之前可能在横屏全屏里藏过），
+    // 之后清屏时也不再隐藏。
+    unawaited(
+      SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.edgeToEdge,
+      ).catchError((Object _) {}),
+    );
   }
 
   @override
@@ -200,15 +207,14 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
   }
 
   void _syncSystemBars() {
-    final immersive =
-        !desktopPlatform &&
-        _session.store.playbackPreferences.hideSystemBars &&
-        !_chromeShown;
-    if (immersive == _immersive) return;
-    _immersive = immersive;
+    // 状态栏常驻：竖屏播放页清屏时也不隐藏系统状态栏（iOS 上时间+电量
+    // 是一体的，只能整个保留）。hideSystemBars 偏好在这里不生效；
+    // 如果之前进过沉浸态（比如从横屏全屏回来），先恢复回来。
+    if (!_immersive) return;
+    _immersive = false;
     unawaited(
       SystemChrome.setEnabledSystemUIMode(
-        immersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+        SystemUiMode.edgeToEdge,
       ).catchError((Object _) {}),
     );
   }
@@ -585,7 +591,10 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (!waiting)
+          // 切集平滑过渡：视频不再随加载状态卸载，换集时 300ms 交叉淡化；
+          // 加载中先淡出，等新集第一帧到了再淡入，不硬切黑闪。
+          // 预加载的 _swap 路径和 PiP 无感切集不动。
+          if (player != null)
             ClipRect(
               child: AnimatedScale(
                 scale: _zoom,
@@ -593,11 +602,25 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
                     ? Duration.zero
                     : Motion.of(context, Motion.medium),
                 curve: Motion.standard,
-                child: PlayerVideo(
-                  key: ValueKey(player),
-                  handle: widget.handle,
-                  player: player,
-                  fit: _effectiveFit,
+                child: AnimatedOpacity(
+                  opacity: current && session.loading ? 0 : 1,
+                  duration: Motion.of(context, Motion.long),
+                  curve: Motion.standard,
+                  child: AnimatedSwitcher(
+                    duration: Motion.of(context, Motion.long),
+                    switchInCurve: Motion.standard,
+                    switchOutCurve: Motion.standard,
+                    transitionBuilder: (child, animation) => FadeTransition(
+                      opacity: animation,
+                      child: child,
+                    ),
+                    child: PlayerVideo(
+                      key: ValueKey(player),
+                      handle: widget.handle,
+                      player: player,
+                      fit: _effectiveFit,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -745,7 +768,16 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           right: 12,
           top: padding.top,
           height: 48,
-          child: _chrome(_header()),
+          // 左上返回 + 集数常驻：清屏时也不隐藏，只在锁定时淡出。
+          child: IgnorePointer(
+            ignoring: _session.locked,
+            child: AnimatedOpacity(
+              opacity: _session.locked ? 0 : 1,
+              duration: Motion.of(context, Motion.medium),
+              curve: Motion.standard,
+              child: _header(),
+            ),
+          ),
         ),
         Positioned(
           left: 0,
@@ -764,7 +796,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           key: const ValueKey('progress'),
           left: 0,
           right: 0,
-          bottom: bottom + 52,
+          bottom: bottom + 44,
           height: 30,
           child: _chrome(_progressBand(context)),
         ),
@@ -900,7 +932,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
             blur: 14,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
             child: Text(
-              session.detail.drama.title,
+              '第${session.episode.number}集',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
