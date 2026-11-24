@@ -610,7 +610,7 @@ class _DownloadsPageState extends State<DownloadsPage>
     );
     final chips = [
       chip('', '全部'),
-      for (final site in view.sources) chip(site.id, site.name),
+      for (final site in view.sources) chip(site.id, site.displayName),
     ];
     if (scroll) {
       return SingleChildScrollView(
@@ -779,7 +779,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                 progress: null,
                 caption:
                     '${item.episodes.length} 集 · ${formatBytes(item.bytes)}',
-                tag: SourceSite.byId(item.drama.source).name,
+                tag: SourceSite.byId(item.drama.source).displayName,
                 badge: item.pending > 0 ? '${item.pending} 集下载中' : null,
                 selected: view.selection?.contains(item.drama.id),
                 onTap: view.selection != null
