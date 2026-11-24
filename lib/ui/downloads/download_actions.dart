@@ -115,7 +115,7 @@ class SourceTag extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
-        SourceSite.byId(source).name,
+        SourceSite.byId(source).displayName,
         style: TextStyle(
           fontSize: 11,
           fontWeight: FontWeight.w600,
