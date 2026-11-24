@@ -60,7 +60,8 @@ abstract final class AppTheme {
       scaffoldBackgroundColor: scheme.surface,
       pageTransitionsTheme: pageTransitions(television: television),
       appBarTheme: AppBarTheme(
-        backgroundColor: scheme.surface,
+        // 半透明顶栏：配合液态玻璃质感，内容从下方透出；不改布局与字色。
+        backgroundColor: scheme.surface.withValues(alpha: 0.78),
         foregroundColor: scheme.onSurface,
         scrolledUnderElevation: 0,
         centerTitle: false,
