@@ -29,9 +29,6 @@ import 'swipe_controls.dart';
 
 const _maskHeight = 68.0;
 
-String _status(Drama drama) =>
-    drama.releaseLabel == '状态未知' ? '' : '${drama.releaseLabel} · ';
-
 class PortraitPlayerPage extends StatefulWidget {
   const PortraitPlayerPage({
     super.key,
@@ -767,7 +764,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           key: const ValueKey('progress'),
           left: 0,
           right: 0,
-          bottom: bottom,
+          bottom: bottom + 52,
           height: 30,
           child: _chrome(_progressBand(context)),
         ),
@@ -775,7 +772,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           key: const ValueKey('episodes'),
           left: 16,
           right: 16,
-          bottom: bottom + 42,
+          bottom: bottom,
           height: 44,
           child: _chrome(_episodeStrip()),
         ),
@@ -1026,9 +1023,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
   }
 
   Widget _episodeStrip() {
-    final drama = _session.detail.drama;
     final count = _session.detail.episodes.length;
-    final status = _status(drama);
     return LiquidGlass(
       borderRadius: BorderRadius.circular(12),
       blur: 14,
@@ -1043,27 +1038,15 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
             child: Row(
               spacing: 8,
               children: [
-                const Icon(
-                  Icons.view_list_rounded,
-                  size: 18,
-                  color: Colors.white,
-                ),
-                const Text(
-                  '选集',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
                 Expanded(
                   child: Text(
-                    '· $status共 $count 集',
+                    '选集 · 全$count集 · 免费观看',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: .72),
+                    style: const TextStyle(
+                      color: Colors.white,
                       fontSize: 14,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
