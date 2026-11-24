@@ -11,7 +11,8 @@ import '../../playback_session.dart';
 
 Player _player() => Player(
   configuration: const PlayerConfiguration(
-    bufferSize: 32 * 1024 * 1024,
+    // 前向缓存加大到 64MB：弱网下减少起播后的卡顿与重复缓冲。
+    bufferSize: 64 * 1024 * 1024,
     logLevel: MPVLogLevel.error,
   ),
 );
