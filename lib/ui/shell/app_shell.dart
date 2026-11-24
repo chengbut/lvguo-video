@@ -16,8 +16,9 @@ import '../explore/source_actions.dart';
 import '../follow/follow_page.dart';
 import '../history/history_page.dart';
 import '../mine/mine_page.dart';
+import '../modules/modules_page.dart';
 import '../update_prompt.dart';
-import '../widgets/liquid_glass.dart';
+import '../widgets/native_glass.dart';
 import '../modules/module_install.dart';
 import '../widgets/bar_button.dart';
 import '../theme/motion.dart';
@@ -29,6 +30,7 @@ enum AppTab {
   explore('发现', Icons.explore_outlined, Icons.explore),
   follow('追剧', Icons.bookmark_border_rounded, Icons.bookmark_rounded),
   history('历史', Icons.history_rounded, Icons.history_rounded),
+  modules('模块', Icons.extension_outlined, Icons.extension_rounded),
   mine('我的', Icons.person_outline_rounded, Icons.person_rounded);
 
   const AppTab(this.label, this.icon, this.selectedIcon);
@@ -190,7 +192,10 @@ class _AppShellState extends State<AppShell> {
       if (switch (tab) {
         AppTab.history =>
           widget.store.historyTab && !AppScope.of(context).television,
-        AppTab.explore || AppTab.follow || AppTab.mine => true,
+        AppTab.explore ||
+        AppTab.follow ||
+        AppTab.modules ||
+        AppTab.mine => true,
       })
         tab,
   ];
@@ -306,6 +311,7 @@ class _AppShellState extends State<AppShell> {
       onExitUp: _tabFocus[AppTab.follow.index].requestFocus,
     ),
     AppTab.history => HistoryPage(store: widget.store, root: true),
+    AppTab.modules => ModulesPage(store: widget.store),
     AppTab.mine => MinePage(
       store: widget.store,
       downloads: _downloads!,
@@ -354,7 +360,7 @@ class _AppShellState extends State<AppShell> {
     final television = AppScope.of(context).television;
     final tabs = _tabs;
     if (!tabs.contains(_tab)) _tab = AppTab.explore;
-    // 手机底栏只保留发现、历史、我的；追剧页本身保留，从电视端与侧栏进入。
+    // 手机底栏只保留发现、历史、模块、我的；追剧页本身保留，从电视端与侧栏进入。
     final phoneTabs = tabs.where((tab) => tab != AppTab.follow).toList();
     if (AppScope.formFactorOf(context) == FormFactor.phone &&
         !phoneTabs.contains(_tab)) {
@@ -386,21 +392,38 @@ class _AppShellState extends State<AppShell> {
               // 胶囊栏悬浮在内容之上：它本身就是 Stack 里的一层，正常接
               // 手势；胶囊之外的区域本来就是空的，手指直接穿透到底层列
               // 表滑动。滑动时底栏不消失（不再用 HideOnScroll 包它）。
-              if (!covered)
-                Positioned(
-                  left: 16,
-                  right: 16,
-                  bottom: 10,
-                  child: SafeArea(
-                    top: false,
-                    child: _CapsuleBar(
-                      tabs: phoneTabs,
-                      selected: _tab,
-                      onTap: _tap,
-                      badged: _badged,
+              // 进子页面时底栏滑出 + 淡出、回来时滑入 + 淡入：常驻在
+              // 树里做位移和透明度动画，只改过渡，不改显隐逻辑本身。
+              Positioned(
+                left: 16,
+                right: 16,
+                bottom: 10,
+                child: SafeArea(
+                  top: false,
+                  child: AnimatedSlide(
+                    offset: covered ? const Offset(0, 1.6) : Offset.zero,
+                    duration: Motion.of(
+                      context,
+                      const Duration(milliseconds: 350),
+                    ),
+                    curve: covered ? Motion.exit : Motion.enter,
+                    child: AnimatedOpacity(
+                      opacity: covered ? 0 : 1,
+                      duration: Motion.of(context, Motion.long),
+                      curve: Motion.standard,
+                      child: IgnorePointer(
+                        ignoring: covered,
+                        child: _CapsuleBar(
+                          tabs: phoneTabs,
+                          selected: _tab,
+                          onTap: _tap,
+                          badged: _badged,
+                        ),
+                      ),
                     ),
                   ),
                 ),
+              ),
             ],
           ),
         ),
@@ -427,7 +450,9 @@ class _AppShellState extends State<AppShell> {
                         final entry = switch (_tab) {
                           AppTab.follow => _followEntry,
                           AppTab.mine => _mineEntry,
-                          AppTab.explore || AppTab.history => null,
+                          AppTab.explore ||
+                          AppTab.history ||
+                          AppTab.modules => null,
                         };
                         if (event is KeyUpEvent ||
                             event.logicalKey != LogicalKeyboardKey.arrowDown ||
@@ -584,12 +609,16 @@ class _CapsuleBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final selectedIndex = tabs
-        .indexOf(selected)
-        .clamp(0, tabs.length - 1);
-    return LiquidGlass(
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final selectedIndex = tabs.indexOf(selected).clamp(0, tabs.length - 1);
+    // 底栏专用玻璃质感（只调这个胶囊，不动 LiquidGlass 的全局默认）：
+    // 磨砂更重（blur 28）、底色更透（tint 0.85）、顶部多一层高光，
+    // 选中胶囊也带一点透明 + 细白边，整条更像 iOS 液态玻璃。
+    // iOS 上走原生 UIGlassEffect（AdaptiveGlass），其余平台走模拟。
+    return AdaptiveGlass(
       borderRadius: BorderRadius.circular(32),
-      blur: 18,
+      blur: 28,
+      tint: 0.85,
       child: SizedBox(
         height: 64,
         child: LayoutBuilder(
@@ -604,8 +633,12 @@ class _CapsuleBar extends StatelessWidget {
                         : 0,
                     0,
                   ),
-                  duration: Motion.of(context, Motion.medium),
-                  curve: Motion.standard,
+                  // 弹簧回弹：指示胶囊滑到位时带一点自然的 overshoot。
+                  duration: Motion.of(
+                    context,
+                    const Duration(milliseconds: 350),
+                  ),
+                  curve: Curves.easeOutBack,
                   child: SizedBox(
                     width: segment,
                     height: 64,
@@ -615,7 +648,38 @@ class _CapsuleBar extends StatelessWidget {
                         height: 48,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(24),
-                          color: colors.secondaryContainer,
+                          color: colors.secondaryContainer.withValues(
+                            alpha: .8,
+                          ),
+                          border: Border.all(
+                            color: Colors.white.withValues(
+                              alpha: dark ? .22 : .45,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // 顶部高光：压在玻璃上沿的一层亮边，画在按钮下面，
+                // 只提亮玻璃，不盖图标。
+                Positioned(
+                  left: 28,
+                  right: 28,
+                  top: 0,
+                  height: 26,
+                  child: IgnorePointer(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.white.withValues(
+                              alpha: dark ? .22 : .45,
+                            ),
+                            Colors.white.withValues(alpha: 0),
+                          ],
                         ),
                       ),
                     ),
@@ -689,8 +753,8 @@ class _CapsuleTab extends StatelessWidget {
                 ),
               ),
               AnimatedSize(
-                duration: Motion.of(context, Motion.medium),
-                curve: Motion.standard,
+                duration: Motion.of(context, Motion.long),
+                curve: Motion.enter,
                 alignment: Alignment.centerLeft,
                 child: selected
                     ? Padding(
