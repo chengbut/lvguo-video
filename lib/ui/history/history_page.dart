@@ -293,7 +293,7 @@ class _HistoryPageState extends State<HistoryPage> {
     if (view.sources.length < 2) return null;
     final chips = [
       _sourceChip('', '全部', view),
-      for (final site in view.sources) _sourceChip(site.id, site.name, view),
+      for (final site in view.sources) _sourceChip(site.id, site.displayName, view),
     ];
     if (scroll) {
       return SingleChildScrollView(
@@ -618,7 +618,7 @@ class _HistoryPageState extends State<HistoryPage> {
           : total > 0 && _fits(context, long, width)
           ? long
           : '看到第 ${entry.episode} 集',
-      tag: SourceSite.byId(drama.source).name,
+      tag: SourceSite.byId(drama.source).displayName,
       selected: selection?.contains(drama.id),
       onTap: selection == null
           ? () => openPage<void>(
