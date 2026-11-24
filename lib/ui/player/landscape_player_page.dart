@@ -18,6 +18,7 @@ import '../theme/motion.dart';
 import '../widgets/contained_slider.dart';
 import '../widgets/motion/motion_widgets.dart';
 import '../widgets/liquid_glass.dart';
+import '../widgets/native_glass.dart';
 import 'cast_page.dart';
 import 'danmaku_overlay.dart';
 import '../widgets/follow_button.dart';
@@ -640,10 +641,12 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                       // 点选集展开时平滑推到最上面，收起时同样平滑移回中间。
                       final expanded = _episodesExpanded || _selecting;
                       final locked = _session.locked;
-                      final topVisible = !locked && !expanded;
                       // 控制条显隐跟视频里的浮层同一套：锁定、暂停等都算 pinned。
                       final controlsVisible =
                           !locked && (_visible || _pinned);
+                      // 顶栏跟底部控制块同一套显隐：清屏时一起淡出，点按
+                      // 唤出时一起回来；选集展开时顶栏仍隐藏。
+                      final topVisible = controlsVisible && !expanded;
                       final videoHeight =
                           MediaQuery.sizeOf(context).width * 9 / 16;
                       return Stack(
@@ -1012,7 +1015,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   Widget _controlBlock(BuildContext context) {
     final session = _session;
     final expanded = _episodesExpanded || _selecting;
-    return LiquidGlass(
+    return AdaptiveGlass(
       borderRadius: BorderRadius.circular(20),
       padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
       child: Column(
@@ -1719,10 +1722,10 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
         height: 48,
         child: Row(
           children: [
-            _icon(
-              Icons.arrow_back_rounded,
-              '返回',
-              () => unawaited(Navigator.maybePop(context)),
+            AdaptiveGlassIconButton(
+              onPressed: () => unawaited(Navigator.maybePop(context)),
+              tooltip: '返回',
+              child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
             ),
             const SizedBox(width: 2),
             Text(
@@ -1735,8 +1738,19 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
             ),
             const Spacer(),
             if (widget.onMiniWindow case final onMiniWindow?)
-              _icon(Icons.picture_in_picture_alt_rounded, '小窗', onMiniWindow),
-            _icon(Icons.settings_rounded, '播放设置', _openSettings),
+              AdaptiveGlassIconButton(
+                onPressed: onMiniWindow,
+                tooltip: '小窗',
+                child: const Icon(
+                  Icons.picture_in_picture_alt_rounded,
+                  color: Colors.white,
+                ),
+              ),
+            AdaptiveGlassIconButton(
+              onPressed: _openSettings,
+              tooltip: '播放设置',
+              child: const Icon(Icons.settings_rounded, color: Colors.white),
+            ),
           ],
         ),
       ),
