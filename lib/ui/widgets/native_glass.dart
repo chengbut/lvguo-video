@@ -19,6 +19,11 @@ import 'liquid_glass.dart';
 ///   LiquidGlass 同一套参数），玻璃本体由原生负责。
 /// - 触摸穿透：原生视图本身不接收手势（isUserInteractionEnabled = false，
 ///   加 hitTestBehavior: transparent），点击由上层的 Flutter 内容处理。
+/// - [showBorder]：默认在玻璃上再补一圈 1pt 白边（和模拟版一致的细边，
+///   否则 iOS 上的胶囊会比 Android 少一圈亮边）。小圆钮不要这圈边：
+///   1pt 白边 + UIGlassEffect 自己的折射边叠在一起显粗、像槽，
+///   用 [.clear] + showBorder: false，靠系统玻璃自己的边缘收边，
+///   才是 iOS 原生圆钮的样子。
 enum NativeGlassStyle {
   /// 常规玻璃（磨砂 + 轻微着色），对应 UIGlassEffect(style: .regular)。
   regular,
@@ -37,6 +42,7 @@ class AdaptiveGlass extends StatelessWidget {
     this.padding,
     this.margin,
     this.style = NativeGlassStyle.regular,
+    this.showBorder = true,
   });
 
   final Widget child;
@@ -46,6 +52,7 @@ class AdaptiveGlass extends StatelessWidget {
   final EdgeInsetsGeometry? padding;
   final EdgeInsetsGeometry? margin;
   final NativeGlassStyle style;
+  final bool showBorder;
 
   @override
   Widget build(BuildContext context) {
@@ -80,21 +87,23 @@ class AdaptiveGlass extends StatelessWidget {
               Padding(padding: padding!, child: child)
             else
               child,
-            // 原生玻璃本体没有高光边框，这里补一层和模拟版一致的细边，
-            // 否则 iOS 上的胶囊会比 Android 少一圈亮边。
-            Positioned.fill(
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius: borderRadius,
-                    border: Border.all(
-                      color: const Color(0x4DFFFFFF),
-                      width: 1,
+            // 原生玻璃本体没有高光边框，默认补一层和模拟版一致的细边，
+            // 否则 iOS 上的胶囊会比 Android 少一圈亮边。showBorder
+            // 为 false 时不补（小圆钮用 .clear + 无边，见上面）。
+            if (showBorder)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: borderRadius,
+                      border: Border.all(
+                        color: const Color(0x4DFFFFFF),
+                        width: 1,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -119,6 +128,8 @@ class _NativeGlassView extends StatelessWidget {
 }
 
 /// AdaptiveGlass 版的圆形玻璃图标按钮，和 LiquidGlassIconButton 同款用法。
+/// 小圆钮默认走 .clear 玻璃、不补白边：iOS 原生圆钮就是只有系统玻璃
+/// 自己的边缘，没有额外一圈白边；.regular + 白边叠在一起显粗、像槽。
 class AdaptiveGlassIconButton extends StatelessWidget {
   const AdaptiveGlassIconButton({
     super.key,
@@ -126,12 +137,16 @@ class AdaptiveGlassIconButton extends StatelessWidget {
     required this.onPressed,
     this.tooltip,
     this.size = 44,
+    this.style = NativeGlassStyle.clear,
+    this.showBorder = false,
   });
 
   final Widget child;
   final VoidCallback? onPressed;
   final String? tooltip;
   final double size;
+  final NativeGlassStyle style;
+  final bool showBorder;
 
   @override
   Widget build(BuildContext context) {
@@ -139,6 +154,8 @@ class AdaptiveGlassIconButton extends StatelessWidget {
     return AdaptiveGlass(
       borderRadius: radius,
       blur: 14,
+      style: style,
+      showBorder: showBorder,
       child: SizedBox.square(
         dimension: size,
         child: IconButton(
