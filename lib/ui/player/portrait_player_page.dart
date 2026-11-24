@@ -15,7 +15,7 @@ import '../downloads/download_actions.dart';
 import '../theme/app_theme.dart';
 import '../theme/motion.dart';
 import '../widgets/contained_slider.dart';
-import '../widgets/follow_button.dart';
+import '../widgets/liquid_glass.dart';
 import 'danmaku_overlay.dart';
 import 'episode_grid.dart';
 import 'fade_presence.dart';
@@ -42,6 +42,8 @@ class PortraitPlayerPage extends StatefulWidget {
   });
   final LocalStore store;
   final PlaybackHandle handle;
+  // 调用方仍会传横屏入口，但竖屏播放器始终竖屏、不旋转，
+  // 这里不再渲染全屏按钮，仅保留参数兼容。
   final VoidCallback? onFullscreen;
   final VoidCallback? onMiniWindow;
 
@@ -152,25 +154,45 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     _idleTimer?.cancel();
     _idle = false;
     _quietSwitch = false;
-    _idleTimer = Timer(const Duration(seconds: 3), () {
+    // 自动清屏：进播放 1 秒后隐藏全部浮层（清屏），只剩视频画面。
+    // 自动清屏与原有的“竖屏自动隐藏播控”两个开关都开才生效，
+    // 关掉任意一个都不自动清屏；手动点屏幕显示/隐藏不受影响。
+    final prefs = _session.store.playbackPreferences;
+    if (!prefs.autoClearScreen || !prefs.autoHideControls) return;
+    _idleTimer = Timer(const Duration(seconds: 1), () {
       if (mounted) setState(() => _idle = true);
     });
   }
 
-  bool get _chromeShown =>
-      !_session.locked &&
-      (!_session.store.playbackPreferences.autoHideControls ||
-          !_idle ||
-          _dragging ||
-          _session.paused ||
-          _session.error != null ||
-          _session.loading && !_quietSwitch);
+  // 点屏幕：暂停时点一下恢复播放；播放中点一下显示/隐藏控制层。
+  void _onTap() {
+    if (_session.locked || _pinching) return;
+    if (_session.paused) {
+      _session.togglePlayback();
+      return;
+    }
+    _toggleChrome();
+  }
 
-  void _lock() {
-    if (_holding) _pressEnd();
-    unawaited(HapticFeedback.selectionClick());
-    _session.setLocked(true);
-    _say('已锁定，点屏幕显示锁图标');
+  void _toggleChrome() {
+    if (_chromeShown) {
+      _idleTimer?.cancel();
+      setState(() => _idle = true);
+    } else {
+      setState(_wake);
+    }
+  }
+
+  bool get _chromeShown {
+    final prefs = _session.store.playbackPreferences;
+    final autoHide = prefs.autoClearScreen && prefs.autoHideControls;
+    return !_session.locked &&
+        (!autoHide ||
+            !_idle ||
+            _dragging ||
+            _session.paused ||
+            _session.error != null ||
+            _session.loading && !_quietSwitch);
   }
 
   void _unlock() {
@@ -259,7 +281,9 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           page >= 0 &&
           page < _session.detail.episodes.length) {
         unawaited(_session.play(page));
-        setState(_wake);
+        // 切集时保持清屏状态：已经清屏就不把控制层弹回来；
+        // 控制层显示中时重新计时，1 秒后清屏。
+        if (!_idle) setState(_wake);
       }
     }
     return false;
@@ -294,12 +318,24 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
       )
       .width;
 
+  // 竖屏短剧铺满全屏：竖视频 + 默认“自动”比例时按裁切显示，不留黑边；
+  // 用户另外选过比例（或横视频）时尊重原设置。
+  VideoFit get _effectiveFit {
+    final video = _session.videoSize;
+    if (video != null &&
+        video.aspectRatio < 1 &&
+        _session.videoFit == VideoFit.auto) {
+      return VideoFit.crop;
+    }
+    return _session.videoFit;
+  }
+
   (double, double) get _zoomRange {
     final video = _session.videoSize;
     if (video == null || _session.audio || MediaQuery.sizeOf(context).isEmpty) {
       return (1, 1);
     }
-    final width = _fitWidth(_session.videoFit, video);
+    final width = _fitWidth(_effectiveFit, video);
     return (
       _fitWidth(VideoFit.auto, video) / width,
       _fitWidth(VideoFit.crop, video) / width,
@@ -564,7 +600,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
                   key: ValueKey(player),
                   handle: widget.handle,
                   player: player,
-                  fit: session.videoFit,
+                  fit: _effectiveFit,
                 ),
               ),
             ),
@@ -608,9 +644,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
               child: LayoutBuilder(
                 builder: (context, constraints) => GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: _pinching || _session.locked
-                      ? null
-                      : session.togglePlayback,
+                  onTap: _pinching || _session.locked ? null : _onTap,
                   onLongPressStart: _pinching || _session.locked
                       ? null
                       : (details) => _pressStart(details, constraints.maxWidth),
@@ -656,26 +690,24 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           ),
         ),
         Center(
-          child: IgnorePointer(
-            child: AnimatedOpacity(
-              opacity: session.ready && session.paused ? 1 : 0,
+          child: AnimatedOpacity(
+            opacity: session.ready && session.paused ? 1 : 0,
+            duration: Motion.of(context, Motion.short),
+            curve: Motion.standard,
+            child: AnimatedScale(
+              scale: session.ready && session.paused ? 1 : .8,
               duration: Motion.of(context, Motion.short),
-              curve: Motion.standard,
-              child: AnimatedScale(
-                scale: session.ready && session.paused ? 1 : .8,
-                duration: Motion.of(context, Motion.short),
-                curve: Motion.enter,
-                child: Container(
-                  width: 72,
-                  height: 72,
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: .35),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
+              curve: Motion.enter,
+              child: IgnorePointer(
+                ignoring: !(session.ready && session.paused),
+                child: LiquidGlassIconButton(
+                  size: 72,
+                  onPressed: () => _session.togglePlayback(),
+                  tooltip: '播放',
+                  child: const Icon(
                     Icons.play_arrow_rounded,
                     size: 44,
-                    color: Colors.white.withValues(alpha: .9),
+                    color: Colors.white,
                   ),
                 ),
               ),
@@ -706,22 +738,22 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
             height: bottom,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: session.locked ? null : session.togglePlayback,
+              onTap: session.locked ? null : _onTap,
               onVerticalDragStart: session.locked ? null : (_) {},
             ),
           ),
         Positioned(
           key: const ValueKey('header'),
-          left: 4,
+          left: 12,
           right: 12,
           top: padding.top,
-          height: 56,
+          height: 48,
           child: _chrome(_header()),
         ),
         Positioned(
           left: 0,
           right: 0,
-          bottom: bottom + 140,
+          bottom: bottom + 110,
           child: FadePresence(
             scaleFrom: .9,
             child: _dragging
@@ -733,45 +765,20 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
         ),
         Positioned(
           key: const ValueKey('progress'),
-          left: 16,
-          right: 16,
-          bottom: bottom + 60,
-          height: 32,
-          child: _chrome(_progress(context)),
+          left: 0,
+          right: 0,
+          bottom: bottom,
+          height: 30,
+          child: _chrome(_progressBand(context)),
         ),
         Positioned(
           key: const ValueKey('episodes'),
           left: 16,
-          right: widget.onFullscreen == null ? 16 : 68,
-          bottom: bottom + 16,
+          right: 16,
+          bottom: bottom + 42,
           height: 44,
           child: _chrome(_episodeStrip()),
         ),
-        if (widget.onFullscreen case final onFullscreen?)
-          Positioned(
-            key: const ValueKey('fullscreen'),
-            right: 16,
-            bottom: bottom + 16,
-            width: 44,
-            height: 44,
-            child: _chrome(
-              IconButton(
-                onPressed: () {
-                  setState(_wake);
-                  onFullscreen();
-                },
-                icon: const Icon(Icons.fullscreen_rounded),
-                color: Colors.white,
-                tooltip: '全屏',
-                style: IconButton.styleFrom(
-                  backgroundColor: Colors.white.withValues(alpha: .14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-            ),
-          ),
         Positioned(
           left: 0,
           right: 0,
@@ -827,14 +834,12 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
               : IgnorePointer(
                   child: Align(
                     alignment: const Alignment(0, -.5),
-                    child: Container(
+                    child: LiquidGlass(
+                      borderRadius: BorderRadius.circular(12),
+                      blur: 14,
                       padding: const EdgeInsets.symmetric(
                         horizontal: 16,
                         vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: .72),
-                        borderRadius: BorderRadius.circular(12),
                       ),
                       child: Text(
                         _hint,
@@ -883,63 +888,40 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
 
   Widget _header() {
     final session = _session;
-    const shadow = [Shadow(color: Color(0x66000000), blurRadius: 2)];
     return Row(
-      spacing: 2,
+      spacing: 8,
       children: [
-        IconButton(
+        LiquidGlassIconButton(
+          size: 40,
           onPressed: () => unawaited(Navigator.maybePop(context)),
-          icon: const Icon(Icons.arrow_back_rounded),
-          color: Colors.white,
           tooltip: '返回',
-          style: IconButton.styleFrom(fixedSize: const Size.square(48)),
+          child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
         ),
         Expanded(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                session.detail.drama.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  shadows: shadow,
-                ),
+          child: LiquidGlass(
+            borderRadius: BorderRadius.circular(20),
+            blur: 14,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            child: Text(
+              session.detail.drama.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
               ),
-              Text(
-                session.episode.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: .78),
-                  fontSize: 12,
-                  shadows: shadow,
-                ),
-              ),
-            ],
+            ),
           ),
         ),
-        FollowIcon(
-          store: widget.store,
-          drama: session.detail.drama,
-          color: Colors.white,
-          activeColor: Theme.of(context).colorScheme.primaryFixedDim,
-        ),
-        if (!desktopPlatform) PlayerLockButton(locked: false, onPressed: _lock),
       ],
     );
   }
 
-  Widget _seekBubble(double value) => Container(
+  Widget _seekBubble(double value) => LiquidGlass(
+    borderRadius: BorderRadius.circular(12),
+    blur: 14,
     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-    decoration: BoxDecoration(
-      color: Colors.black.withValues(alpha: .5),
-      borderRadius: BorderRadius.circular(12),
-    ),
     child: Text.rich(
       TextSpan(
         text: formatClock(Duration(milliseconds: value.round())),
@@ -956,6 +938,16 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
         fontWeight: FontWeight.w700,
         fontFeatures: [FontFeature.tabularFigures()],
       ),
+    ),
+  );
+
+  // 贴底的液态玻璃通条，里面是一条细进度线，可拖动。
+  Widget _progressBand(BuildContext context) => LiquidGlass(
+    borderRadius: BorderRadius.zero,
+    blur: 14,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: _progress(context),
     ),
   );
 
@@ -976,13 +968,12 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     final position = (_seekValue ?? state.position.inMilliseconds.toDouble())
         .clamp(0.0, max);
     final dragging = _dragging;
-    final colors = Theme.of(context).colorScheme;
     return SliderTheme(
       data: SliderTheme.of(context).copyWith(
         trackHeight: dragging ? 6 : 3,
         padding: EdgeInsets.zero,
-        activeTrackColor: colors.primary,
-        thumbColor: colors.primary,
+        activeTrackColor: Colors.white,
+        thumbColor: Colors.white,
         inactiveTrackColor: Colors.white.withValues(alpha: .25),
         secondaryActiveTrackColor: Colors.white.withValues(alpha: .4),
         thumbShape: RoundSliderThumbShape(
@@ -1038,74 +1029,78 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     final drama = _session.detail.drama;
     final count = _session.detail.episodes.length;
     final status = _status(drama);
-    return Material(
-      color: Colors.white.withValues(alpha: .14),
+    return LiquidGlass(
       borderRadius: BorderRadius.circular(12),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: _openEpisodes,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
-          child: Row(
-            spacing: 8,
-            children: [
-              const Icon(
-                Icons.view_list_rounded,
-                size: 18,
-                color: Colors.white,
-              ),
-              const Text(
-                '选集',
-                style: TextStyle(
+      blur: 14,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: _openEpisodes,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
+            child: Row(
+              spacing: 8,
+              children: [
+                const Icon(
+                  Icons.view_list_rounded,
+                  size: 18,
                   color: Colors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
                 ),
-              ),
-              Expanded(
-                child: Text(
-                  '· $status共 $count 集',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                const Text(
+                  '选集',
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: .72),
+                    color: Colors.white,
                     fontSize: 14,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-              ),
-              const Icon(
-                Icons.keyboard_arrow_up_rounded,
-                size: 20,
-                color: Colors.white,
-              ),
-            ],
+                Expanded(
+                  child: Text(
+                    '· $status共 $count 集',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: .72),
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+                const Icon(
+                  Icons.keyboard_arrow_up_rounded,
+                  size: 20,
+                  color: Colors.white,
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _boostBadge() => Container(
-    height: 32,
+  Widget _boostBadge() => LiquidGlass(
+    borderRadius: BorderRadius.circular(16),
+    blur: 14,
     padding: const EdgeInsets.symmetric(horizontal: 14),
-    decoration: BoxDecoration(
-      color: Colors.black.withValues(alpha: .5),
-      borderRadius: BorderRadius.circular(16),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      spacing: 6,
-      children: [
-        const Icon(Icons.fast_forward_rounded, size: 16, color: Colors.white),
-        Text(
-          '${_session.store.playbackPreferences.boostLabel}播放中',
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
+    child: SizedBox(
+      height: 32,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        spacing: 6,
+        children: [
+          const Icon(Icons.fast_forward_rounded, size: 16, color: Colors.white),
+          Text(
+            '${_session.store.playbackPreferences.boostLabel}播放中',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     ),
   );
 }
