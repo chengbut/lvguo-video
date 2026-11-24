@@ -63,7 +63,8 @@ class PlaybackPreloader extends ChangeNotifier {
       return;
     }
     final ticket = _generation;
-    _delay = Timer(const Duration(milliseconds: 600), () async {
+    // 防抖 300ms：避免状态抖动时反复触发预加载，同时尽快开始准备下一集。
+    _delay = Timer(const Duration(milliseconds: 300), () async {
       _delay = null;
       loading = true;
       notifyListeners();
