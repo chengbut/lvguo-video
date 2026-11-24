@@ -9,7 +9,6 @@ import 'package:media_kit/media_kit.dart';
 import '../../playback_preferences.dart';
 import '../../playback_session.dart';
 import '../app_scope.dart';
-import '../settings/sorani_account_view.dart';
 import '../theme/motion.dart';
 import '../widgets/contained_slider.dart';
 import '../widgets/motion/motion_widgets.dart';
@@ -1268,23 +1267,13 @@ class PlaybackFailure extends StatelessWidget {
                 runSpacing: 8,
                 alignment: WrapAlignment.center,
                 children: [
-                  if (session.loginRequired)
-                    FilledButton(
-                      focusNode: retryFocus,
-                      onPressed: () async {
-                        if (await showSoraniLogin(context) != null) {
-                          await session.retry();
-                        }
-                      },
-                      child: const Text('去登录'),
-                    )
-                  else
-                    FilledButton(
-                      focusNode: retryFocus,
-                      onPressed: session.retry,
-                      child: Text(session.localFailure ? '重试本地播放' : '重试'),
-                    ),
-                  if (!session.loginRequired && session.currentPosition > 0)
+                  // 登录入口已移除：站源要求登录时只显示错误与重试，不再弹出登录框。
+                  FilledButton(
+                    focusNode: retryFocus,
+                    onPressed: session.retry,
+                    child: Text(session.localFailure ? '重试本地播放' : '重试'),
+                  ),
+                  if (session.currentPosition > 0)
                     TextButton(
                       onPressed: session.retryFromStart,
                       child: const Text('从头播放'),
