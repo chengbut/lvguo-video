@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../../app_device.dart';
 import '../../playback_session.dart';
+import '../widgets/liquid_glass.dart';
 import 'fade_presence.dart';
 import 'player_surface.dart';
 
@@ -222,12 +223,10 @@ class _SwipeControlsState extends State<SwipeControls> {
   Widget _badge(Widget child) => IgnorePointer(
     child: Align(
       alignment: const Alignment(0, -.4),
-      child: Container(
+      child: LiquidGlass(
+        borderRadius: BorderRadius.circular(12),
+        blur: 14,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: .5),
-          borderRadius: BorderRadius.circular(12),
-        ),
         child: child,
       ),
     ),
