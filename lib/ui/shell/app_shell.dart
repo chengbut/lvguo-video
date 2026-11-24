@@ -93,6 +93,13 @@ class HideOnScroll extends StatelessWidget {
   );
 }
 
+/// 手机端胶囊底栏在内容底部需要预留的高度：胶囊高 64 + 下边距 10 + 系统安全区。
+/// 只有手机端有胶囊底栏，平板/桌面/电视返回 0。
+double capsuleBarClearance(BuildContext context) =>
+    AppScope.formFactorOf(context) == FormFactor.phone
+        ? MediaQuery.of(context).padding.bottom + 64 + 10
+        : 0;
+
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.store});
   final LocalStore store;
@@ -367,23 +374,29 @@ class _AppShellState extends State<AppShell> {
         FormFactor.phone => ShellBars(
           notifier: _barsShown,
           child: Scaffold(
+            // 内容延伸到底栏下方：胶囊下方的区域是透明的，手指可穿透到底层列表滑动。
+            extendBody: true,
             body: NotificationListener<ScrollNotification>(
               onNotification: _scrolled,
               child: pages,
             ),
+            // 滑动时底栏不再消失；只有胶囊本身接手势，周围留白全部穿透到下层。
             bottomNavigationBar: covered
                 ? null
-                : HideOnScroll(
-                    alignment: Alignment.topCenter,
+                : IgnorePointer(
+                    ignoring: true,
                     child: SafeArea(
                       top: false,
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                        child: _CapsuleBar(
-                          tabs: phoneTabs,
-                          selected: _tab,
-                          onTap: _tap,
-                          badged: _badged,
+                        child: IgnorePointer(
+                          ignoring: false,
+                          child: _CapsuleBar(
+                            tabs: phoneTabs,
+                            selected: _tab,
+                            onTap: _tap,
+                            badged: _badged,
+                          ),
                         ),
                       ),
                     ),
