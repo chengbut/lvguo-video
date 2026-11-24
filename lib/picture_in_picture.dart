@@ -55,7 +55,8 @@ class PictureInPicture extends ChangeNotifier {
   double? _windowRatio;
   Timer? _timer;
   Map<String, Object>? _sent;
-  ({Player player, bool playing, bool autoEnter})? _iosSent;
+  ({Player player, bool playing, bool autoEnter, String? episodeLabel})?
+  _iosSent;
   int _iosUpdate = 0;
   ({Rect bounds, bool maximized, bool fullScreen})? _macRestore;
 
@@ -147,6 +148,7 @@ class PictureInPicture extends ChangeNotifier {
     required bool hasNext,
     required bool autoEnter,
     Player? iosPlayer,
+    String? episodeLabel,
   }) {
     if (!_system || !_supported) return;
     if (_ios) {
@@ -154,10 +156,17 @@ class PictureInPicture extends ChangeNotifier {
         clear();
         return;
       }
-      final next = (player: iosPlayer, playing: playing, autoEnter: autoEnter);
+      final next = (
+        player: iosPlayer,
+        playing: playing,
+        autoEnter: autoEnter,
+        episodeLabel: episodeLabel,
+      );
       if (_iosSent == next) return;
       _iosSent = next;
-      unawaited(_updateIOS(iosPlayer, playing, autoEnter, ++_iosUpdate));
+      unawaited(
+        _updateIOS(iosPlayer, playing, autoEnter, episodeLabel, ++_iosUpdate),
+      );
       return;
     }
     final next = <String, Object>{
@@ -180,6 +189,7 @@ class PictureInPicture extends ChangeNotifier {
     Player player,
     bool playing,
     bool autoEnter,
+    String? episodeLabel,
     int revision,
   ) async {
     try {
@@ -189,6 +199,7 @@ class PictureInPicture extends ChangeNotifier {
         'handle': handle,
         'playing': playing,
         'autoEnter': autoEnter,
+        if (episodeLabel != null) 'episodeLabel': episodeLabel,
       });
     } catch (_) {}
   }
