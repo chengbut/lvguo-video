@@ -279,6 +279,21 @@ class SettingsSection extends StatelessWidget {
               preferences.copyWith(recordHistory: value),
             ),
           ),
+          SwitchTile(
+            title: '自动清屏',
+            subtitle: '进播放 1 秒后自动隐藏标题、进度条和选集，点屏幕可重新显示',
+            value: preferences.autoClearScreen,
+            onChanged: (value) => savePreferences(
+              preferences.copyWith(autoClearScreen: value),
+            ),
+          ),
+          SwitchTile(
+            title: '显示弹幕',
+            subtitle: '与弹幕分组的开关同步',
+            value: preferences.danmaku,
+            onChanged: (value) =>
+                savePreferences(preferences.copyWith(danmaku: value)),
+          ),
         ],
       ),
       if ((Platform.isAndroid || Platform.isIOS) && !television)
