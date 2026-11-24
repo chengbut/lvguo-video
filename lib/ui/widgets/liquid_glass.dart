@@ -16,6 +16,7 @@ class LiquidGlass extends StatelessWidget {
     this.blur = 18,
     this.padding,
     this.margin,
+    this.tint = 1.0,
   });
 
   final Widget child;
@@ -23,6 +24,9 @@ class LiquidGlass extends StatelessWidget {
   final double blur;
   final EdgeInsetsGeometry? padding;
   final EdgeInsetsGeometry? margin;
+
+  /// 玻璃底色的浓度：1 为默认，0 为完全透明（只留实时模糊 + 细边框，
+  /// 后面的内容直接透出来）。
 
   @override
   Widget build(BuildContext context) {
@@ -47,20 +51,20 @@ class LiquidGlass extends StatelessWidget {
             padding: padding,
             decoration: BoxDecoration(
               borderRadius: borderRadius,
-              // 顶部高光到底部渐暗，模拟玻璃的光泽。
+              // 顶部高光到底部渐暗，模拟玻璃的光泽；tint 缩放底色浓度。
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: dark
                     ? [
-                        Colors.white.withValues(alpha: .22),
-                        Colors.white.withValues(alpha: .07),
-                        Colors.white.withValues(alpha: .14),
+                        Colors.white.withValues(alpha: .22 * tint),
+                        Colors.white.withValues(alpha: .07 * tint),
+                        Colors.white.withValues(alpha: .14 * tint),
                       ]
                     : [
-                        Colors.white.withValues(alpha: .55),
-                        Colors.white.withValues(alpha: .28),
-                        Colors.white.withValues(alpha: .42),
+                        Colors.white.withValues(alpha: .55 * tint),
+                        Colors.white.withValues(alpha: .28 * tint),
+                        Colors.white.withValues(alpha: .42 * tint),
                       ],
               ),
               border: Border.all(
