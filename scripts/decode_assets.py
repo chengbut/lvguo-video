@@ -1,1 +1,38 @@
-IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJEZWNvZGUgYmFzZTY0LWVuY29kZWQgYmluYXJ5IGFzc2V0cyBiYWNrIHRvIHRoZWlyIG9yaWdpbmFsIHBhdGhzLgoKVGhlIEdpdEh1YiBwdXNoIHJvdXRlIHVzZWQgZm9yIHRoaXMgcmVwbyBvbmx5IGFjY2VwdHMgVVRGLTggdGV4dCBmaWxlcywgc28KYmluYXJ5IGFzc2V0cyAoUE5HIGljb25zLCBlbW9qaSwgLmljbykgYXJlIHN0b3JlZCBhcyBgPHBhdGg+LmI2NGAgdGV4dCBmaWxlcy4KUnVuIHRoaXMgb25jZSBhZnRlciBjaGVja291dCAobG9jYWxseSBvciBpbiBDSSkgYmVmb3JlIGJ1aWxkaW5nOgoKICAgIHB5dGhvbjMgc2NyaXB0cy9kZWNvZGVfYXNzZXRzLnB5CgpJdCB3YWxrcyB0aGUgcmVwbyBmb3IgYCouYjY0YCBmaWxlcyBhbmQgd3JpdGVzIGVhY2ggZGVjb2RlZCBmaWxlIHRvIHRoZSBzYW1lCnBhdGggd2l0aG91dCB0aGUgYC5iNjRgIHN1ZmZpeCwgc2tpcHBpbmcgZmlsZXMgdGhhdCBhbHJlYWR5IGV4aXN0IHdpdGgKaWRlbnRpY2FsIGNvbnRlbnQuCiIiIgppbXBvcnQgYmFzZTY0CmltcG9ydCBzeXMKZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpST09UID0gUGF0aChfX2ZpbGVfXykucmVzb2x2ZSgpLnBhcmVudC5wYXJlbnQKCmRlZiBtYWluKCkgLT4gaW50OgogICAgZGVjb2RlZCA9IDAKICAgIHNraXBwZWQgPSAwCiAgICBmb3IgYjY0X3BhdGggaW4gc29ydGVkKFJPT1Qucmdsb2IoIiouYjY0IikpOgogICAgICAgIGlmICIuZ2l0IiBpbiBiNjRfcGF0aC5wYXJ0czoKICAgICAgICAgICAgY29udGludWUKICAgICAgICB0YXJnZXQgPSBiNjRfcGF0aC53aXRoX3N1ZmZpeCgiIikKICAgICAgICBkYXRhID0gYmFzZTY0LmI2NGRlY29kZShiNjRfcGF0aC5yZWFkX3RleHQoZW5jb2Rpbmc9ImFzY2lpIikpCiAgICAgICAgaWYgdGFyZ2V0LmV4aXN0cygpIGFuZCB0YXJnZXQucmVhZF9ieXRlcygpID09IGRhdGE6CiAgICAgICAgICAgIHNraXBwZWQgKz0gMQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIHRhcmdldC5wYXJlbnQubWtkaXIocGFyZW50cz1UcnVlLCBleGlzdF9vaz1UcnVlKQogICAgICAgIHRhcmdldC53cml0ZV9ieXRlcyhkYXRhKQogICAgICAgIGRlY29kZWQgKz0gMQogICAgcHJpbnQoZiJkZWNvZGVfYXNzZXRzOiBkZWNvZGVkIHtkZWNvZGVkfSwgc2tpcHBlZCB7c2tpcHBlZH0gKGFscmVhZHkgcHJlc2VudCkiKQogICAgcmV0dXJuIDAKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBzeXMuZXhpdChtYWluKCkpCg==
+#!/usr/bin/env python3
+"""Decode base64-encoded binary assets back to their original paths.
+
+The GitHub push route used for this repo only accepts UTF-8 text files, so
+binary assets (PNG icons, emoji, .ico) are stored as `<path>.b64` text files.
+Run this once after checkout (locally or in CI) before building:
+
+    python3 scripts/decode_assets.py
+
+It walks the repo for `*.b64` files and writes each decoded file to the same
+path without the `.b64` suffix, skipping files that already exist with
+identical content.
+"""
+import base64
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+def main() -> int:
+    decoded = 0
+    skipped = 0
+    for b64_path in sorted(ROOT.rglob("*.b64")):
+        if ".git" in b64_path.parts:
+            continue
+        target = b64_path.with_suffix("")
+        data = base64.b64decode(b64_path.read_text(encoding="ascii"))
+        if target.exists() and target.read_bytes() == data:
+            skipped += 1
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        decoded += 1
+    print(f"decode_assets: decoded {decoded}, skipped {skipped} (already present)")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
