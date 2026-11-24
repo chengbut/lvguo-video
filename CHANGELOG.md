@@ -2,6 +2,10 @@
 
 每个版本一节，标题为 `pubspec.yaml` 中的完整版本号。发布工作流会把对应一节写入 GitHub Release 说明。
 
+## 1.4.0+3
+
+- 重新触发构建：上次 Android 构建失败，本地排查未发现确定性原因（Dart 代码、图标资源、构建脚本均正常，iOS 同一份代码已编过），重新编一次验证。
+
 ## 1.4.0+2
 
 - 修复构建失败：补 liquid_glass.dart 漏掉的 tint 字段声明（构造函数和 build() 都在用 tint，类里却没有 `final double tint;`，Dart 编译不过，v1.4.0 的 iOS 构建因此失败）。
