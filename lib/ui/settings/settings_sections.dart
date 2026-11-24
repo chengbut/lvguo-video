@@ -19,7 +19,6 @@ import '../../window_on_top.dart';
 import '../app_scope.dart';
 import '../player/danmaku_settings.dart';
 import '../update_prompt.dart';
-import '../users/users_view.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/form_text_field.dart';
 import '../widgets/group_card.dart';
@@ -38,7 +37,6 @@ enum SettingsGroup {
   download('下载', Icons.download_rounded),
   storage('存储', Icons.folder_outlined),
   proxy('代理', Icons.language_rounded),
-  users('用户', Icons.manage_accounts_outlined),
   about('关于', Icons.info_outline_rounded),
   diagnostics('诊断', Icons.receipt_long_outlined);
 
@@ -110,7 +108,6 @@ class SettingsSection extends StatelessWidget {
               SettingsGroup.download => _download(context),
               SettingsGroup.storage => _storage(),
               SettingsGroup.proxy => _proxy(context),
-              SettingsGroup.users => [UsersView(store: store, open: open)],
               SettingsGroup.about => _about(context),
               SettingsGroup.diagnostics => _diagnostics(),
               _ => const [],
