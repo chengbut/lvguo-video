@@ -55,10 +55,10 @@ class LandscapePlayerPage extends StatefulWidget {
 }
 
 class _LandscapePlayerPageState extends State<LandscapePlayerPage>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+    with WidgetsBindingObserver {
   final List<StreamSubscription<dynamic>> _subscriptions = [];
-  late final _tabs = TabController(length: 2, initialIndex: 1, vsync: this);
   final _selected = <int>{};
+  bool _episodesExpanded = false;
   final _links = {
     _Panel.speed: LayerLink(),
     _Panel.quality: LayerLink(),
@@ -97,15 +97,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       unawaited(AppDevice.setPlayerOrientation(PlayerOrientation.auto));
     }
     _session.addListener(_bind);
-    _tabs.addListener(_tabChanged);
     _bind();
     _scheduleHide();
   }
-
-  void _tabChanged() => setState(() {
-    _selecting = false;
-    _selected.clear();
-  });
 
   @override
   void didChangeDependencies() {
@@ -142,7 +136,6 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     _clockTimer?.cancel();
     _seekTimer?.cancel();
     _hintTimer?.cancel();
-    _tabs.dispose();
     if (_holding) _session.endBoost();
     if (widget.onFullscreen == null) {
       if (_full == true && desktopPlatform) {
@@ -1376,168 +1369,93 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   }
 
   Widget _details(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
+    final session = _session;
+    final episodes = session.detail.episodes;
+    final seasons = session.detail.seasons;
+    final expanded = _episodesExpanded || _selecting;
     return SafeArea(
       top: false,
       child: Column(
         children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border(bottom: BorderSide(color: colors.outlineVariant)),
-            ),
-            child: SizedBox(
-              height: 48,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+          Expanded(
+            child: expanded
+                ? Column(
                     children: [
-                      for (final (index, label) in const ['简介', '选集'].indexed)
-                        Expanded(child: _tabButton(context, index, label)),
-                    ],
-                  ),
-                  IgnorePointer(
-                    child: AnimatedBuilder(
-                      animation: _tabs.animation!,
-                      builder: (context, child) => Align(
-                        alignment: Alignment(_tabs.animation!.value * 2 - 1, 1),
-                        child: child,
-                      ),
-                      child: FractionallySizedBox(
-                        widthFactor: .5,
-                        child: Center(
-                          heightFactor: 1,
-                          child: Container(
-                            width: 32,
-                            height: 3,
-                            decoration: BoxDecoration(
-                              color: colors.primary,
-                              borderRadius: const BorderRadius.vertical(
-                                top: Radius.circular(3),
-                              ),
-                            ),
+                      if (seasons.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                          child: SeasonStrip(
+                            seasons: seasons,
+                            current: session.detail.drama.id,
+                            store: widget.store,
+                            metaSize: 13,
+                            tagSize: 12,
+                            sectionSize: 15,
+                            collapsed: false,
+                            currentStatus: '正在播放',
+                            onSelected: (season) =>
+                                unawaited(_playSeason(season)),
                           ),
                         ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+                      Expanded(child: _episodes(context)),
+                    ],
+                  )
+                : const SizedBox.shrink(),
           ),
-          Expanded(
-            child: TabBarView(
-              controller: _tabs,
-              physics: _selecting ? const NeverScrollableScrollPhysics() : null,
-              children: [_intro(context), _episodes(context)],
-            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: _episodeBar(context, episodes.length, expanded),
           ),
         ],
       ),
     );
   }
 
-  Widget _tabButton(BuildContext context, int index, String label) {
+  Widget _episodeBar(BuildContext context, int count, bool expanded) {
     final colors = Theme.of(context).colorScheme;
-    final selected = _tabs.index == index;
-    return Semantics(
-      selected: selected,
-      child: InkWell(
-        onTap: () {
-          if (_selecting) _select(false);
-          _tabs.animateTo(
-            index,
-            duration: Motion.of(context, Motion.long),
-            curve: Motion.standard,
-          );
-        },
-        child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              color: selected ? colors.primary : colors.onSurfaceVariant,
+    return LiquidGlass(
+      borderRadius: BorderRadius.circular(12),
+      blur: 14,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () {
+            if (_selecting) _select(false);
+            setState(() => _episodesExpanded = !expanded);
+          },
+          child: SizedBox(
+            height: 48,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '选集 · 全$count集 · 免费观看',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: colors.onSurface,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    expanded
+                        ? Icons.keyboard_arrow_down_rounded
+                        : Icons.keyboard_arrow_up_rounded,
+                    size: 22,
+                    color: colors.onSurfaceVariant,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ),
-    );
-  }
-
-  Widget _intro(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final session = _session;
-    final drama = session.detail.drama;
-    final meta = [
-      SourceSite.byId(drama.source).displayName,
-      '共 ${session.detail.episodes.length} 集',
-      if (drama.releaseLabel != '状态未知') drama.releaseLabel,
-      if (drama.category.isNotEmpty) drama.category,
-    ];
-    final description = drama.description.trim();
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  drama.title,
-                  style: const TextStyle(
-                    fontSize: 19,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ),
-            Transform.translate(
-              offset: const Offset(8, 0),
-              child: FollowIcon(
-                store: widget.store,
-                drama: drama,
-                color: colors.onSurfaceVariant,
-                activeColor: colors.primary,
-                extent: 44,
-              ),
-            ),
-          ],
-        ),
-        Text(
-          meta.join(' · '),
-          style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant),
-        ),
-        const SizedBox(height: 10),
-        Text(
-          description.isEmpty ? '暂无简介' : description,
-          style: TextStyle(
-            fontSize: 14,
-            height: 1.6,
-            color: description.isEmpty
-                ? colors.onSurfaceVariant
-                : colors.onSurface,
-          ),
-        ),
-        if (session.detail.seasons.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 16),
-            child: SeasonStrip(
-              seasons: session.detail.seasons,
-              current: drama.id,
-              store: widget.store,
-              metaSize: 13,
-              tagSize: 12,
-              sectionSize: 15,
-              collapsed: false,
-              currentStatus: '正在播放',
-              onSelected: (season) => unawaited(_playSeason(season)),
-            ),
-          ),
-      ],
     );
   }
 
