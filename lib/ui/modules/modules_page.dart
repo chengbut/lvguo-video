@@ -74,7 +74,7 @@ class _ModulesPageState extends State<ModulesPage>
 
   AppRepository get _repository => AppScope.of(context).repository;
 
-  bool get _canInstall => _store.profile.admin && !_store.locked && !_busy;
+  bool get _canInstall => !_store.locked && !_busy;
 
   @override
   void initState() {
@@ -230,9 +230,7 @@ class _ModulesPageState extends State<ModulesPage>
   }
 
   ValueChanged<bool>? _toggleFor(SourceModule module) =>
-      _store.profile.admin &&
-          module.error.isEmpty &&
-          SourceSite.isAvailable(module.id)
+      module.error.isEmpty && SourceSite.isAvailable(module.id)
       ? (value) => _toggle(module, value)
       : null;
 
@@ -253,7 +251,6 @@ class _ModulesPageState extends State<ModulesPage>
               update: update,
               enabled: _store.sourceEnabled(module.id),
               onToggle: _toggleFor(module),
-              admin: _store.profile.admin,
               onUpdate: null,
               onUninstall: enabled
                   ? () async {
@@ -331,7 +328,6 @@ class _ModulesPageState extends State<ModulesPage>
       update: null,
       enabled: _store.sourceEnabled(module.id),
       onToggle: _toggleFor(module),
-      admin: _store.profile.admin,
       onDetails: AppScope.of(context).television
           ? () => _menu(module, null)
           : () => _details(module),
@@ -341,7 +337,6 @@ class _ModulesPageState extends State<ModulesPage>
     final header = [if (_error case final error?) _Note(error)];
     if (modules != null &&
         modules.length > 1 &&
-        _store.profile.admin &&
         !_store.locked &&
         !AppScope.of(context).television) {
       return _reorderable(modules, header, card);
@@ -723,7 +718,6 @@ class _InstalledCard extends StatelessWidget {
     required this.update,
     required this.enabled,
     required this.onToggle,
-    required this.admin,
     required this.onDetails,
     required this.onUpdate,
     required this.onUninstall,
@@ -732,7 +726,6 @@ class _InstalledCard extends StatelessWidget {
   final ModuleIndexEntry? update;
   final bool enabled;
   final ValueChanged<bool>? onToggle;
-  final bool admin;
   final VoidCallback onDetails;
   final VoidCallback? onUpdate;
   final VoidCallback? onUninstall;
@@ -1137,7 +1130,6 @@ class _ModuleMenu extends StatelessWidget {
     required this.update,
     required this.enabled,
     required this.onToggle,
-    required this.admin,
     required this.onUpdate,
     required this.onUninstall,
   });
@@ -1145,7 +1137,6 @@ class _ModuleMenu extends StatelessWidget {
   final ModuleIndexEntry? update;
   final bool enabled;
   final ValueChanged<bool>? onToggle;
-  final bool admin;
   final VoidCallback? onUpdate;
   final VoidCallback? onUninstall;
 
