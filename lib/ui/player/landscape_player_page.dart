@@ -1471,7 +1471,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     final session = _session;
     final drama = session.detail.drama;
     final meta = [
-      SourceSite.byId(drama.source).name,
+      SourceSite.byId(drama.source).displayName,
       '共 ${session.detail.episodes.length} 集',
       if (drama.releaseLabel != '状态未知') drama.releaseLabel,
       if (drama.category.isNotEmpty) drama.category,
