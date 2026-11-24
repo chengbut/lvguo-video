@@ -93,9 +93,7 @@ Future<void> offerRestoredModules(
         if (!latest.containsKey(id)) id,
     ];
   } catch (failure) {
-    messenger.showSnackBar(
-      SnackBar(content: Text('无法读取模块仓库，备份里的模块未安装：$failure')),
-    );
+    // 在线仓库已移除，备份里的模块无法自动找回，需手动安装；不打扰用户。
     return;
   }
   if (entries.isEmpty || !context.mounted) return;
