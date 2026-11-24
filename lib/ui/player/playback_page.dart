@@ -126,6 +126,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
       hasPrevious: session.hasPrevious,
       hasNext: session.hasNext,
       iosPlayer: iosVideo ? session.player : null,
+      // 多集剧才显示集数（单集电影不显示“第1集”）；随切集同步更新。
+      episodeLabel: session.detail.episodes.length > 1
+          ? '第${session.episode.number}集'
+          : null,
       autoEnter:
           playing &&
           !_television &&
