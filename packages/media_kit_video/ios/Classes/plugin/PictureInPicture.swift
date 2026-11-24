@@ -64,6 +64,7 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
       if controller.isPictureInPictureActive {
         controller.stopPictureInPicture()
       } else if !starting {
+        layer.flushAndRemoveImage()
         layer.removeFromSuperlayer()
       }
       return
@@ -167,7 +168,12 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
       let root = window.rootViewController?.view,
       let parent = root.layer.superlayer else { return }
     if layer.superlayer !== parent {
-      parent.insertSublayer(layer, below: root.layer)
+      // 插到窗口图层的最底层，而不是 root.layer 正下方：保证它永远在
+      // 全部应用内容之后。之前插在 root.layer 下方时，画中画回前台的
+      // 恢复过渡里它可能被别的图层盖到上面，旧帧（带集数角标）就漏
+      // 出来，上面叠一张小画面。图层本身只是画中画的内容源，放在
+      // 最底层不影响画中画窗口取帧。
+      parent.insertSublayer(layer, at: 0)
     }
     layer.frame = root.layer.frame
   }
@@ -294,7 +300,14 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
 
   private func finish() {
     starting = false
-    if selectedHandle == nil { layer.removeFromSuperlayer() }
+    // 画中画停了就把图层摘掉并清掉最后一帧：图层里留的是画中画那帧
+    //（带集数角标），之前只要播放页还活着、图层就一直挂着旧帧，回
+    // 前台的恢复过渡里它一漏出来，上面就叠一张带角标的小画面。
+    // 摘掉后 hasFrame 保持 true（画中画仍可进），下次进画中画或
+    // 切集时再由 enqueue/update 重新挂上并喂帧；空图层本身不显示
+    // 内容，挂回去也不怕。
+    layer.flushAndRemoveImage()
+    layer.removeFromSuperlayer()
     channel.invokeMethod("pictureInPictureChanged", arguments: ["active": false])
   }
 
