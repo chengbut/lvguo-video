@@ -17,7 +17,6 @@ import '../theme/app_theme.dart';
 import '../theme/motion.dart';
 import '../widgets/contained_slider.dart';
 import '../widgets/motion/motion_widgets.dart';
-import '../widgets/liquid_glass.dart';
 import '../widgets/native_glass.dart';
 import 'cast_page.dart';
 import 'danmaku_overlay.dart';
@@ -452,8 +451,8 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     player: _session.player,
     active: true,
     builder: (context) => Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: SizedBox(height: 20, child: _progressBar(context, thumb: 6)),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: SizedBox(height: 18, child: _progressBar(context, thumb: 6)),
     ),
   );
 
@@ -1017,26 +1016,30 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     final expanded = _episodesExpanded || _selecting;
     return AdaptiveGlass(
       borderRadius: BorderRadius.circular(20),
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           // 控制行：暂停、时间、弹幕、全屏；选集展开时隐藏。
+          // 行内按钮不套玻璃圈（块本身就是玻璃），只留白图标。
           if (!expanded)
             SizedBox(
-              height: 44,
+              height: 40,
               child: Row(
                 children: [
-                  _playButton(size: 40, iconSize: 26),
-                  const SizedBox(width: 4),
+                  _playButton(size: 40, iconSize: 26, glass: false),
+                  const SizedBox(width: 8),
                   _clock(13),
                   const Spacer(),
-                  if (session.danmakuSupported) _danmakuButton(context),
+                  if (session.danmakuSupported)
+                    _danmakuButton(context, glass: false),
+                  const SizedBox(width: 4),
                   _icon(
                     Icons.fullscreen_rounded,
                     '全屏',
                     widget.onFullscreen ?? () => _rotate(false),
                     size: 40,
+                    glass: false,
                   ),
                 ],
               ),
@@ -1244,7 +1247,11 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
   }
 
-  Widget _playButton({required double size, required double iconSize}) {
+  Widget _playButton({
+    required double size,
+    required double iconSize,
+    bool glass = true,
+  }) {
     final playing = !_session.paused;
     return _icon(
       playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
@@ -1252,6 +1259,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       _session.ready ? _session.togglePlayback : null,
       size: size,
       iconSize: iconSize,
+      glass: glass,
     );
   }
 
@@ -1275,7 +1283,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     },
   );
 
-  Widget _danmakuButton(BuildContext context) {
+  Widget _danmakuButton(BuildContext context, {bool glass = true}) {
     final enabled = _session.danmakuEnabled;
     return _icon(
       enabled ? Icons.subtitles_rounded : Icons.subtitles_off_rounded,
@@ -1283,9 +1291,12 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       () => _change(_session.toggleDanmaku),
       color: enabled ? Theme.of(context).colorScheme.primary : null,
       size: 40,
+      glass: glass,
     );
   }
 
+  // 浮在视频上的圆钮：原生玻璃（.clear、无额外白边，和顶栏同款）。
+  // 竖屏底块里 glass: false，不套圈只留白图标（块本身就是玻璃）。
   Widget _icon(
     IconData icon,
     String label,
@@ -1293,10 +1304,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     double size = 44,
     double iconSize = 24,
     Color? color,
-  }) => LiquidGlass(
-    borderRadius: BorderRadius.circular(size / 2),
-    blur: 14,
-    child: IconButton(
+    bool glass = true,
+  }) {
+    final button = IconButton(
       onPressed: onPressed,
       icon: ToggleIconSwitcher(child: Icon(icon, key: ValueKey(icon))),
       iconSize: iconSize,
@@ -1307,8 +1317,16 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
         fixedSize: Size.square(size),
         padding: EdgeInsets.zero,
       ),
-    ),
-  );
+    );
+    if (!glass) return button;
+    return AdaptiveGlass(
+      borderRadius: BorderRadius.circular(size / 2),
+      blur: 14,
+      style: NativeGlassStyle.clear,
+      showBorder: false,
+      child: button,
+    );
+  }
 
   Widget _textButton(
     String text,
@@ -1746,6 +1764,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                   color: Colors.white,
                 ),
               ),
+            const SizedBox(width: 8),
             AdaptiveGlassIconButton(
               onPressed: _openSettings,
               tooltip: '播放设置',
@@ -1773,9 +1792,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
           setState(() => _episodesExpanded = !expanded);
         },
         child: SizedBox(
-          height: 48,
+          height: 44,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(
               children: [
                 Expanded(
