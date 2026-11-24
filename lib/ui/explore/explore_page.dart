@@ -68,6 +68,7 @@ class ExplorePageState extends State<ExplorePage> {
   GlobalKey<PullRefreshState>? get _activeRefresh =>
       _paged ? _pages[_explore?.tab.id]?.refresh : _refreshKey;
 
+  // app_shell 的返回键会调：切回发现页时回顶 + 向模块要新一批。
   Future<void> refresh() async {
     final scroll = _activeScroll;
     if (scroll != null && scroll.hasClients) scroll.jumpTo(0);
@@ -230,21 +231,19 @@ class ExplorePageState extends State<ExplorePage> {
                           ),
                     ],
                     actions: [
+                      // 右上角是换一换：图标用通用刷新样式，功能仍是推荐页
+                      // 换一批（ExploreFeed.shuffleRecommendations，榜单
+                      // 热度加权随机、排除上一批）；只在推荐 tab 显示，
+                      // 洗牌中禁用。下拉刷新走另一套，不受影响。
                       if (explore.recommending)
                         BarButton(
-                          icon: Icons.shuffle_rounded,
+                          icon: Icons.refresh_rounded,
                           tooltip: '换一换',
                           onPressed: explore.shuffling
                               ? null
                               : () => unawaited(
                                   explore.shuffleRecommendations(),
                                 ),
-                        ),
-                      if (desktop)
-                        BarButton(
-                          icon: Icons.refresh_rounded,
-                          tooltip: '刷新',
-                          onPressed: explore.refresh,
                         ),
                     ],
                   ),
