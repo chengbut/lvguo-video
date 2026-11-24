@@ -156,7 +156,8 @@ class _VideoOutput {
 
   void _schedule() {
     _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 300), _apply);
+    // 去抖 300ms → 150ms：旋转/窗口变化后画面尺寸跟得更快。
+    _timer = Timer(const Duration(milliseconds: 150), _apply);
   }
 
   void _apply() {
