@@ -18,6 +18,12 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
   private var starting = false
   private var hasFrame = false
   private var possibleObservation: NSKeyValueObservation?
+  // 画中画左上角的集数标签（如“第3集”），只画在喂给画中画的帧上，
+  // 主播放器画面不受影响。图片按（文字，帧高）缓存，文字变化时重绘。
+  private var episodeLabelText: String?
+  private var episodeLabelImage: CGImage?
+  private var episodeLabelHeight: Int = 0
+  private let episodeLabelLock = NSLock()
 
   var possible: Bool { selectedHandle != nil && hasFrame && controller.isPictureInPicturePossible }
 
@@ -41,12 +47,19 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
         try? session.setActive(true)
       }
       self.selectedHandle = handle
-      hasFrame = false
-      layer.flushAndRemoveImage()
+      if controller.isPictureInPictureActive {
+        // 画中画已在播放时切集（预开的下一集换台）：保留窗口里的最后一帧，
+        // 等新播放器的帧到来再续上，不黑屏、不断开。
+        // 未进入画中画时仍按旧逻辑清空，避免进画中画时看到旧帧。
+      } else {
+        hasFrame = false
+        layer.flushAndRemoveImage()
+      }
       controller.invalidatePlaybackState()
       publishAvailability()
     }
     if handle == nil {
+      setEpisodeLabel(nil)
       controller.canStartPictureInPictureAutomaticallyFromInline = false
       if controller.isPictureInPictureActive {
         controller.stopPictureInPicture()
@@ -61,6 +74,88 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
       controller.invalidatePlaybackState()
     }
     attachLayer()
+  }
+
+  // Dart 侧随播放状态下发的当前集数（如“第3集”），nil 表示不显示。
+  // 只存文字，图片在 copyFrame（喂帧线程）里按帧高懒渲染，避免跨线程共享图片。
+  func setEpisodeLabel(_ label: String?) {
+    episodeLabelLock.lock()
+    defer { episodeLabelLock.unlock() }
+    guard episodeLabelText != label else { return }
+    episodeLabelText = label
+    episodeLabelImage = nil
+  }
+
+  private func renderEpisodeLabel(_ text: String, frameHeight: Int) -> CGImage? {
+    // 标签高约帧高的 5%，字号约为标签高的 58%，左上角小圆角黑底白字。
+    let labelHeight = max(24, Int(Double(frameHeight) * 0.05))
+    let fontSize = CGFloat(labelHeight) * 0.58
+    let font = UIFont.boldSystemFont(ofSize: fontSize)
+    let attributes: [NSAttributedString.Key: Any] = [
+      .font: font,
+      .foregroundColor: UIColor.white,
+    ]
+    let textSize = (text as NSString).size(withAttributes: attributes)
+    let padX = CGFloat(labelHeight) * 0.45
+    let width = Int(ceil(textSize.width + padX * 2))
+    let renderer = UIGraphicsImageRenderer(
+      size: CGSize(width: width, height: labelHeight)
+    )
+    let image = renderer.image { _ in
+      let background = UIBezierPath(
+        roundedRect: CGRect(x: 0, y: 0, width: width, height: labelHeight),
+        cornerRadius: CGFloat(labelHeight) * 0.4
+      )
+      UIColor.black.withAlphaComponent(0.45).setFill()
+      background.fill()
+      (text as NSString).draw(
+        at: CGPoint(x: padX, y: (CGFloat(labelHeight) - textSize.height) / 2),
+        withAttributes: attributes
+      )
+    }
+    return image.cgImage
+  }
+
+  // 把集数标签画到已拷贝好的画中画帧的左上角。32BGRA 缓冲对应
+  // premultipliedFirst + byteOrder32Little；先翻转坐标系再画，文字不上下颠倒。
+  private func drawEpisodeLabel(into buffer: CVPixelBuffer, width: Int, height: Int) {
+    episodeLabelLock.lock()
+    let text = episodeLabelText
+    var image = episodeLabelImage
+    let cachedHeight = episodeLabelHeight
+    episodeLabelLock.unlock()
+    guard let text else { return }
+    if image == nil || cachedHeight != height {
+      image = renderEpisodeLabel(text, frameHeight: height)
+      episodeLabelLock.lock()
+      episodeLabelImage = image
+      episodeLabelHeight = height
+      episodeLabelLock.unlock()
+    }
+    guard let image, let base = CVPixelBufferGetBaseAddress(buffer) else { return }
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+    guard let context = CGContext(
+      data: base,
+      width: width,
+      height: height,
+      bitsPerComponent: 8,
+      bytesPerRow: bytesPerRow,
+      space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        | CGBitmapInfo.byteOrder32Little.rawValue
+    ) else { return }
+    let labelHeight = max(24, Int(Double(height) * 0.05))
+    let scale = Double(labelHeight) / Double(image.height)
+    let labelWidth = Int(Double(image.width) * scale)
+    let margin = max(8, Int(Double(height) * 0.02))
+    context.saveGState()
+    context.translateBy(x: 0, y: CGFloat(height))
+    context.scaleBy(x: 1, y: -1)
+    context.draw(
+      image,
+      in: CGRect(x: margin, y: margin, width: labelWidth, height: labelHeight)
+    )
+    context.restoreGState()
   }
 
   private func attachLayer() {
@@ -168,6 +263,7 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
       let output = to.advanced(by: row * targetStride)
       memcpy(output, input, width * 4)
     }
+    drawEpisodeLabel(into: destination, width: width, height: height)
     return destination
   }
 
