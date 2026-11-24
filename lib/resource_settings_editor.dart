@@ -18,8 +18,7 @@ class ResourceSettingsEditor extends ChangeNotifier {
   ResourceSettings? get settings => allowed ? _settings : null;
   String? get error => allowed ? _error : null;
   bool get saving => _saving;
-  bool get allowed =>
-      store.profileEpoch == _epoch && !store.locked && store.profile.admin;
+  bool get allowed => store.profileEpoch == _epoch && !store.locked;
 
   Future<void> load() async {
     if (!allowed) return;
