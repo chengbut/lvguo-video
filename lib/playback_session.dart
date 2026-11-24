@@ -170,9 +170,11 @@ class PlaybackSession extends ChangeNotifier {
       for (final changes in [stream.duration, stream.buffer, stream.rate])
         changes.listen((_) => _sync()),
       stream.tracks.listen((tracks) {
-        if (_audioDetected || !audioOnly(tracks)) return;
-        _audioDetected = true;
-        _notify();
+        if (!_audioDetected && audioOnly(tracks)) {
+          _audioDetected = true;
+          _notify();
+        }
+        _reapplyAudioTrack(tracks);
       }),
       stream.videoParams.listen((parameters) {
         final size = videoDisplaySize(parameters);
@@ -297,6 +299,18 @@ class PlaybackSession extends ChangeNotifier {
   VideoFit _videoFit = VideoFit.auto;
   double _resumePosition = 0;
   double _unmutedVolume = 100;
+  // 画面调节（mpv brightness/contrast/saturation，-100..100，0 为原样）：
+  // 只在当前会话内生效，切集/备播后由 _configure 重新下发；不写入偏好。
+  double _brightness = 0;
+  double _contrast = 0;
+  double _saturation = 0;
+  // 字幕延迟（mpv sub-delay，秒，-5..5），同上只在会话内生效。
+  double _subtitleDelay = 0;
+  // A-B 循环点（本集内的位置）；切集时清掉，不跟到下一集。
+  Duration? _loopA;
+  Duration? _loopB;
+  // 用户手动选的音轨 id（null 为自动）；切集后新音轨列表到了再贴回去。
+  String? _audioTrackId;
 
   Player get player => _player;
 
@@ -327,6 +341,16 @@ class PlaybackSession extends ChangeNotifier {
   bool get audio => episode.audio || _audioDetected;
   VideoFit get videoFit => _videoFit;
   double get speed => _speed;
+  double get brightness => _brightness;
+  double get contrast => _contrast;
+  double get saturation => _saturation;
+  double get subtitleDelay => _subtitleDelay;
+  Duration? get loopA => _loopA;
+  Duration? get loopB => _loopB;
+  bool get loopActive => _loopA != null && _loopB != null;
+  String? get audioTrackId => _audioTrackId;
+  List<AudioTrack> get audioTracks => player.state.tracks.audio;
+  List<SubtitleTrack> get subtitleTracks => player.state.tracks.subtitle;
   DateTime? get sleepAt => _sleepAt;
   int get sleepMinutes => _sleepMinutes;
   bool get sleepAtEpisodeEnd => _sleepAtEpisodeEnd;
@@ -867,6 +891,10 @@ class PlaybackSession extends ChangeNotifier {
     if (Platform.isIOS) {
       pending.add(platform.setProperty('vid', _videoHidden ? 'no' : 'auto'));
     }
+    // 会话内画面调节与字幕延迟：换集/备播的新播放器也要重新下发。
+    // A-B 循环点是本集内的位置，不在这里下发（切集时已清掉）。
+    pending.add(_applyVideoEq(target));
+    pending.add(_applySubtitleDelay(target));
     await Future.wait(pending);
   }
 
@@ -880,7 +908,11 @@ class PlaybackSession extends ChangeNotifier {
     endBoost();
     _staleAudio = false;
     _cancelResumeWatchdog();
-    if (index != _index) _online = false;
+    if (index != _index) {
+      _online = false;
+      // 切集：A-B 循环点是本集内的位置，不跟到下一集。
+      _clearLoopState();
+    }
     if (recovery == null &&
         position == 0 &&
         _standbyOpen &&
@@ -1532,6 +1564,134 @@ class PlaybackSession extends ChangeNotifier {
       position: currentPosition,
       playWhenReady: _error != null || player.state.playing,
     );
+  }
+
+  Future<void> _applyVideoEq(Player target) async {
+    final platform = target.platform;
+    if (platform is! NativePlayer) return;
+    await platform.setProperty('brightness', _brightness.toStringAsFixed(0));
+    await platform.setProperty('contrast', _contrast.toStringAsFixed(0));
+    await platform.setProperty('saturation', _saturation.toStringAsFixed(0));
+  }
+
+  /// 画面调节：亮度/对比度/饱和度（mpv 属性，-100..100）。
+  /// 滑杆连续拖动时会频繁调用，这里只下发属性不通知，避免整页反复重建；
+  /// 滑杆行自己持有显示值。
+  Future<void> setVideoEq({
+    double? brightness,
+    double? contrast,
+    double? saturation,
+  }) async {
+    if (brightness != null) _brightness = brightness.clamp(-100, 100);
+    if (contrast != null) _contrast = contrast.clamp(-100, 100);
+    if (saturation != null) _saturation = saturation.clamp(-100, 100);
+    await _applyVideoEq(player);
+  }
+
+  Future<void> _applySubtitleDelay(Player target) async {
+    final platform = target.platform;
+    if (platform is! NativePlayer) return;
+    await platform.setProperty(
+      'sub-delay',
+      _subtitleDelay.toStringAsFixed(1),
+    );
+  }
+
+  /// 字幕延迟（mpv sub-delay，秒，-5..5）；同画面调节，不通知。
+  Future<void> setSubtitleDelay(double value) async {
+    _subtitleDelay = value.clamp(-5, 5);
+    await _applySubtitleDelay(player);
+  }
+
+  Future<void> _setLoopPoint(String property, Duration position) async {
+    final platform = player.platform;
+    if (platform is NativePlayer) {
+      await platform.setProperty(
+        property,
+        (position.inMilliseconds / 1000).toStringAsFixed(2),
+      );
+    }
+  }
+
+  /// A-B 循环：把当前进度设为 A 点（mpv ab-loop-a）。
+  Future<void> setLoopA() async {
+    _loopA = player.state.position;
+    await _setLoopPoint('ab-loop-a', _loopA!);
+    _notify();
+  }
+
+  /// A-B 循环：把当前进度设为 B 点（mpv ab-loop-b），A、B 都设好即循环。
+  Future<void> setLoopB() async {
+    if (_loopA == null) return;
+    _loopB = player.state.position;
+    await _setLoopPoint('ab-loop-b', _loopB!);
+    _notify();
+  }
+
+  /// 清除 A-B 循环（mpv ab-loop-a/b 设回 no）。
+  Future<void> clearLoop() async {
+    _clearLoopState();
+    _notify();
+  }
+
+  void _clearLoopState() {
+    if (_loopA == null && _loopB == null) return;
+    _loopA = null;
+    _loopB = null;
+    final platform = player.platform;
+    if (platform is NativePlayer) {
+      unawaited(platform.setProperty('ab-loop-a', 'no'));
+      unawaited(platform.setProperty('ab-loop-b', 'no'));
+    }
+  }
+
+  /// 手动选音轨（media_kit setAudioTrack）；id 存下来，切集后新音轨
+  /// 列表到了再贴回去。id 为 auto 时回到自动。
+  Future<void> setAudioTrackById(String id) async {
+    AudioTrack? match;
+    for (final track in player.state.tracks.audio) {
+      if (track.id == id) {
+        match = track;
+        break;
+      }
+    }
+    if (match == null) return;
+    _audioTrackId = id == 'auto' ? null : id;
+    await player.setAudioTrack(match);
+    _notify();
+  }
+
+  void _reapplyAudioTrack(Tracks tracks) {
+    final id = _audioTrackId;
+    if (id == null) return;
+    AudioTrack? match;
+    for (final track in tracks.audio) {
+      if (track.id == id) {
+        match = track;
+        break;
+      }
+    }
+    if (match == null || player.state.track.audio.id == id) return;
+    unawaited(player.setAudioTrack(match));
+  }
+
+  /// 截图：取当前帧（media_kit screenshot），存到应用文件目录，
+  /// 返回文件路径；失败返回 null。注意是存文件，不是进系统相册。
+  Future<String?> captureScreenshot() async {
+    try {
+      final bytes = await player.screenshot(format: 'image/jpeg');
+      if (bytes == null) return null;
+      final directory = await getApplicationDocumentsDirectory();
+      final now = DateTime.now();
+      final stamp =
+          '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}-'
+          '${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}';
+      final file = File('${directory.path}/lvguo-screenshot-$stamp.jpg');
+      await file.writeAsBytes(bytes);
+      return file.path;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> toggleDanmaku() async {
