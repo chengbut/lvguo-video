@@ -12,6 +12,7 @@ import '../../models.dart';
 import '../../source_modules.dart';
 import '../app_scope.dart';
 import '../settings/settings_rows.dart';
+import '../shell/app_shell.dart';
 import 'module_install.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/form_text_field.dart';
@@ -280,7 +281,9 @@ class _ModulesPageState extends State<ModulesPage>
   Widget _list(List<Widget> children) => ListView.separated(
     padding: AppScope.of(context).television
         ? const EdgeInsets.fromLTRB(24, 8, televisionInset, 27)
-        : const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        // 底部留出胶囊底栏的高度，最后一张卡能完整滑出来、不被底栏盖住
+        //（电视端没有胶囊，capsuleBarClearance 返回 0）。
+        : EdgeInsets.fromLTRB(16, 8, 16, 24 + capsuleBarClearance(context)),
     itemCount: children.length,
     itemBuilder: (_, index) => children[index],
     separatorBuilder: (_, _) => const SizedBox(height: 12),
@@ -299,7 +302,14 @@ class _ModulesPageState extends State<ModulesPage>
     List<Widget> header,
     Widget Function(SourceModule) card,
   ) => ReorderableListView(
-    padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+    // 底部留出胶囊底栏的高度，最后一张模块卡能完整滑出来、不被底栏盖住
+    //（电视端没有胶囊，capsuleBarClearance 返回 0）。
+    padding: EdgeInsets.fromLTRB(
+      16,
+      8,
+      16,
+      24 + capsuleBarClearance(context),
+    ),
     buildDefaultDragHandles: false,
     header: header.isEmpty
         ? null
