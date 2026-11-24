@@ -118,7 +118,7 @@ class _SearchPageState extends State<SearchPage> {
   @override
   Widget build(BuildContext context) {
     final field = SearchField(
-      hint: '在 ${widget.source.name} 中搜索',
+      hint: '在 ${widget.source.displayName} 中搜索',
       controller: _controller,
       focusNode: _focus,
       autofocus: widget.query.isEmpty,
@@ -271,7 +271,7 @@ class _SearchPageState extends State<SearchPage> {
     if (recent.isEmpty) {
       return StatusView(
         key: const ValueKey('empty'),
-        title: '在 ${widget.source.name} 中搜索',
+        title: '在 ${widget.source.displayName} 中搜索',
         message: '输入剧名或关键词',
         icon: Icons.search_rounded,
       );
