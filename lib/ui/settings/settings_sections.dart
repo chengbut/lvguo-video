@@ -19,6 +19,7 @@ import '../../window_on_top.dart';
 import '../app_scope.dart';
 import '../player/danmaku_settings.dart';
 import '../update_prompt.dart';
+import '../widgets/fade_in.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/form_text_field.dart';
 import '../widgets/group_card.dart';
@@ -50,7 +51,6 @@ enum SettingsGroup {
 
 typedef OpenSubpage = void Function(String title, WidgetBuilder body);
 
-const adminOnly = '需要管理员';
 const _noDownload = '当前用户没有下载权限';
 const _proxyModes = {'auto': '自动', 'direct': '直连', 'manual': '手动代理'};
 const _sourceProxyModes = {'follow': '跟随全局', ..._proxyModes};
@@ -96,23 +96,25 @@ class SettingsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([store, editor]),
-    builder: (context, _) => group == SettingsGroup.appearance
-        ? AppearanceSettings(store: store)
-        : Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            spacing: 12,
-            children: switch (group) {
-              SettingsGroup.playback => _playback(context),
-              SettingsGroup.danmaku => _danmaku(context),
-              SettingsGroup.slacking => _slacking(context),
-              SettingsGroup.download => _download(context),
-              SettingsGroup.storage => _storage(),
-              SettingsGroup.proxy => _proxy(context),
-              SettingsGroup.about => _about(context),
-              SettingsGroup.diagnostics => _diagnostics(),
-              _ => const [],
-            },
-          ),
+    builder: (context, _) => FadeInOnce(
+      child: group == SettingsGroup.appearance
+          ? AppearanceSettings(store: store)
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 12,
+              children: switch (group) {
+                SettingsGroup.playback => _playback(context),
+                SettingsGroup.danmaku => _danmaku(context),
+                SettingsGroup.slacking => _slacking(context),
+                SettingsGroup.download => _download(context),
+                SettingsGroup.storage => _storage(),
+                SettingsGroup.proxy => _proxy(context),
+                SettingsGroup.about => _about(context),
+                SettingsGroup.diagnostics => _diagnostics(),
+                _ => const [],
+              },
+            ),
+    ),
   );
 
   Widget? _editorError() => switch (editor.error) {
@@ -391,7 +393,6 @@ class SettingsSection extends StatelessWidget {
 
   List<Widget> _download(BuildContext context) {
     final canDownload = store.canDownload;
-    final admin = store.profile.admin;
     final preferences = store.downloadPreferences;
     final settings = editor.settings;
     final editable = settings != null && !editor.saving;
@@ -429,7 +430,6 @@ class SettingsSection extends StatelessWidget {
           ?_editorError(),
           ValueTile<int>(
             title: '同时下载数量',
-            subtitle: admin ? null : adminOnly,
             options: _counts,
             value: settings?.downloadConcurrency,
             onChanged: editable
@@ -441,7 +441,7 @@ class SettingsSection extends StatelessWidget {
           ),
           SwitchTile(
             title: '按站源分类保存',
-            subtitle: admin ? '新任务放入各站源的子目录，已有下载继续使用原位置' : adminOnly,
+            subtitle: '新任务放入各站源的子目录，已有下载继续使用原位置',
             value: settings?.downloadBySource ?? false,
             onChanged: editable
                 ? (value) => _saveResource(
@@ -507,7 +507,6 @@ class SettingsSection extends StatelessWidget {
   ];
 
   List<Widget> _proxy(BuildContext context) {
-    final admin = store.profile.admin;
     final settings = editor.settings;
     final editable = settings != null && !editor.saving;
     final mode = settings?.proxyMode;
@@ -519,14 +518,12 @@ class SettingsSection extends StatelessWidget {
           ?_editorError(),
           ValueTile<String>(
             title: '连接方式',
-            subtitle: !admin
-                ? adminOnly
-                : switch (mode) {
-                    'auto' when settings!.systemProxyStatus.isNotEmpty =>
-                      settings.systemProxyStatus,
-                    'auto' => '使用系统静态代理；未配置时使用环境变量或直连',
-                    _ => null,
-                  },
+            subtitle: switch (mode) {
+              'auto' when settings!.systemProxyStatus.isNotEmpty =>
+                settings.systemProxyStatus,
+              'auto' => '使用系统静态代理；未配置时使用环境变量或直连',
+              _ => null,
+            },
             options: _proxyModes,
             value: mode,
             onChanged: editable
@@ -757,21 +754,18 @@ class _BackupCardState extends State<_BackupCard> {
 
   @override
   Widget build(BuildContext context) {
-    final admin = widget.store.profile.admin;
     return SettingsCard(
       children: [
         SettingsTile(
           title: '导出备份',
-          subtitle: admin ? '包含本地用户、追剧、观看记录、设置、站源开关和已安装模块，不含视频文件' : adminOnly,
-          enabled: admin && !_busy,
+          subtitle: '包含本地用户、追剧、观看记录、设置、站源开关和已安装模块，不含视频文件',
+          enabled: !_busy,
           onTap: () => _run(() => exportBackupFile(context, widget.store)),
         ),
         SettingsTile(
           title: '恢复备份',
-          subtitle: admin
-              ? '替换本机的用户、追剧、观看记录、设置和站源开关，已下载视频保留，完成后可安装备份里的模块'
-              : adminOnly,
-          enabled: admin && !_busy,
+          subtitle: '替换本机的用户、追剧、观看记录、设置和站源开关，已下载视频保留，完成后可安装备份里的模块',
+          enabled: !_busy,
           onTap: () => _run(() => restoreBackupFile(context, widget.store)),
         ),
       ],
