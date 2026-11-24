@@ -18,7 +18,6 @@ import 'terms_page.dart';
 import 'theme/app_theme.dart';
 import 'theme/motion.dart';
 import 'theme/system_color.dart';
-import 'users/unlock_page.dart';
 import 'widgets/focus_ring.dart';
 
 class DuanjuApp extends StatefulWidget {
@@ -340,7 +339,7 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
           onRetry: widget.onRetry,
         ),
         LocalStore(acceptedTerms: < termsVersion) => TermsPage(store: store),
-        LocalStore(locked: true) => UnlockPage(store: store),
+        // 登录锁屏已移除：不再拦截启动，直接进主页。
         _ => DeviceRegistrationGate(
           store: store,
           child: AppShell(key: ValueKey(store.profileEpoch), store: store),
