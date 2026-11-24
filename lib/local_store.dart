@@ -760,6 +760,8 @@ class LocalStore extends ChangeNotifier {
   }
 
   Future<void> saveWatch(WatchEntry entry, {bool quiet = false}) {
+    // 记录观看历史已关闭时，不写观看进度与历史。
+    if (!playbackPreferences.recordHistory) return Future<void>.value();
     final epoch = _epoch;
     return _queue(() async {
       if (!allowsSource(entry.drama.source) || epoch != _epoch) return;
