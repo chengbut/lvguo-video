@@ -2,6 +2,10 @@
 
 每个版本一节，标题为 `pubspec.yaml` 中的完整版本号。发布工作流会把对应一节写入 GitHub Release 说明。
 
+## 1.3.0+2
+
+- 修复构建失败：我的页补回缺失的 3 个 import（download_converter、merge_queue、download_overview），v1.3.0 两边构建因此失败；iOS 那个“要选开发团队”只是 Flutter 的误导提示，签名配置不用动。
+
 ## 1.3.0+1
 
 - 我的页精简：删掉管理员卡片和「最近观看」两块，只留下载/模块/设置三个入口；历史仍在底栏历史页查看。
