@@ -445,19 +445,95 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
         child: full
             ? Scaffold(backgroundColor: Colors.black, body: video)
             : Scaffold(
-                backgroundColor: theme.colorScheme.surface,
-                body: Column(
-                  children: [
-                    ColoredBox(
-                      color: Colors.black,
-                      child: SizedBox(
-                        width: double.infinity,
-                        height: MediaQuery.paddingOf(context).top,
-                      ),
-                    ),
-                    AspectRatio(aspectRatio: 16 / 9, child: video),
-                    Expanded(child: _details(context)),
-                  ],
+                backgroundColor: Colors.black,
+                body: Theme(
+                  data: dark,
+                  child: Builder(
+                    builder: (context) {
+                      // 横版视频在竖屏里：默认在剩余空间里垂直居中（像红果那样），
+                      // 点选集展开时平滑推到最上面，收起时同样平滑移回中间。
+                      final expanded = _episodesExpanded || _selecting;
+                      final locked = _session.locked;
+                      final topVisible =
+                          !locked && (_visible || _pinned) && !expanded;
+                      final videoHeight =
+                          MediaQuery.sizeOf(context).width * 9 / 16;
+                      return Stack(
+                        children: [
+                          Column(
+                            children: [
+                              ColoredBox(
+                                color: Colors.black,
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  height: MediaQuery.paddingOf(
+                                    context,
+                                  ).top,
+                                ),
+                              ),
+                              Expanded(
+                                child: Stack(
+                                  children: [
+                                    if (expanded)
+                                      Positioned(
+                                        top: videoHeight,
+                                        left: 0,
+                                        right: 0,
+                                        bottom: 0,
+                                        child: _details(context),
+                                      ),
+                                    AnimatedAlign(
+                                      alignment: expanded
+                                          ? Alignment.topCenter
+                                          : Alignment.center,
+                                      duration: Motion.long,
+                                      curve: Motion.standard,
+                                      child: AspectRatio(
+                                        aspectRatio: 16 / 9,
+                                        child: video,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              SafeArea(
+                                top: false,
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    8,
+                                    16,
+                                    12,
+                                  ),
+                                  child: _episodeBar(
+                                    context,
+                                    _session.detail.episodes.length,
+                                    expanded,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          Positioned(
+                            top: MediaQuery.paddingOf(context).top,
+                            left: 0,
+                            right: 0,
+                            child: IgnorePointer(
+                              ignoring: !topVisible,
+                              child: AnimatedOpacity(
+                                opacity: topVisible ? 1 : 0,
+                                duration: const Duration(milliseconds: 180),
+                                child: Listener(
+                                  onPointerDown: (_) => _scheduleHide(),
+                                  child: _topBar(context),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
               ),
       ),
@@ -658,38 +734,14 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
 
   Widget _miniControls(BuildContext context) {
     final session = _session;
+    // 顶部栏（返回 + 第X集）已移到页面层固定在屏幕顶部，这里只留底部控制层。
     return Stack(
       fit: StackFit.expand,
       children: [
         const IgnorePointer(
           child: Align(
-            alignment: Alignment.topCenter,
-            child: _Shade(height: 64, top: true),
-          ),
-        ),
-        const IgnorePointer(
-          child: Align(
             alignment: Alignment.bottomCenter,
             child: _Shade(height: 96, top: false),
-          ),
-        ),
-        Positioned(
-          left: 4,
-          right: 4,
-          top: 0,
-          height: 48,
-          child: Row(
-            children: [
-              _icon(
-                Icons.arrow_back_rounded,
-                '返回',
-                () => unawaited(Navigator.maybePop(context)),
-              ),
-              const Spacer(),
-              if (widget.onMiniWindow case final onMiniWindow?)
-                _icon(Icons.picture_in_picture_alt_rounded, '小窗', onMiniWindow),
-              _icon(Icons.settings_rounded, '播放设置', _openSettings),
-            ],
           ),
         ),
         Positioned(
@@ -1368,45 +1420,64 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
   }
 
+  // 选集展开时视频下方的区域：多季条 + 选集网格（只在展开时挂载）。
   Widget _details(BuildContext context) {
     final session = _session;
-    final episodes = session.detail.episodes;
     final seasons = session.detail.seasons;
-    final expanded = _episodesExpanded || _selecting;
-    return SafeArea(
-      top: false,
-      child: Column(
-        children: [
-          Expanded(
-            child: expanded
-                ? Column(
-                    children: [
-                      if (seasons.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                          child: SeasonStrip(
-                            seasons: seasons,
-                            current: session.detail.drama.id,
-                            store: widget.store,
-                            metaSize: 13,
-                            tagSize: 12,
-                            sectionSize: 15,
-                            collapsed: false,
-                            currentStatus: '正在播放',
-                            onSelected: (season) =>
-                                unawaited(_playSeason(season)),
-                          ),
-                        ),
-                      Expanded(child: _episodes(context)),
-                    ],
-                  )
-                : const SizedBox.shrink(),
-          ),
+    return Column(
+      children: [
+        if (seasons.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-            child: _episodeBar(context, episodes.length, expanded),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: SeasonStrip(
+              seasons: seasons,
+              current: session.detail.drama.id,
+              store: widget.store,
+              metaSize: 13,
+              tagSize: 12,
+              sectionSize: 15,
+              collapsed: false,
+              currentStatus: '正在播放',
+              onSelected: (season) => unawaited(_playSeason(season)),
+            ),
           ),
-        ],
+        Expanded(child: _episodes(context)),
+      ],
+    );
+  }
+
+  // 顶部栏：固定在屏幕顶部左上角，像红果一样留着返回 + 当前集数。
+  Widget _topBar(BuildContext context) {
+    final session = _session;
+    final episodeLabel = session.detail.episodes.isEmpty
+        ? ''
+        : '第${session.episode.number}集';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: SizedBox(
+        height: 48,
+        child: Row(
+          children: [
+            _icon(
+              Icons.arrow_back_rounded,
+              '返回',
+              () => unawaited(Navigator.maybePop(context)),
+            ),
+            const SizedBox(width: 2),
+            Text(
+              episodeLabel,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const Spacer(),
+            if (widget.onMiniWindow case final onMiniWindow?)
+              _icon(Icons.picture_in_picture_alt_rounded, '小窗', onMiniWindow),
+            _icon(Icons.settings_rounded, '播放设置', _openSettings),
+          ],
+        ),
       ),
     );
   }
