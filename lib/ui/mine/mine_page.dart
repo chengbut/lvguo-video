@@ -7,12 +7,12 @@ import '../../download_overview.dart';
 import '../../local_store.dart';
 import '../app_scope.dart';
 import '../downloads/downloads_page.dart';
-import '../modules/modules_page.dart';
 import '../shell/app_shell.dart';
 import '../settings/settings_page.dart';
+import '../settings/settings_sections.dart';
 import '../widgets/fade_in.dart';
 import '../widgets/focus_ring.dart';
-import '../widgets/liquid_glass.dart';
+import '../widgets/native_glass.dart';
 import '../widgets/page_header.dart';
 
 class MinePage extends StatelessWidget {
@@ -59,11 +59,11 @@ class MinePage extends StatelessWidget {
     ),
   );
 
-  void _openModules(BuildContext context) =>
-      openPage<void>(context, (_) => ModulesPage(store: store));
-
-  void _openSettings(BuildContext context) =>
-      openPage<void>(context, (_) => SettingsPage(store: store));
+  void _openSettingsGroup(BuildContext context, SettingsGroup group) =>
+      openPage<void>(
+        context,
+        (_) => SettingsGroupPage(store: store, group: group),
+      );
 
   Widget _entries(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -75,16 +75,19 @@ class MinePage extends StatelessWidget {
           title: '下载',
           onTap: () => _openDownloads(context),
         ),
-      _Entry(
-        icon: Icons.extension_outlined,
-        title: '模块',
-        onTap: () => _openModules(context),
-      ),
-      _Entry(
-        icon: Icons.settings_outlined,
-        title: '设置',
-        onTap: () => _openSettings(context),
-      ),
+      // 原设置页的 8 个组，按设置页里的顺序排在「下载」后面；
+      // 点进去是直开子页面的 SettingsGroupPage，和原来一样。
+      // 注意这里的「下载」是下载设置（默认画质、VIP 集、同时下载数量），
+      // 上面那个「下载」是下载管理（已下载的剧），目的地不同，两个都留着，
+      // 副标题能区分。
+      for (final group in SettingsGroup.values)
+        if (group.visible)
+          _Entry(
+            icon: group.icon,
+            title: group.label,
+            subtitle: settingsGroupSummary(context, store, group),
+            onTap: () => _openSettingsGroup(context, group),
+          ),
     ],
   );
 
@@ -127,28 +130,30 @@ class MinePage extends StatelessWidget {
       televisionInset,
       27,
     );
+    // 电视端没有设置列表页了：8 个设置组卡片排成 Wrap，
+    // 一行排不下自动换行（卡片宽 320，1080p 上一行 5 张）。
+    // 模块入口已删（底栏已有模块键），焦点落在第一张设置组卡片上。
+    final groups = [
+      for (final group in SettingsGroup.values)
+        if (group.visible) group,
+    ];
     final page = SingleChildScrollView(
       padding: padding,
-      child: Row(
+      child: Wrap(
         spacing: 20,
+        runSpacing: 20,
         children: [
-          Expanded(
-            child: _TelevisionEntry(
-              icon: Icons.extension_outlined,
-              title: '模块',
-              subtitle: '安装与管理站源模块',
-              focusNode: entryFocus,
-              onTap: () => _openModules(context),
+          for (final (index, group) in groups.indexed)
+            SizedBox(
+              width: 320,
+              child: _TelevisionEntry(
+                icon: group.icon,
+                title: group.label,
+                subtitle: settingsGroupSummary(context, store, group),
+                focusNode: index == 0 ? entryFocus : null,
+                onTap: () => _openSettingsGroup(context, group),
+              ),
             ),
-          ),
-          Expanded(
-            child: _TelevisionEntry(
-              icon: Icons.settings_outlined,
-              title: '设置',
-              subtitle: '外观、播放、站源与网络',
-              onTap: () => _openSettings(context),
-            ),
-          ),
         ],
       ),
     );
@@ -172,17 +177,24 @@ class MinePage extends StatelessWidget {
 }
 
 class _Entry extends StatelessWidget {
-  const _Entry({required this.icon, required this.title, required this.onTap});
+  const _Entry({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    required this.onTap,
+  });
   final IconData icon;
   final String title;
+  final String? subtitle;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final subtitle = this.subtitle;
     return FocusRing(
       radius: 20,
-      child: LiquidGlass(
+      child: AdaptiveGlass(
         borderRadius: BorderRadius.circular(20),
         child: Material(
           color: Colors.transparent,
@@ -190,7 +202,7 @@ class _Entry extends StatelessWidget {
           child: InkWell(
             onTap: onTap,
             child: SizedBox(
-              height: 60,
+              height: subtitle == null ? 60 : 72,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Row(
@@ -198,13 +210,36 @@ class _Entry extends StatelessWidget {
                   children: [
                     Icon(icon, size: 22, color: colors.onSurfaceVariant),
                     Expanded(
-                      child: Text(
-                        title,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
+                      child: subtitle == null
+                          ? Text(
+                              title,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            )
+                          : Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  title,
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                                Text(
+                                  subtitle,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: colors.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
                     ),
                     Icon(
                       Icons.chevron_right_rounded,
@@ -243,7 +278,7 @@ class _TelevisionEntry extends StatelessWidget {
     return FocusRing(
       radius: 20,
       scale: 1,
-      child: LiquidGlass(
+      child: AdaptiveGlass(
         borderRadius: BorderRadius.circular(20),
         child: Material(
           color: Colors.transparent,
