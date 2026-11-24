@@ -406,6 +406,12 @@ class PlaybackSession extends ChangeNotifier {
   void _syncDanmakuOptions() {
     if (_closed) return;
     final preferences = store.playbackPreferences;
+    // 设置页的弹幕开关直接改偏好，这里同步到正在播放的会话，
+    // 不用等下次打开播放器；播放器内开关走 toggleDanmaku，同一份状态。
+    if (preferences.danmaku != _danmakuEnabled) {
+      _danmakuEnabled = preferences.danmaku;
+      danmaku.setEnabled(_danmakuEnabled);
+    }
     danmaku.setMergeWindow(preferences.danmakuMerge);
     danmaku.setBlockedWords(preferences.danmakuWords);
   }
