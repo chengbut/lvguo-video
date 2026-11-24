@@ -131,6 +131,7 @@ class PlaybackPreferences {
     this.skipOutroSeconds = 0,
     this.keepScreenAwake = true,
     this.recordHistory = true,
+    this.autoClearScreen = true,
   });
 
   final double speed;
@@ -175,6 +176,8 @@ class PlaybackPreferences {
   final bool keepScreenAwake;
   // 关闭后不再保存观看进度与历史。
   final bool recordHistory;
+  // 进播放 1 秒后自动隐藏播控（清屏），点屏幕可重新显示。
+  final bool autoClearScreen;
 
   bool preopens({required bool television}) => preopen ?? !television;
 
@@ -214,6 +217,7 @@ class PlaybackPreferences {
     int? skipOutroSeconds,
     bool? keepScreenAwake,
     bool? recordHistory,
+    bool? autoClearScreen,
   }) => PlaybackPreferences(
     speed: speed ?? this.speed,
     quality: quality ?? this.quality,
@@ -250,6 +254,7 @@ class PlaybackPreferences {
     skipOutroSeconds: skipOutroSeconds ?? this.skipOutroSeconds,
     keepScreenAwake: keepScreenAwake ?? this.keepScreenAwake,
     recordHistory: recordHistory ?? this.recordHistory,
+    autoClearScreen: autoClearScreen ?? this.autoClearScreen,
   );
 
   Map<String, dynamic> toJson() => {
@@ -288,6 +293,7 @@ class PlaybackPreferences {
     'skipOutroSeconds': skipOutroSeconds,
     'keepScreenAwake': keepScreenAwake,
     'recordHistory': recordHistory,
+    'autoClearScreen': autoClearScreen,
   };
 
   factory PlaybackPreferences.fromJson(Map<String, dynamic> value) {
@@ -360,6 +366,7 @@ class PlaybackPreferences {
           (value['skipOutroSeconds'] as num? ?? 0).toInt().clamp(0, 300),
       keepScreenAwake: value['keepScreenAwake'] as bool? ?? true,
       recordHistory: value['recordHistory'] as bool? ?? true,
+      autoClearScreen: value['autoClearScreen'] as bool? ?? true,
     );
   }
 }
