@@ -7,7 +7,7 @@ import '../../playback_session.dart';
 import '../theme/app_theme.dart';
 import '../theme/motion.dart';
 import 'cast_page.dart';
-import '../widgets/native_glass.dart';
+import '../widgets/liquid_glass.dart';
 import 'danmaku_settings.dart';
 
 (Color, ThemeData)? _darkPlayerTheme;
@@ -46,7 +46,7 @@ Future<void> showPlayerSheet(
       child: DefaultTextStyle.merge(
         style: TextStyle(color: theme.colorScheme.onSurface),
         child: _SheetEnter(
-          child: AdaptiveGlass(
+          child: LiquidGlass(
             borderRadius: const BorderRadius.vertical(
               top: Radius.circular(28),
             ),
