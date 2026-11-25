@@ -1,15 +1,15 @@
 {
   "id": "hongguo",
   "name": "红果",
-  "version": "1.2.2",
-  "url": "https://raw.githubusercontent.com/chengbut/lvguo-video/main/module-config/hongguo-1.2.2.zip",
-  "sha256": "f5845a801751c5c9fadb7ed67bd7f3e93be00fd89b739ce0152d158f53b8c36a",
-  "size": 185305,
-  "released_at": "2026-11-25T04:07:58.858173+00:00",
+  "version": "2.0.1",
+  "url": "https://raw.githubusercontent.com/chengbut/lvguo-video/main/module-config/hongguo-2.0.1.zip",
+  "sha256": "9b52d870031ea9180f57ddfbb0c359f2c498d375bf676652f2457c06ad12d2a5",
+  "size": 185576,
+  "released_at": "2026-11-25T04:08:35.208496+00:00",
   "signing": {
     "id": "NjQ2NjM3Nzk0",
     "material": "sjwqRwog0QXcP4xEOPgnLtRtbIn/3N7dUQhpjSbpSJ0=",
     "sdk": "v04.10.03-ml-android"
   },
-  "note": "红果 v1.2.2：修复 UA 导致 CDN 302 播放失败；支持 App 内自动更新"
+  "note": "红果 v2.0.1：统一版本号；App 自动升级 + 模块内签名热更新"
 }
