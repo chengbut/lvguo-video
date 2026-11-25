@@ -572,7 +572,7 @@ class PlaybackSession extends ChangeNotifier {
       }
       if (duration <= 0 ||
           position < 2000 ||
-          (position < duration ~/ 2 && duration - position > 90000) ||
+          (position < duration ~/ 4 && duration - position > 90000) ||
           ahead < 5000) {
         return;
       }
@@ -909,6 +909,20 @@ class PlaybackSession extends ChangeNotifier {
     // A-B 循环点是本集内的位置，不在这里下发（切集时已清掉）。
     pending.add(_applyVideoEq(target));
     pending.add(_applySubtitleDelay(target));
+    // 强制用模块的官方 User-Agent 打开视频：CDN 验签名时 UA 对不上会 403；
+    // 模块没给 UA（本地文件等）时不下发，mpv 用默认 UA。Referer 等仍走
+    // Media 打开处的 httpHeaders 传，不在这里动。
+    String? userAgent;
+    for (final entry in plan.headers.entries) {
+      if (entry.key.toLowerCase() == 'user-agent' &&
+          entry.value.trim().isNotEmpty) {
+        userAgent = entry.value.trim();
+        break;
+      }
+    }
+    if (userAgent != null) {
+      pending.add(platform.setProperty('user-agent', userAgent));
+    }
     await Future.wait(pending);
   }
 
