@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import 'app_update.dart';
 import 'core_bridge.dart';
 
 class AppDevice {
@@ -22,7 +23,11 @@ class AppDevice {
     if (defaultTargetPlatform != TargetPlatform.android) {
       try {
         final info = await PackageInfo.fromPlatform();
-        return AppDevice(version: info.version);
+        // 显示完整版本号（带构建号，和检查更新用的口径一致），
+        // 否则设置页只看得到 1.6.6、看不到 +4。
+        return AppDevice(
+          version: '${info.version}+${baseBuildNumber(info.buildNumber)}',
+        );
       } catch (_) {
         return fallback;
       }

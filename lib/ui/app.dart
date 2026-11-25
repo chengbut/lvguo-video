@@ -9,6 +9,7 @@ import '../app_build.dart';
 import '../app_device.dart';
 import '../core_bridge.dart';
 import '../local_store.dart';
+import '../playback_host.dart';
 import '../theme_color.dart';
 import 'app_scope.dart';
 import 'cover_blur.dart';
@@ -42,7 +43,6 @@ class DuanjuApp extends StatefulWidget {
 }
 
 class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
-  final _navigator = GlobalKey<NavigatorState>();
   Color? _systemColor;
   int? _profileEpoch;
   var _television = false;
@@ -219,7 +219,7 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
     _profileEpoch = epoch;
     if (previous == null) return;
     WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _navigator.currentState?.popUntil((route) => route.isFirst),
+      (_) => rootNavigatorKey.currentState?.popUntil((route) => route.isFirst),
     );
   }
 
@@ -267,7 +267,7 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
           : FocusHighlightStrategy.alwaysTouch,
     );
     return MaterialApp(
-      navigatorKey: _navigator,
+      navigatorKey: rootNavigatorKey,
       title: appName,
       debugShowCheckedModeBanner: false,
       scrollBehavior: const FocusOutlineScrollBehavior(),

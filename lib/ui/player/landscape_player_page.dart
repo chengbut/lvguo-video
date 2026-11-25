@@ -66,6 +66,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   };
   Player? _bound;
   Timer? _hideTimer;
+  Timer? _orientationTimer;
   Timer? _tapTimer;
   Timer? _streakTimer;
   Timer? _clockTimer;
@@ -76,6 +77,8 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   bool _visible = true;
   bool _selecting = false;
   bool _holding = false;
+  // 这次长按是否刚拖到底锁定了倍速（松手要保持锁定，不解除）。
+  bool _lockedThisPress = false;
   bool _dragging = false;
   // 横版竖屏态：抖音式竖向翻页。页面只负责视频画面本身，
   // 播控、顶栏、弹幕开关等浮层仍在页面层只有一份。
@@ -102,7 +105,15 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     if (widget.onFullscreen == null && widget.followSensor) {
-      unawaited(AppDevice.setPlayerOrientation(PlayerOrientation.auto));
+      // 延迟解锁方向：退出播放页时方向被锁回竖屏，进页立刻放开
+      // 传感器的话，iOS 会按点开那一瞬间手机的倾斜姿态先转横屏、
+      // 人把手机端正后又转回来，闪一下（用户 2026-11-26 报）。
+      // 先稳住约 600ms 等姿态落定再放开。
+      _orientationTimer = Timer(const Duration(milliseconds: 600), () {
+        if (mounted) {
+          unawaited(AppDevice.setPlayerOrientation(PlayerOrientation.auto));
+        }
+      });
     }
     _session.addListener(_bind);
     _bind();
@@ -128,6 +139,13 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     if (full) {
       _tick();
       _clockTimer = Timer.periodic(const Duration(seconds: 20), (_) => _tick());
+    } else {
+      // 切回竖屏时翻页视图重新挂载：横屏期间 _syncPages 因 PageView
+      // 不在树上（hasClients=false）一直被跳过，回来后补跑一次，
+      // 否则 PageView 停在旧集、当前集画面在屏外（黑屏有声）。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncPages();
+      });
     }
   }
 
@@ -140,6 +158,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       unawaited(subscription.cancel());
     }
     _hideTimer?.cancel();
+    _orientationTimer?.cancel();
     _tapTimer?.cancel();
     _streakTimer?.cancel();
     _clockTimer?.cancel();
@@ -259,7 +278,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   }
 
   void _lock() {
-    if (_holding) _pressEnd();
+    if (_holding) _endPress();
     _hideTimer?.cancel();
     _tapTimer?.cancel();
     _streakTimer?.cancel();
@@ -351,15 +370,49 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
 
   void _pressStart() {
     if (!_session.ready || _session.locked) return;
+    _lockedThisPress = false;
     _session.holdBoost();
     unawaited(HapticFeedback.selectionClick());
     setState(() => _holding = true);
   }
 
+  // 手势松手：这次长按刚拖到底锁了倍速就保持锁定；倍速本来就
+  // 锁着时再长按一次，松手解除；其余情况照旧结束加速。
   void _pressEnd() {
     if (!_holding) return;
+    if (_lockedThisPress) {
+      _lockedThisPress = false;
+    } else if (_session.boostLocked) {
+      _session.setBoostLocked(false);
+      _say('已解除倍速锁定');
+    } else {
+      _session.endBoost();
+    }
+    setState(() => _holding = false);
+  }
+
+  // 不带锁定切换的收尾（锁屏按钮等内部调用走这条）。
+  void _endPress() {
+    if (!_holding) return;
+    _lockedThisPress = false;
     _session.endBoost();
     setState(() => _holding = false);
+  }
+
+  // 长按加速后继续拖到屏幕最下方（全局纵坐标落进底部 64px）：
+  // 锁定倍速，松手不恢复（用户 2026-11-26 指定）。只在横版视频
+  // 竖屏播放时启用，横屏全屏态不走这条。
+  void _pressMove(LongPressMoveUpdateDetails details, bool full) {
+    if (full || !_holding || _lockedThisPress || _session.boostLocked) {
+      return;
+    }
+    if (details.globalPosition.dy < MediaQuery.sizeOf(context).height - 64) {
+      return;
+    }
+    _lockedThisPress = true;
+    _session.setBoostLocked(true);
+    unawaited(HapticFeedback.mediumImpact());
+    _say('倍速已锁定，点顶部角标或再长按一次解除');
   }
 
   // 黑边手势区上下滑：和视频区的 PageView 同一套翻页——拖够 60px 就
@@ -440,6 +493,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       onVerticalDragEnd: locked ? null : (_) => _pageDragEnd(),
       onVerticalDragCancel: locked ? null : () => _episodeDragOffset = 0,
       onLongPressStart: locked ? null : (_) => _pressStart(),
+      onLongPressMoveUpdate: locked
+          ? null
+          : (details) => _pressMove(details, false),
       onLongPressEnd: locked ? null : (_) => _pressEnd(),
       onLongPressCancel: locked ? null : _pressEnd,
     );
@@ -808,7 +864,10 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
           SwipeControls(
             session: session,
             enabled: full && !locked,
-            levels: session.store.playbackPreferences.swipeLevels,
+            // 左半屏上下滑调亮度、右半屏调音量：横屏全屏固定开启，
+            // 不受已存偏好影响（用户 2026-11-26 指定只在横版视频
+            // 横屏播放时可用）；竖屏态走翻页，不经过这里。
+            levels: true,
             episodes: session.store.playbackPreferences.swipeEpisodes,
             child: LayoutBuilder(
               builder: (context, constraints) => GestureDetector(
@@ -835,6 +894,9 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
                   ? null
                   : (details) => _tapUp(details, constraints.maxWidth, full),
               onLongPressStart: locked ? null : (_) => _pressStart(),
+              onLongPressMoveUpdate: locked
+                  ? null
+                  : (details) => _pressMove(details, full),
               onLongPressEnd: locked ? null : (_) => _pressEnd(),
               onLongPressCancel: locked ? null : _pressEnd,
               child: _pagedVideo(context),
@@ -891,7 +953,17 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
           top: full ? 24 : 12,
           child: FadePresence(
             child: session.boosting
-                ? IgnorePointer(child: Center(child: _boostBadge()))
+                ? Center(
+                    child: session.boostLocked
+                        ? GestureDetector(
+                            onTap: () {
+                              _session.setBoostLocked(false);
+                              _say('已解除倍速锁定');
+                            },
+                            child: _boostBadge(),
+                          )
+                        : IgnorePointer(child: _boostBadge()),
+                  )
                 : null,
           ),
         ),
@@ -1490,29 +1562,38 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
   }
 
-  Widget _boostBadge() => Container(
-    height: 32,
-    padding: const EdgeInsets.symmetric(horizontal: 14),
-    decoration: BoxDecoration(
-      color: Colors.black.withValues(alpha: .5),
-      borderRadius: BorderRadius.circular(16),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      spacing: 6,
-      children: [
-        const Icon(Icons.fast_forward_rounded, size: 16, color: Colors.white),
-        Text(
-          '${_session.store.playbackPreferences.boostLabel}播放中',
-          style: const TextStyle(
+  Widget _boostBadge() {
+    final lockedBoost = _session.boostLocked;
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: .5),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        spacing: 6,
+        children: [
+          Icon(
+            lockedBoost ? Icons.lock_rounded : Icons.fast_forward_rounded,
+            size: 16,
             color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
           ),
-        ),
-      ],
-    ),
-  );
+          Text(
+            lockedBoost
+                ? '${_session.store.playbackPreferences.boostLabel}已锁定 · 点按解除'
+                : '${_session.store.playbackPreferences.boostLabel}播放中',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _batteryMark(({int level, bool charging}) battery) {
     const levels = [
@@ -1738,12 +1819,11 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
   }
 
-  // 顶部栏：固定在屏幕顶部左上角，像红果一样留着返回 + 当前集数。
+  // 顶部栏：固定在屏幕顶部左上角，返回 + 剧名（用户 2026-11-26 指定：
+  // 原来这里显示第几集，改成剧名；第几集挪到控制块最下面的选集行）。
   Widget _topBar(BuildContext context) {
     final session = _session;
-    final episodeLabel = session.detail.episodes.isEmpty
-        ? ''
-        : '第${session.episode.number}集';
+    final title = session.detail.drama.title;
     return Padding(
       // 左边距 12：返回钮不再贴着屏幕边缘（之前 4pt + 透明 clear 玻璃，
       // 黑底上看着像被左边缘切掉一半）；和集数文字留 8pt 间距。
@@ -1758,15 +1838,19 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
               child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
             ),
             const SizedBox(width: 8),
-            Text(
-              episodeLabel,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-            const Spacer(),
+            const SizedBox(width: 8),
             if (widget.onMiniWindow case final onMiniWindow?)
               LiquidGlassIconButton(
                 onPressed: onMiniWindow,
@@ -1791,7 +1875,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   // 选集行（三合一控制块的最下面一行）：点开展开/收起选集网格。
   // 外层玻璃由 _controlBlock 统一给，这里只留 Material + InkWell
   //（LiquidGlass 里没有 Material，涟漪需要它）；文字是
-  // “短剧名 · 全N集 · 第X集”，拿不到剧名回退显示“选集”。
+  // “第X集 · 全N集”（用户 2026-11-26 指定：原来这里是剧名，改成第几集）。
   Widget _episodeBar(BuildContext context, int count, bool expanded) {
     final colors = Theme.of(context).colorScheme;
     return Material(
@@ -1811,7 +1895,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
               children: [
                 Expanded(
                   child: Text(
-                    '${_session.detail.drama.title.isNotEmpty ? _session.detail.drama.title : '选集'} · 全$count集 · 第${_session.episode.number}集',
+                    '第${_session.episode.number}集 · 全$count集',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

@@ -908,7 +908,8 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
   }
 
   // 顶栏照横版的样子（用户 2026-11-25 指定参照横版改）：返回圆钮 +
-  // 集数纯文字（不上玻璃胶囊）+ 小窗 + 设置，同一行。
+  // 剧名纯文字（不上玻璃胶囊；2026-11-26 用户指定：原来这里显示
+  // 第几集，改成剧名，第几集挪到下方集数条）+ 小窗 + 设置，同一行。
   Widget _header() {
     final session = _session;
     return Row(
@@ -919,15 +920,19 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
         ),
         const SizedBox(width: 8),
-        Text(
-          '第${session.episode.number}集',
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 17,
-            fontWeight: FontWeight.w600,
+        Expanded(
+          child: Text(
+            session.detail.drama.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
-        const Spacer(),
+        const SizedBox(width: 8),
         if (widget.onMiniWindow case final onMiniWindow?) ...[
           LiquidGlassIconButton(
             onPressed: onMiniWindow,
@@ -1159,7 +1164,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
               children: [
                 Expanded(
                   child: Text(
-                    '${_session.detail.drama.title.isNotEmpty ? _session.detail.drama.title : '选集'} · 全$count集 · 第${_session.episode.number}集',
+                    '第${_session.episode.number}集 · 全$count集',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(

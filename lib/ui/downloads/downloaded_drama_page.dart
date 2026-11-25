@@ -14,6 +14,7 @@ import '../../merge_queue.dart';
 import '../../download_overview.dart';
 import '../../local_store.dart';
 import '../../models.dart';
+import '../../playback_host.dart';
 import '../app_scope.dart';
 import '../detail/detail_page.dart';
 import '../player/playback_handle.dart';
@@ -200,6 +201,20 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
     final position = watch?.episode == episode.number && !watch!.finished
         ? watch.position
         : 0.0;
+    // 画中画保活的会话是同一部剧就取回继续播，是别的剧先结束它。
+    final hosted = PlaybackHost.instance.handle;
+    if (hosted != null && hosted.session.detail.drama.id == item.drama.id) {
+      final reuse = PlaybackHost.instance.take()!;
+      reuse.session.start(index, position: position);
+      await Navigator.of(context, rootNavigator: true).push(
+        MaterialPageRoute<void>(
+          builder: (_) => PlaybackPage(store: widget.store, handle: reuse),
+        ),
+      );
+      _playing = false;
+      return;
+    }
+    if (hosted != null) PlaybackHost.instance.endSession();
     final handle = PlaybackHandle(
       repository: AppScope.of(context).repository,
       store: widget.store,

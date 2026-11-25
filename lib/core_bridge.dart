@@ -229,7 +229,6 @@ abstract class AppRepository {
     int quality = 0,
   }) => resolve(drama, episode, quality: quality);
   Future<AppUpdate?> checkUpdate(String version) async => null;
-  Future<void> reportUsage(String version) async {}
   Future<bool> sourceDevices(String source, {bool register = false}) async =>
       true;
   Future<void> initialize();
@@ -598,11 +597,6 @@ class NativeRepository extends AppRepository {
             url: result['url'] as String,
           )
         : null;
-  }
-
-  @override
-  Future<void> reportUsage(String version) async {
-    await _call({'action': 'reportUsage', 'version': version});
   }
 
   @override

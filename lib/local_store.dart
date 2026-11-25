@@ -24,7 +24,6 @@ const coverBlurLaunchModes = {'off': '关闭', 'adult': '仅限制级', 'all': '
 const _movedFlags = {
   'followSystemColor': 'followSystemColor',
   'checkUpdates': 'checkUpdates',
-  'shareUsage': 'shareUsage',
   'autoExport': 'exportAfterDownload',
   'deleteAfterAutoExport': 'deleteAfterAutoExport',
   'deleteAfterManualExport': 'deleteAfterManualExport',
@@ -33,7 +32,6 @@ const _movedFlags = {
 const _movedTexts = {'themeColor', 'ignoredUpdate'};
 const _backupFlags = {
   'checkUpdates',
-  'shareUsage',
   'exportAfterDownload',
   'deleteAfterAutoExport',
   'deleteAfterManualExport',
@@ -492,7 +490,6 @@ class LocalStore extends ChangeNotifier {
   bool get autoExport => _flag('exportAfterDownload', false);
   bool get deleteAfterAutoExport => _flag('deleteAfterAutoExport', false);
   bool get deleteAfterManualExport => _flag('deleteAfterManualExport', false);
-  bool get shareUsage => _flag('shareUsage', true);
   int get acceptedTerms => switch (_settings['acceptedTerms']) {
     final int version => version,
     _ => 0,
@@ -645,7 +642,6 @@ class LocalStore extends ChangeNotifier {
       _setting('deleteAfterAutoExport', value);
   Future<void> setDeleteAfterManualExport(bool value) =>
       _setting('deleteAfterManualExport', value);
-  Future<void> setShareUsage(bool value) => _setting('shareUsage', value);
   Future<void> setAcceptedTerms(int version) =>
       _setting('acceptedTerms', version);
   Future<void> setIgnoredUpdate(String version) =>
@@ -1068,7 +1064,6 @@ class LocalStore extends ChangeNotifier {
       'blurAllCovers': blurAllCovers,
       'forceLogin': forceLogin,
       'checkUpdates': checkUpdates,
-      'shareUsage': shareUsage,
       'exportAfterDownload': autoExport,
       'deleteAfterAutoExport': deleteAfterAutoExport,
       'deleteAfterManualExport': deleteAfterManualExport,

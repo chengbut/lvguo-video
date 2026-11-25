@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../../drama_details.dart';
 import '../../local_store.dart';
 import '../../models.dart';
+import '../../playback_host.dart';
 import '../app_scope.dart';
 import '../downloads/download_picker_page.dart';
 import '../player/playback_handle.dart';
@@ -343,6 +344,18 @@ class _DetailPageState extends State<DetailPage> {
     );
   }
 
+  // 画中画保活中的会话优先复用：同一部剧直接取回继续播，
+  // 是别的剧就先结束它（一共只留一段播放在跑）。
+  PlaybackHandle? _takeHosted(DramaDetails details) {
+    final hosted = PlaybackHost.instance.handle;
+    if (hosted == null) return null;
+    if (hosted.session.detail.drama.id != details.drama.id) {
+      PlaybackHost.instance.endSession();
+      return null;
+    }
+    return PlaybackHost.instance.take();
+  }
+
   Future<bool> _play(int index, {bool resume = false}) async {
     final details = _details!;
     final episode = details.episodes[index];
@@ -370,7 +383,7 @@ class _DetailPageState extends State<DetailPage> {
     }
     if (!mounted || !details.allowed) return false;
     final position = _startAt(index, resume: resume);
-    final handle = _handle ?? _open(index, position: position);
+    final handle = _handle ?? _takeHosted(details) ?? _open(index, position: position);
     _handle = null;
     handle.session.syncSeasons(details.seasons);
     handle.session.start(index, position: position);

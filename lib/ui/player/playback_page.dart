@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import '../../app_device.dart';
 import '../../local_store.dart';
 import '../../picture_in_picture.dart';
+import '../../playback_host.dart';
 import '../../playback_session.dart';
 import '../app_scope.dart';
 import 'audio_player_page.dart';
@@ -40,6 +41,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
   bool _locked = false;
   Player? _bound;
   StreamSubscription<bool>? _playing;
+  // 进页时画中画是否已经开着（从小窗点回来/详情页重进的情形）：
+  // 这种页不许再被“画中画激活就退页”的逻辑弹出去。
+  late final bool _pipActiveAtEntry = _pip.active;
 
   PlaybackSession get _session => widget.handle.session;
 
@@ -52,6 +56,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
   @override
   void initState() {
     super.initState();
+    // 若这个会话正由 PlaybackHost 保活（小窗恢复/详情页重进），
+    // 所有权交回本页。
+    PlaybackHost.instance.take(widget.handle);
     _session.addListener(_changed);
     _padFullscreen.addListener(_padFullscreenChanged);
     _pip.addListener(_pipChanged);
@@ -65,14 +72,21 @@ class _PlaybackPageState extends State<PlaybackPage> {
     _session.removeListener(_changed);
     _pip.removeListener(_pipChanged);
     if (_pip.onAction == _action) _pip.onAction = null;
-    _pip.clear();
-    if (_pip.window) unawaited(_restore());
+    // iOS 画中画还在播：会话不销毁，交给 PlaybackHost 保活——
+    // 本页退回详情页后小窗继续播，画中画停掉时由 host 恢复本页
+    // 或结束会话。其他情况照旧清画中画并销毁会话。
+    if (Platform.isIOS && _pip.active) {
+      PlaybackHost.instance.adopt(widget.store, widget.handle);
+    } else {
+      _pip.clear();
+      if (_pip.window) unawaited(_restore());
+      widget.handle.dispose();
+    }
     unawaited(_playing?.cancel());
     _pageScope.dispose();
     if (_padFullscreen.value) _applyPadFullscreen(false);
     _padFullscreen.dispose();
     unawaited(AppDevice.resetBrightness());
-    widget.handle.dispose();
     super.dispose();
   }
 
@@ -143,6 +157,19 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (!mounted) return;
     final shown = _pip.shown;
     if (shown && !_shown) _closeRoutesAbove();
+    // iOS 画中画在本页打开期间激活（手动点小窗或切后台自动进）：
+    // 本页随即退出回详情页，会话在 dispose 里交给 PlaybackHost，
+    // 画面只留在小窗里，不再和播放页同播（用户 2026-11-26 指定）。
+    if (Platform.isIOS &&
+        !_pipActiveAtEntry &&
+        _pip.active &&
+        ModalRoute.of(context)?.isCurrent == true) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+          Navigator.of(context, rootNavigator: true).pop();
+        }
+      });
+    }
     if (!shown && _shown) _pageScope.requestFocus();
     _shown = shown;
     if (!_television) {

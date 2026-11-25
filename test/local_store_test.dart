@@ -398,7 +398,6 @@ void main() {
       await store.setFollowSystemColor(false);
       await store.setThemeColor(ThemeColor.violet);
       await store.setAutoExport(true);
-      await store.setShareUsage(false);
       final backup = await store.exportBackup();
       expect(backup, isNot(contains('stays-local')));
 
@@ -408,7 +407,6 @@ void main() {
       await store.setFollowSystemColor(true);
       await store.setThemeColor(ThemeColor.blue);
       await store.setAutoExport(false);
-      await store.setShareUsage(true);
       await store.importBackup(backup);
 
       final restarted = await restartStore(store);
@@ -418,7 +416,6 @@ void main() {
       expect(restarted.followSystemColor, isFalse);
       expect(restarted.themeColor, ThemeColor.violet);
       expect(restarted.autoExport, isTrue);
-      expect(restarted.shareUsage, isFalse);
       expect(restarted.preferences.getString('plugin_secret'), 'stays-local');
     });
 
