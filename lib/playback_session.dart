@@ -291,6 +291,7 @@ class PlaybackSession extends ChangeNotifier {
   int _standbyIndex = -1;
   bool _standbyOpen = false;
   DateTime _standbyAt = DateTime(2000);
+  DateTime? _standbyExpires;
   double _openedAt = 0;
   double _speed = 1;
   int _quality = 0;
@@ -769,17 +770,30 @@ class PlaybackSession extends ChangeNotifier {
 
   Future<void> _recover(String reason) async {
     final current = _plan;
-    if (_closed ||
-        !_acceptErrors ||
-        !_foreground ||
-        current == null ||
-        _error != null) {
+    if (_closed || !_acceptErrors || !_foreground || _error != null) {
       return;
     }
     _acceptErrors = false;
     danmaku.setPlan(null);
     _errorTimer?.cancel();
     _pendingError = false;
+    if (current == null) {
+      // 还没装好播放计划（取流那步就失败了）：直接重新取地址再试，
+      // 刷新次数用完才弹错。
+      if (!_recovery.tryRefresh()) {
+        _loading = false;
+        _error = '无法播放这一集，请重试或换一集。';
+        _notify();
+        return;
+      }
+      DiaryService.add('[Play] 自动恢复 原因=$reason 处理=refresh 重新取地址');
+      await play(
+        _index,
+        position: _resumePosition,
+        recovery: PlaybackRecoveryAction.refresh,
+      );
+      return;
+    }
     final position = currentPosition;
     final action = current.local
         ? PlaybackRecoveryAction.stop
@@ -917,7 +931,9 @@ class PlaybackSession extends ChangeNotifier {
         position == 0 &&
         _standbyOpen &&
         _standbyIndex == index &&
-        !_online) {
+        !_online &&
+        (_standbyExpires == null ||
+            DateTime.now().isBefore(_standbyExpires!))) {
       return _swap(index, playWhenReady);
     }
     _dropStandby();
@@ -1033,12 +1049,24 @@ class PlaybackSession extends ChangeNotifier {
           if (prepared != null) await _release(prepared.session);
           if (_current(ticket)) {
             DiaryService.add('[Play] 无法播放：${_diagnostic(error)}');
-            _loading = false;
-            _localFailure = error is AppFailure && error.code == 'local_media';
-            _loginRequired =
-                error is AppFailure && error.code == 'source_login';
-            _error = error is AppFailure ? error.message : '无法播放这一集，请重试或换一集。';
-            _notify();
+            if ((prepared == null || recovery != null) &&
+                _foreground &&
+                _recovery.canRetry) {
+              // 取流失败（prepared 为空）也自动恢复：重新取地址再试，
+              // 别直接弹错；次数用完才弹错。
+              _acceptErrors = true;
+              _queueRecovery('open_exception');
+            } else {
+              _loading = false;
+              _localFailure =
+                  error is AppFailure && error.code == 'local_media';
+              _loginRequired =
+                  error is AppFailure && error.code == 'source_login';
+              _error = error is AppFailure
+                  ? error.message
+                  : '无法播放这一集，请重试或换一集。';
+              _notify();
+            }
           }
         }
       } else if (prepared != null && !installed) {
@@ -1076,6 +1104,7 @@ class PlaybackSession extends ChangeNotifier {
     _standbyPlan = null;
     _standbyIndex = -1;
     _standbyOpen = false;
+    _standbyExpires = null;
     _player = next;
     _standby = previous;
     _plan = plan;
@@ -1127,7 +1156,23 @@ class PlaybackSession extends ChangeNotifier {
       return;
     }
     _standbyPlan = plan;
+    _standbyExpires = _planExpiry(plan);
     unawaited(_open(standby, plan));
+  }
+
+  // 备播地址的有效期：和预加载同一口径（站源给的 expiresAt 减 5 秒，
+  // 没有就按取到后 2 分钟算）。换台时过期了就别换过去，直接重新取地址。
+  DateTime _planExpiry(PlaybackPlan plan) {
+    var expires = DateTime.now().add(const Duration(minutes: 2));
+    if (plan.expiresAt > 0) {
+      final authorizationExpiry = DateTime.fromMillisecondsSinceEpoch(
+        plan.expiresAt,
+      ).subtract(const Duration(seconds: 5));
+      if (authorizationExpiry.isBefore(expires)) {
+        expires = authorizationExpiry;
+      }
+    }
+    return expires;
   }
 
   Future<void> _open(Player standby, PlaybackPlan plan) async {
@@ -1156,6 +1201,7 @@ class PlaybackSession extends ChangeNotifier {
     _standbyPlan = null;
     _standbyIndex = -1;
     _standbyOpen = false;
+    _standbyExpires = null;
     if (opened) unawaited(_standby?.stop().catchError((Object _) {}));
     if (plan != null) unawaited(_release(plan.session));
   }
