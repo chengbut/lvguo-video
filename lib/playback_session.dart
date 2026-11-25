@@ -775,6 +775,8 @@ class PlaybackSession extends ChangeNotifier {
     }
     _acceptErrors = false;
     danmaku.setPlan(null);
+    // 恢复期间先停掉下一集的预加载：别让备播和正片的重试同时抢网络。
+    _preloader.pause();
     _errorTimer?.cancel();
     _pendingError = false;
     if (current == null) {
@@ -787,6 +789,7 @@ class PlaybackSession extends ChangeNotifier {
         return;
       }
       DiaryService.add('[Play] 自动恢复 原因=$reason 处理=refresh 重新取地址');
+      if (!await _waitRetry()) return;
       await play(
         _index,
         position: _resumePosition,
@@ -802,6 +805,7 @@ class PlaybackSession extends ChangeNotifier {
       '[Play] 自动恢复 原因=$reason 处理=${action.name} 线路=${current.routeIndex + 1}/${current.routeCount}',
     );
     if (action != PlaybackRecoveryAction.stop) {
+      if (!await _waitRetry()) return;
       await play(_index, position: position, recovery: action);
       return;
     }
@@ -835,6 +839,15 @@ class PlaybackSession extends ChangeNotifier {
     _notify();
   }
 
+  /// 自动重试前先停一拍（间隔见 PlaybackRecovery.retryDelay）：等待期间
+  /// _acceptErrors 一直是 false，不会有第二个恢复同时进来；用户切了集、
+  /// 关了页面或手动重试（都会让 _generation 前进），这次重试就放弃。
+  Future<bool> _waitRetry() async {
+    final ticket = _generation;
+    await Future<void>.delayed(_recovery.retryDelay);
+    return !_closed && _generation == ticket;
+  }
+
   Future<void> _release(String session) async {
     if (session.isEmpty) return;
     await repository.release(session).catchError((Object _) {});
@@ -861,6 +874,10 @@ class PlaybackSession extends ChangeNotifier {
       _ when Platform.isWindows => 'd3d11va',
       _ when Platform.isAndroid => 'auto-safe',
       _ when Platform.isMacOS => 'auto-safe',
+      // iOS 默认（optimized）以前落到 null 不下发，靠 media_kit_video 的
+      // 默认 'auto'（带帧拷贝）；显式给 videotoolbox-copy，和手动硬件
+      // 模式一致，省电少发热。
+      _ when Platform.isIOS => 'videotoolbox-copy',
       _ => null,
     };
     // 各 mpv 参数互相独立，并行下发，缩短播放器打开耗时；不改解码与播放流程。
@@ -898,10 +915,12 @@ class PlaybackSession extends ChangeNotifier {
       ),
     );
     pending.add(platform.setProperty('network-timeout', '20'));
-    // 预读与缓存：多向前读 10 秒、缓存 30 秒，弱网起播更快、拖动后更少转圈。
-    // 只调 mpv 缓冲参数，不改解码与播放流程。
-    pending.add(platform.setProperty('demuxer-readahead-secs', '10'));
-    pending.add(platform.setProperty('cache-secs', '30'));
+    // 预读与缓存：多向前读 20 秒、缓存 60 秒，播开之后中途更少被 CDN
+    // 的间歇性拒绝打断、拖动后更少转圈。短剧一集才 1–2 分钟，60 秒
+    // 缓存能罩住大半集；字节上限仍由 _limitCache 管（主播放器 32MB），
+    // 缓存秒数涨了也不会无限吃内存。只调 mpv 缓冲参数，不改播放流程。
+    pending.add(platform.setProperty('demuxer-readahead-secs', '20'));
+    pending.add(platform.setProperty('cache-secs', '60'));
     if (Platform.isIOS) {
       pending.add(platform.setProperty('vid', _videoHidden ? 'no' : 'auto'));
     }
