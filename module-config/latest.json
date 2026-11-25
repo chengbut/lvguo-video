@@ -1,0 +1,11 @@
+{
+  "id": "hongguo",
+  "version": "2.0.0",
+  "updated": "2026-11-25",
+  "signing": {
+    "id": "NjQ2NjM3Nzk0",
+    "material": "sjwqRwog0QXcP4xEOPgnLtRtbIn/3N7dUQhpjSbpSJ0=",
+    "sdk": "v04.10.03-ml-android"
+  },
+  "note": "红果模块自更新配置。签名材料失效时，改这里的 id/material 并递增 version，模块会自动拉取并应用，无需重装。"
+}
