@@ -16,6 +16,16 @@ class PlaybackRecovery {
 
   bool get canRetry => _attempts < maxAttempts;
 
+  /// 下一次自动重试前先等一会儿，间隔随次数拉开：403 是时好时坏，
+  /// 连着撞只会让 5G 一直满功率发射、手机发烫；总次数不变。
+  Duration get retryDelay => switch (_attempts) {
+    <= 1 => const Duration(milliseconds: 800),
+    2 => const Duration(milliseconds: 1500),
+    3 => const Duration(milliseconds: 2500),
+    4 => const Duration(milliseconds: 4000),
+    _ => const Duration(milliseconds: 6000),
+  };
+
   /// 还没装好播放计划时（取流失败）：只允许重新取地址，计一次。
   /// 次数用完返回 false，调用方直接弹错。
   bool tryRefresh() {
@@ -29,8 +39,8 @@ class PlaybackRecovery {
     if (_attempts >= maxAttempts) {
       return PlaybackRecoveryAction.stop;
     }
-    // 403 这类错是地址本身被拒：换线路还是同一个签名、同一个地址，
-    // 换哪个节点都照样 403；先重新取一个新地址，再考虑换线路。
+    // 先重新取地址、再换线路：备用线路与主线路是同一个会话、同一个
+    // 签名，换线路多半还是同一结果；重新取地址有机会拿到新签名。
     if (_refreshes < maxRefreshes) {
       _attempts++;
       _refreshes++;
