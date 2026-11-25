@@ -253,6 +253,8 @@ class PlaybackSession extends ChangeNotifier {
   Timer? _standbyIdleTimer;
   Timer? _resumeTimer;
   Timer? _seekWatchdog;
+  Timer? _swapWatchdog;
+  StreamSubscription<dynamic>? _standbyErrorSub;
   DateTime? _pausedSince;
   DateTime? _sleepAt;
   int _sleepMinutes = 0;
@@ -833,6 +835,7 @@ class PlaybackSession extends ChangeNotifier {
       'position_stalled_20s' => '画面长时间没有进度',
       'early_completion' => '视频提前结束',
       'open_exception' => '视频打开失败',
+      'swap_no_start' => '切集后没有开始播放',
       _ => '播放器报错',
     };
     _error = current.local
@@ -1140,6 +1143,8 @@ class PlaybackSession extends ChangeNotifier {
     _standbyIndex = -1;
     _standbyOpen = false;
     _standbyExpires = null;
+    unawaited(_standbyErrorSub?.cancel());
+    _standbyErrorSub = null;
     _player = next;
     _standby = previous;
     _plan = plan;
@@ -1163,6 +1168,24 @@ class PlaybackSession extends ChangeNotifier {
       final skipIntro = store.playbackPreferences.skipIntroSeconds;
       if (_current(ticket) && skipIntro > 0) {
         unawaited(next.seek(Duration(seconds: skipIntro)).catchError((Object _) {}));
+      }
+      // 接管看门狗：备播的流若在预开时已被 CDN 拒掉，报错发生在接管
+      // 之前、没人监听，接管后既不报错也不前进，会一直转圈。给 8 秒：
+      // 位置还没动（且不在正常出画）就按打开失败走自动恢复、重新取地址。
+      _swapWatchdog?.cancel();
+      if (_current(ticket) && _playIntent) {
+        _swapWatchdog = Timer(const Duration(seconds: 8), () {
+          if (!_current(ticket) || _closed || !_foreground || !_playIntent) {
+            return;
+          }
+          final state = player.state;
+          if (state.position > Duration.zero ||
+              (state.playing && !state.buffering)) {
+            return;
+          }
+          DiaryService.add('[Play] 切集接管后 8 秒未开始播放，走自动恢复');
+          _queueRecovery('swap_no_start');
+        });
       }
     } catch (_) {
       if (_current(ticket)) _queueRecovery('open_exception');
@@ -1211,6 +1234,14 @@ class PlaybackSession extends ChangeNotifier {
   }
 
   Future<void> _open(Player standby, PlaybackPlan plan) async {
+    // 备播报错要能被听见：流在预开阶段就被拒时，提前作废这台备播，
+    // 切集时宁可走重新取地址，也别接管一台已经死了的播放器。
+    unawaited(_standbyErrorSub?.cancel());
+    _standbyErrorSub = standby.stream.error.listen((error) {
+      if (_closed || !identical(_standbyPlan, plan)) return;
+      DiaryService.add('[Play] 备播预开失败，作废备播：${_diagnostic(error)}');
+      _dropStandby();
+    });
     try {
       await _configure(standby, plan);
       await _limitCache(standby, true);
@@ -1231,6 +1262,8 @@ class PlaybackSession extends ChangeNotifier {
 
   void _dropStandby() {
     _cancelStandbyIdle();
+    unawaited(_standbyErrorSub?.cancel());
+    _standbyErrorSub = null;
     final plan = _standbyPlan;
     final opened = _standbyOpen || plan != null;
     _standbyPlan = null;
@@ -1937,6 +1970,8 @@ class PlaybackSession extends ChangeNotifier {
     _saveTimer?.cancel();
     _healthTimer?.cancel();
     _errorTimer?.cancel();
+    _swapWatchdog?.cancel();
+    unawaited(_standbyErrorSub?.cancel());
     _boostTimer?.cancel();
     _stallTimer?.cancel();
     _seekWatchdog?.cancel();
