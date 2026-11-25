@@ -572,7 +572,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('播放偏好未能保存，请重试')));
+    ).showSnackBar(glassSnackBar(context, '播放偏好未能保存，请重试'));
   }
 
   Future<void> _change(Future<void> Function() change) async {

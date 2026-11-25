@@ -9,6 +9,7 @@ import '../widgets/focus_ring.dart';
 import '../widgets/group_card.dart';
 import 'settings_rows.dart';
 import 'storage_view.dart';
+import '../widgets/liquid_glass.dart';
 
 class DataCard extends StatefulWidget {
   const DataCard({super.key, required this.store, required this.onCleared});
@@ -44,7 +45,7 @@ class _DataCardState extends State<DataCard> {
     final messenger = ScaffoldMessenger.of(context);
     await saveSetting(context, () async {
       await AppScope.of(context).repository.clearCache();
-      messenger.showSnackBar(const SnackBar(content: Text('缓存已清理')));
+      messenger.showSnackBar(glassSnackBar(context, '缓存已清理'));
     });
     if (!mounted) return;
     setState(() => _clearing = false);
@@ -120,7 +121,7 @@ class _DataCardState extends State<DataCard> {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('$failure')));
+        ).showSnackBar(glassSnackBar(context, '$failure'));
       }
       return;
     }

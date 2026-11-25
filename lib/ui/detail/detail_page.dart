@@ -225,7 +225,7 @@ class _DetailPageState extends State<DetailPage> {
     if (!mounted || details.error == null || details.episodes.isEmpty) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text(details.error!)));
+    ).showSnackBar(glassSnackBar(context, details.error!));
   }
 
   double _startAt(int index, {required bool resume}) {

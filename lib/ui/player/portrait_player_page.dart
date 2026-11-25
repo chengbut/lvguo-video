@@ -516,7 +516,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('播放偏好未能保存，请重试')));
+    ).showSnackBar(glassSnackBar(context, '播放偏好未能保存，请重试'));
   }
 
   @override

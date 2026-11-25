@@ -29,15 +29,3 @@ func (engine *nativeEngine) sourceDevices(ctx context.Context, source string, re
 	}
 	return map[string]any{"ready": ready}, nil
 }
-
-func (engine *nativeEngine) sourceAccount(ctx context.Context, source, command string, payload []byte) (any, error) {
-	p, ok := engine.downloader.provider(source)
-	if !ok {
-		return nil, errNativeBuildSource
-	}
-	account, ok := providerAs[AccountProvider](p)
-	if !ok {
-		return nil, errNativeBuildSource
-	}
-	return account.Account(ctx, command, payload)
-}

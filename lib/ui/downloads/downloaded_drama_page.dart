@@ -26,6 +26,7 @@ import '../widgets/motion/motion_widgets.dart';
 import '../widgets/status_view.dart';
 import 'download_actions.dart';
 import 'merge_actions.dart';
+import '../widgets/liquid_glass.dart';
 
 class DownloadedDramaPage extends StatefulWidget {
   const DownloadedDramaPage({
@@ -132,7 +133,7 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
         throw AppFailure('未获得存储权限，无法导出');
       }
     } catch (error) {
-      messenger.showSnackBar(SnackBar(content: Text('$error')));
+      messenger.showSnackBar(glassSnackBar(context, '$error'));
       return;
     }
     if (!mounted) return;
@@ -173,12 +174,11 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
     navigator.pop();
     await widget.downloads.refresh();
     messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          failures.isEmpty
-              ? '已导出到 Movies/${safeFileName(item.drama.title)}'
-              : '${failures.length} 集未能导出：${failures.first}',
-        ),
+      glassSnackBar(
+        context,
+        failures.isEmpty
+            ? '已导出到 Movies/${safeFileName(item.drama.title)}'
+            : '${failures.length} 集未能导出：${failures.first}',
       ),
     );
     if (!mounted) return;

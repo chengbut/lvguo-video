@@ -5,13 +5,14 @@ import '../../models.dart';
 import '../theme/motion.dart';
 import 'focus_ring.dart';
 import 'motion/motion_widgets.dart';
+import 'liquid_glass.dart';
 
 Future<void> _toggle(BuildContext context, LocalStore store, Drama drama) =>
     store.toggleFavorite(drama).catchError((Object failure) {
       if (context.mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('$failure')));
+        ).showSnackBar(glassSnackBar(context, '$failure'));
       }
     });
 
@@ -25,26 +26,23 @@ Future<void> quickFollow(
   try {
     await store.toggleFavorite(drama);
   } catch (failure) {
-    messenger.showSnackBar(SnackBar(content: Text('$failure')));
+    messenger.showSnackBar(glassSnackBar(context, '$failure'));
     return;
   }
   messenger
     ..hideCurrentSnackBar()
     ..showSnackBar(
-      SnackBar(
+      glassSnackBar(
+        context,
+        followed ? '已取消追剧「${drama.title}」' : '已追剧「${drama.title}」',
         persist: false,
-        content: Text(
-          followed ? '已取消追剧「${drama.title}」' : '已追剧「${drama.title}」',
-        ),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () => store
-              .toggleFavorite(drama)
-              .catchError(
-                (Object failure) =>
-                    messenger.showSnackBar(SnackBar(content: Text('$failure'))),
-              ),
-        ),
+        actionLabel: '撤销',
+        onAction: () => store
+            .toggleFavorite(drama)
+            .catchError(
+              (Object failure) =>
+                  messenger.showSnackBar(glassSnackBar(context, '$failure')),
+            ),
       ),
     );
 }

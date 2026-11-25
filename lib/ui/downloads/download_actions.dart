@@ -5,6 +5,7 @@ import '../../local_store.dart';
 import '../../models.dart';
 import '../app_scope.dart';
 import '../widgets/focus_ring.dart';
+import '../widgets/liquid_glass.dart';
 
 String formatBytes(int bytes) => bytes >= 1 << 30
     ? '${(bytes / (1 << 30)).toStringAsFixed(1)} GB'
@@ -13,7 +14,7 @@ String formatBytes(int bytes) => bytes >= 1 << 30
     : '${(bytes / 1024).round()} KB';
 
 void showMessage(BuildContext context, String text) =>
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+    ScaffoldMessenger.of(context).showSnackBar(glassSnackBar(context, text));
 
 Future<bool> downloadEpisodes(
   BuildContext context,
@@ -31,11 +32,11 @@ Future<bool> downloadEpisodes(
       episodes,
     );
     messenger.showSnackBar(
-      SnackBar(content: Text(added == 0 ? '所选剧集已在下载列表中' : '已加入下载 $added 集')),
+      glassSnackBar(context, added == 0 ? '所选剧集已在下载列表中' : '已加入下载 $added 集'),
     );
     return true;
   } catch (error) {
-    messenger.showSnackBar(SnackBar(content: Text(error.toString())));
+    messenger.showSnackBar(glassSnackBar(context, error.toString()));
     return false;
   }
 }
@@ -90,12 +91,11 @@ Future<bool> removeDownloads(
     ids,
   );
   messenger.showSnackBar(
-    SnackBar(
-      content: Text(
-        result.failures.isEmpty
-            ? done
-            : '${result.failures.length} 集未能删除：${result.failures.values.first}',
-      ),
+    glassSnackBar(
+      context,
+      result.failures.isEmpty
+          ? done
+          : '${result.failures.length} 集未能删除：${result.failures.values.first}',
     ),
   );
   return result.failures.isEmpty;

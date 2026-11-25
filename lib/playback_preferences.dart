@@ -132,6 +132,7 @@ class PlaybackPreferences {
     this.keepScreenAwake = true,
     this.recordHistory = true,
     this.autoClearScreen = true,
+    this.startMuted = false,
   });
 
   final double speed;
@@ -178,6 +179,8 @@ class PlaybackPreferences {
   final bool recordHistory;
   // 进播放 1 秒后自动隐藏播控（清屏），点屏幕可重新显示。
   final bool autoClearScreen;
+  // 打开后每次进播放默认静音，点静音按钮恢复正常音量。
+  final bool startMuted;
 
   bool preopens({required bool television}) => preopen ?? !television;
 
@@ -218,6 +221,7 @@ class PlaybackPreferences {
     bool? keepScreenAwake,
     bool? recordHistory,
     bool? autoClearScreen,
+    bool? startMuted,
   }) => PlaybackPreferences(
     speed: speed ?? this.speed,
     quality: quality ?? this.quality,
@@ -255,6 +259,7 @@ class PlaybackPreferences {
     keepScreenAwake: keepScreenAwake ?? this.keepScreenAwake,
     recordHistory: recordHistory ?? this.recordHistory,
     autoClearScreen: autoClearScreen ?? this.autoClearScreen,
+    startMuted: startMuted ?? this.startMuted,
   );
 
   Map<String, dynamic> toJson() => {
@@ -294,6 +299,7 @@ class PlaybackPreferences {
     'keepScreenAwake': keepScreenAwake,
     'recordHistory': recordHistory,
     'autoClearScreen': autoClearScreen,
+    'startMuted': startMuted,
   };
 
   factory PlaybackPreferences.fromJson(Map<String, dynamic> value) {
@@ -367,6 +373,7 @@ class PlaybackPreferences {
       keepScreenAwake: value['keepScreenAwake'] as bool? ?? true,
       recordHistory: value['recordHistory'] as bool? ?? true,
       autoClearScreen: value['autoClearScreen'] as bool? ?? true,
+      startMuted: value['startMuted'] as bool? ?? false,
     );
   }
 }

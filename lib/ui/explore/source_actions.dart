@@ -6,6 +6,7 @@ import '../search/search_page.dart';
 import '../modules/modules_page.dart';
 import '../shell/app_shell.dart';
 import '../widgets/choice_panel.dart';
+import '../widgets/liquid_glass.dart';
 
 Future<void> pickSource(BuildContext anchor, LocalStore store) async {
   final value = await showChoicePanel<String>(
@@ -30,7 +31,7 @@ Future<void> pickSource(BuildContext anchor, LocalStore store) async {
     if (!anchor.mounted) return;
     ScaffoldMessenger.maybeOf(
       anchor,
-    )?.showSnackBar(const SnackBar(content: Text('未能切换站源，请重试')));
+    )?.showSnackBar(glassSnackBar(context, '未能切换站源，请重试'));
   }
 }
 

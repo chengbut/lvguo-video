@@ -17,6 +17,7 @@ import 'module_install.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/form_text_field.dart';
 import '../widgets/group_card.dart';
+import '../widgets/liquid_glass.dart';
 
 class ModulesPage extends StatefulWidget {
   const ModulesPage({super.key, required this.store});
@@ -118,7 +119,7 @@ class _ModulesPageState extends State<ModulesPage>
     if (mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ).showSnackBar(glassSnackBar(context, message));
     }
   }
 
@@ -251,7 +252,7 @@ class _ModulesPageState extends State<ModulesPage>
     builder: (_) => _ModuleDialog(module: module, install: false),
   );
 
-  Future<void> _menu(SourceModule module, ModuleIndexEntry? update) =>
+  Future<void> _menu(SourceModule module) =>
       showDialog<void>(
         context: context,
         builder: (menu) => ListenableBuilder(
@@ -260,10 +261,8 @@ class _ModulesPageState extends State<ModulesPage>
             final enabled = _canInstall;
             return _ModuleMenu(
               module: module,
-              update: update,
               enabled: _store.sourceEnabled(module.id),
               onToggle: _toggleFor(module),
-              onUpdate: null,
               onUninstall: enabled
                   ? () async {
                       if (!await _confirmUninstall(module) || !menu.mounted) {
@@ -346,7 +345,6 @@ class _ModulesPageState extends State<ModulesPage>
     final enabled = _canInstall;
     Widget card(SourceModule module) => _InstalledCard(
       module: module,
-      update: null,
       enabled: _store.sourceEnabled(module.id),
       // 只有无错、可访问且已开启的源才能切成当前源；已经是当前源的不给按钮。
       isCurrent: _store.source == module.id,
@@ -357,9 +355,8 @@ class _ModulesPageState extends State<ModulesPage>
           : null,
       onToggle: _toggleFor(module),
       onDetails: AppScope.of(context).television
-          ? () => _menu(module, null)
+          ? () => _menu(module)
           : () => _details(module),
-      onUpdate: null,
       onUninstall: enabled ? () => _uninstall(module) : null,
     );
     final header = [if (_error case final error?) _Note(error)];
@@ -743,23 +740,19 @@ ButtonStyle _cardButton(ColorScheme colors, {bool primary = false}) =>
 class _InstalledCard extends StatelessWidget {
   const _InstalledCard({
     required this.module,
-    required this.update,
     required this.enabled,
     required this.isCurrent,
     required this.onSwitch,
     required this.onToggle,
     required this.onDetails,
-    required this.onUpdate,
     required this.onUninstall,
   });
   final SourceModule module;
-  final ModuleIndexEntry? update;
   final bool enabled;
   final bool isCurrent;
   final VoidCallback? onSwitch;
   final ValueChanged<bool>? onToggle;
   final VoidCallback onDetails;
-  final VoidCallback? onUpdate;
   final VoidCallback? onUninstall;
 
   @override
@@ -776,11 +769,6 @@ class _InstalledCard extends StatelessWidget {
           Text(module.error, style: TextStyle(color: colors.error))
         else ...[
           if (module.description.isNotEmpty) Text(module.description),
-          if (update case final update?)
-            Text(
-              '可更新到 ${update.version}',
-              style: TextStyle(color: colors.primary),
-            ),
         ],
         // 当前站源的轻标记：切源后 ListenableBuilder 重建，标记自动挪行。
         if (isCurrent)
@@ -814,74 +802,18 @@ class _InstalledCard extends StatelessWidget {
                     label: const Text('设为当前'),
                   ),
                 ),
-              if (update != null) ...[
-                FocusRing(
-                  radius: 20,
-                  child: FilledButton.tonalIcon(
-                    style: _cardButton(colors, primary: true),
-                    onPressed: onUpdate,
-                    icon: const Icon(Icons.cloud_upload_outlined),
-                    label: const Text('更新'),
-                  ),
+              FocusRing(
+                radius: 20,
+                child: FilledButton.tonalIcon(
+                  style: _cardButton(colors),
+                  onPressed: onUninstall,
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const Text('卸载'),
                 ),
-                FocusRing(
-                  radius: 20,
-                  child: IconButton.filledTonal(
-                    visualDensity: VisualDensity.compact,
-                    tooltip: '卸载',
-                    onPressed: onUninstall,
-                    icon: const Icon(Icons.delete_outline_rounded),
-                  ),
-                ),
-              ] else
-                FocusRing(
-                  radius: 20,
-                  child: FilledButton.tonalIcon(
-                    style: _cardButton(colors),
-                    onPressed: onUninstall,
-                    icon: const Icon(Icons.delete_outline_rounded),
-                    label: const Text('卸载'),
-                  ),
-                ),
+              ),
             ],
     );
     return television && !enabled ? Opacity(opacity: 0.4, child: card) : card;
-  }
-}
-
-class _IndexCard extends StatelessWidget {
-  const _IndexCard({
-    required this.entry,
-    required this.records,
-    required this.onInstall,
-  });
-  final ModuleIndexEntry entry;
-  final String? records;
-  final VoidCallback? onInstall;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return _ModuleCard(
-      name: entry.name,
-      adult: entry.adult,
-      version: entry.version,
-      id: entry.id,
-      body: [
-        if (entry.description.isNotEmpty) Text(entry.description),
-        if (records != null)
-          Text('待恢复：$records', style: TextStyle(color: colors.primary)),
-      ],
-      trailing: FocusRing(
-        radius: 20,
-        child: FilledButton.tonalIcon(
-          style: _cardButton(colors, primary: true),
-          onPressed: onInstall,
-          icon: const Icon(Icons.download_rounded),
-          label: const Text('安装'),
-        ),
-      ),
-    );
   }
 }
 
@@ -1179,17 +1111,13 @@ class _ModuleDialog extends StatelessWidget {
 class _ModuleMenu extends StatelessWidget {
   const _ModuleMenu({
     required this.module,
-    required this.update,
     required this.enabled,
     required this.onToggle,
-    required this.onUpdate,
     required this.onUninstall,
   });
   final SourceModule module;
-  final ModuleIndexEntry? update;
   final bool enabled;
   final ValueChanged<bool>? onToggle;
-  final VoidCallback? onUpdate;
   final VoidCallback? onUninstall;
 
   @override
@@ -1204,23 +1132,9 @@ class _ModuleMenu extends StatelessWidget {
         notes: [
           if (module.error.isNotEmpty)
             Text(module.error, style: TextStyle(color: colors.error)),
-          if (update case final update?)
-            Text(
-              '可更新到 ${update.version}',
-              style: TextStyle(color: colors.primary),
-            ),
         ],
       ),
       actions: [
-        if (update != null)
-          FocusRing(
-            radius: 20,
-            child: FilledButton.tonalIcon(
-              onPressed: onUpdate,
-              icon: const Icon(Icons.cloud_upload_outlined),
-              label: const Text('更新'),
-            ),
-          ),
         FocusRing(
           radius: 20,
           child: FilledButton.tonalIcon(

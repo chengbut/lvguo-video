@@ -38,9 +38,6 @@ func TestBundledModulesInstallRespectRemovalAndVersions(t *testing.T) {
 		http.Error(writer, "down", http.StatusBadGateway)
 	}))
 	t.Cleanup(server.Close)
-	addresses := moduleIndexAddresses
-	moduleIndexAddresses = []string{server.URL + "/index.json"}
-	t.Cleanup(func() { moduleIndexAddresses = addresses })
 
 	engine := &nativeEngine{downloader: &Downloader{cfg: Config{dataDir: t.TempDir()}, client: server.Client()}, cacheDirectory: t.TempDir()}
 	d := engine.downloader
@@ -72,7 +69,7 @@ func TestBundledModulesInstallRespectRemovalAndVersions(t *testing.T) {
 
 	store, err := engine.moduleStore(context.Background())
 	items, _ := store["items"].([]moduleIndexEntry)
-	if err != nil || len(items) != 1 || !items[0].Bundled || items[0].Version != "1.2.0" || store["warning"] == nil {
+	if err != nil || len(items) != 1 || !items[0].Bundled || items[0].Version != "1.2.0" {
 		t.Fatalf("store = %+v, %v", store, err)
 	}
 	prepared, err := engine.prepareModule(context.Background(), "", "", "jsexample", true)

@@ -8,6 +8,7 @@ import '../../app_device.dart';
 import '../../core_bridge.dart';
 import '../../merge_queue.dart';
 import '../../models.dart';
+import '../widgets/liquid_glass.dart';
 
 Future<bool> enqueueMerges(
   BuildContext context,
@@ -16,7 +17,7 @@ Future<bool> enqueueMerges(
 ) async {
   final messenger = ScaffoldMessenger.of(context);
   void say(String text) =>
-      messenger.showSnackBar(SnackBar(content: Text(text)));
+      messenger.showSnackBar(glassSnackBar(context, text));
   final ready = [
     for (final jobs in groups)
       if (jobs.length >= 2) jobs,

@@ -19,12 +19,12 @@ import '../mine/mine_page.dart';
 import '../modules/modules_page.dart';
 import '../update_prompt.dart';
 import '../widgets/native_glass.dart';
-import '../modules/module_install.dart';
 import '../widgets/bar_button.dart';
 import '../theme/motion.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/motion/motion_widgets.dart';
 import '../widgets/source_bar.dart';
+import '../widgets/liquid_glass.dart';
 
 enum AppTab {
   explore('发现', Icons.explore_outlined, Icons.explore),
@@ -160,7 +160,6 @@ class _AppShellState extends State<AppShell> {
     FocusManager.instance.addListener(_followFocus);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      unawaited(offerRestoredModules(context, widget.store));
       runStartupChecks(context, widget.store);
     });
   }
@@ -272,12 +271,11 @@ class _AppShellState extends State<AppShell> {
   void _mergeFinished(MergeTask task) {
     if (task.state == MergeState.cancelled) return;
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(
-        content: Text(
-          task.state == MergeState.done
-              ? '「${task.fileName}」${task.message}'
-              : '「${task.fileName}」合并失败：${task.message}',
-        ),
+      glassSnackBar(
+        context,
+        task.state == MergeState.done
+            ? '「${task.fileName}」${task.message}'
+            : '「${task.fileName}」合并失败：${task.message}',
       ),
     );
   }
@@ -318,7 +316,7 @@ class _AppShellState extends State<AppShell> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
-        const SnackBar(content: Text('再按一次返回退出应用'), duration: window),
+        glassSnackBar(context, '再按一次返回退出应用', duration: window),
       );
   }
 

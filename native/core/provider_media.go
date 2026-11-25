@@ -258,15 +258,6 @@ func providerRefererForURL(candidate, fallback string) string {
 	return previous.String()
 }
 
-func (d *Downloader) GetHuangguoChapters(ctx context.Context, source, sourceID string) (string, []Chapter, error) {
-	p, ok := d.provider(source)
-	if !ok {
-		return "", nil, fmt.Errorf("unsupported provider source: %s", source)
-	}
-	drama, chapters, err := p.Detail(ctx, sourceID)
-	return drama.DisplayTitle(), chapters, err
-}
-
 func (d *Downloader) repairCover(drama LibraryDrama) string {
 	if d == nil {
 		return drama.Cover

@@ -98,7 +98,9 @@ class PlaybackSession extends ChangeNotifier {
     _danmakuEnabled = preferences.danmaku;
     _videoFit = preferences.videoFit;
     _unmutedVolume = store.playerVolume.clamp(1.0, 100.0);
-    unawaited(_player.setVolume(_unmutedVolume));
+    // 默认静音开着时进播放先静音：_unmutedVolume 仍记正常音量，点静音
+    // 按钮即可恢复；切集备播从当前播放器继承音量，不会突然出声。
+    unawaited(_player.setVolume(preferences.startMuted ? 0 : _unmutedVolume));
     _loader = PlaybackLoader(repository);
     _preloader = PlaybackPreloader(repository)..addListener(_prime);
     danmaku = DanmakuController(repository)

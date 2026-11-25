@@ -409,14 +409,6 @@ class LocalStore extends ChangeNotifier {
     });
   }
 
-  List<String> _restoredModules = const [];
-
-  List<String> takeRestoredModules() {
-    final modules = _restoredModules;
-    _restoredModules = const [];
-    return modules;
-  }
-
   Map<String, FollowCheck> get followChecks => Map.of(_followChecks);
 
   Future<void> saveFollowChecks(
@@ -1245,9 +1237,6 @@ class LocalStore extends ChangeNotifier {
     }
     await _removeLegacy();
     await _initialize();
-    _restoredModules = [
-      if (data['modules'] case final List modules) ...modules.cast<String>(),
-    ];
     _epoch++;
     _notify();
   }

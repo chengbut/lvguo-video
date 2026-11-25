@@ -19,7 +19,6 @@ import 'download_collections.dart';
 import 'resource_settings.dart';
 import 'diary_service.dart';
 import 'app_update.dart';
-import 'sorani_account.dart';
 import 'source_modules.dart';
 
 typedef _NativeRequest = Pointer<Utf8> Function(Pointer<Utf8>);
@@ -169,7 +168,6 @@ abstract class AppRepository {
   }) async => const [CatalogCategory.all];
   bool get supportsSourceManagement => false;
   Future<List<SourceModule>> modules() async => const [];
-  Future<ModuleStore> moduleIndex() async => throw AppFailure('当前环境不支持模块商店');
   Future<SourceModule> prepareModule({
     String file = '',
     String url = '',
@@ -184,8 +182,6 @@ abstract class AppRepository {
   Future<List<String>> suggestions(String source, String query) async =>
       const [];
   Future<Map<String, dynamic>> storage() async => {};
-  Future<String> downloadDirectory() async =>
-      (await storage())['directory'] as String? ?? '';
   Future<({String path, String reason})> moveDownloads(
     String directory,
   ) async => throw AppFailure('当前环境不支持迁移');
@@ -236,16 +232,6 @@ abstract class AppRepository {
   Future<void> reportUsage(String version) async {}
   Future<bool> sourceDevices(String source, {bool register = false}) async =>
       true;
-  Future<SoraniAccount> soraniAccount() async => const SoraniAccount();
-  Future<SoraniCaptcha> soraniCaptcha() async =>
-      throw AppFailure('当前版本不支持登录青空次元');
-  Future<SoraniAccount> soraniLogin({
-    required String identifier,
-    required String password,
-    required String captchaId,
-    required SoraniCaptchaTrack track,
-  }) async => throw AppFailure('当前版本不支持登录青空次元');
-  Future<SoraniAccount> soraniLogout() async => const SoraniAccount();
   Future<void> initialize();
   Future<CatalogPage> catalog(
     String source, {
@@ -542,14 +528,6 @@ class NativeRepository extends AppRepository {
   }
 
   @override
-  Future<String> downloadDirectory() async {
-    _downloadPermission();
-    return (await _call({'action': 'downloadDirectory'}))['directory']
-            as String? ??
-        '';
-  }
-
-  @override
   Future<Map<String, dynamic>> storage() async {
     _downloadPermission();
     return _call({'action': 'storage'});
@@ -636,55 +614,6 @@ class NativeRepository extends AppRepository {
       }))['ready'] ==
       true;
 
-  // 管理员概念已移除：仅保留锁定检查。
-  void _soraniPermission() {
-    if (access != null && access!.locked) {
-      throw AppFailure('当前用户已锁定');
-    }
-  }
-
-  @override
-  Future<SoraniAccount> soraniAccount() async =>
-      SoraniAccount.fromJson(await _call({'action': 'soraniAccount'}));
-
-  @override
-  Future<SoraniCaptcha> soraniCaptcha() async {
-    _soraniPermission();
-    return SoraniCaptcha.fromJson(
-      await _call({'action': 'soraniAccount', 'command': 'captcha'}),
-    );
-  }
-
-  @override
-  Future<SoraniAccount> soraniLogin({
-    required String identifier,
-    required String password,
-    required String captchaId,
-    required SoraniCaptchaTrack track,
-  }) async {
-    _soraniPermission();
-    return SoraniAccount.fromJson(
-      await _call({
-        'action': 'soraniAccount',
-        'command': 'login',
-        'account': {
-          'identifier': identifier,
-          'password': password,
-          'captchaId': captchaId,
-          'track': track.toJson(),
-        },
-      }),
-    );
-  }
-
-  @override
-  Future<SoraniAccount> soraniLogout() async {
-    _soraniPermission();
-    return SoraniAccount.fromJson(
-      await _call({'action': 'soraniAccount', 'command': 'logout'}),
-    );
-  }
-
   Future<Map<String, dynamic>> _call(Map<String, dynamic> input) async {
     try {
       final action = input['action'] as String;
@@ -742,7 +671,6 @@ class NativeRepository extends AppRepository {
             'controlDownloadBatch',
             'beginConversion',
             'storage',
-            'downloadDirectory',
             'moveDownloads',
             'workLease',
           }.contains(action)) {
@@ -852,12 +780,6 @@ class NativeRepository extends AppRepository {
       for (final row in result['items'] as List? ?? const [])
         SourceModule.fromJson(Map<String, dynamic>.from(row as Map)),
     ];
-  }
-
-  @override
-  Future<ModuleStore> moduleIndex() async {
-    // 在线仓库已移除：不再从网络拉取模块索引。
-    throw AppFailure('在线仓库已移除');
   }
 
   @override

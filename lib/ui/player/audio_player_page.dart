@@ -23,6 +23,7 @@ import 'playback_handle.dart';
 import 'playback_sheets.dart';
 import 'player_surface.dart';
 import 'portrait_player_page.dart';
+import '../widgets/liquid_glass.dart';
 
 const _seekStep = Duration(seconds: 10);
 
@@ -102,7 +103,7 @@ class _AudioPlayerPageState extends State<AudioPlayerPage>
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('播放偏好未能保存，请重试')));
+    ).showSnackBar(glassSnackBar(context, '播放偏好未能保存，请重试'));
   }
 
   Future<void> _change(Future<void> Function() change) async {
@@ -165,7 +166,7 @@ class _AudioPlayerPageState extends State<AudioPlayerPage>
       if (!await _session.playSeason(season) && mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('${season.label}切换失败，请稍后重试')));
+        ).showSnackBar(glassSnackBar(context, '${season.label}切换失败，请稍后重试'));
       }
     } else {
       await _openEpisodes();

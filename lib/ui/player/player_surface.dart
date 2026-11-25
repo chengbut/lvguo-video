@@ -21,6 +21,7 @@ import 'player_lock.dart';
 import 'player_status.dart';
 import 'player_video.dart';
 import 'swipe_controls.dart';
+import '../widgets/liquid_glass.dart';
 
 String formatClock(Duration value) {
   final seconds = value.inSeconds;
@@ -330,7 +331,7 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('播放偏好未能保存，请重试')));
+      ).showSnackBar(glassSnackBar(context, '播放偏好未能保存，请重试'));
     }
   }
 

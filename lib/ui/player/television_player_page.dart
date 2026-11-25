@@ -16,6 +16,7 @@ import 'playback_handle.dart';
 import 'player_status.dart';
 import 'player_surface.dart';
 import 'player_video.dart';
+import '../widgets/liquid_glass.dart';
 
 enum _Menu { speed, quality, fit }
 
@@ -230,7 +231,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('播放偏好未能保存，请重试')));
+      ).showSnackBar(glassSnackBar(context, '播放偏好未能保存，请重试'));
     }
   }
 

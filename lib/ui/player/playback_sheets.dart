@@ -320,8 +320,9 @@ class PlaybackSettingsList extends StatelessWidget {
                   final path = await session.captureScreenshot();
                   if (!context.mounted) return;
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(path == null ? '截图失败' : '已保存：$path'),
+                    glassSnackBar(
+                      context,
+                      path == null ? '截图失败' : '已保存：$path',
                     ),
                   );
                 },

@@ -2,104 +2,15 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
-	"strconv"
 	"strings"
-
-	"golang.org/x/net/html"
 )
 
 type providerTextUserAgentKey struct{}
 type providerTextNoCacheKey struct{}
 type providerTextCookieKey struct{}
 type providerTextMirrorsKey struct{}
-
-var WebProviderNumericID = regexp.MustCompile(`^[1-9][0-9]{0,17}$`)
-
-func WebProviderInteger(value any, maximum int) (int, bool) {
-	number, err := strconv.Atoi(NativeText(value))
-	return number, err == nil && number >= 0 && number <= maximum
-}
-
-func ProviderHTMLAttr(node *html.Node, name string) string {
-	if node != nil {
-		for _, attribute := range node.Attr {
-			if attribute.Key == name {
-				return attribute.Val
-			}
-		}
-	}
-	return ""
-}
-
-func ProviderHTMLClass(node *html.Node, name string) bool {
-	for _, value := range strings.Fields(ProviderHTMLAttr(node, "class")) {
-		if value == name {
-			return true
-		}
-	}
-	return false
-}
-
-func ProviderHTMLNodes(root *html.Node, match func(*html.Node) bool) []*html.Node {
-	var found []*html.Node
-	if root == nil {
-		return found
-	}
-	pending := []*html.Node{root}
-	for len(pending) > 0 {
-		node := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if match(node) {
-			found = append(found, node)
-		}
-		for child := node.LastChild; child != nil; child = child.PrevSibling {
-			pending = append(pending, child)
-		}
-	}
-	return found
-}
-
-func ProviderHTMLFirstClass(root *html.Node, names ...string) *html.Node {
-	for _, name := range names {
-		matches := ProviderHTMLNodes(root, func(node *html.Node) bool {
-			return ProviderHTMLClass(node, name)
-		})
-		if len(matches) > 0 {
-			return matches[0]
-		}
-	}
-	return nil
-}
-
-func ProviderHTMLText(root *html.Node) string {
-	var text strings.Builder
-	for _, node := range ProviderHTMLNodes(root, func(node *html.Node) bool {
-		return node.Type == html.TextNode
-	}) {
-		if node.Parent != nil && (node.Parent.Data == "script" || node.Parent.Data == "style") {
-			continue
-		}
-		text.WriteString(node.Data)
-		text.WriteByte(' ')
-	}
-	return strings.Join(strings.Fields(text.String()), " ")
-}
-
-func FetchHostPage(ctx context.Context, host Host, address, referer, agent string) (*html.Node, string, error) {
-	response, err := host.FetchText(ctx, TextRequest{URL: address, Referer: referer, UserAgent: agent})
-	if err != nil {
-		return nil, "", err
-	}
-	if len(response.Body) > 4<<20 {
-		return nil, "", errors.New("站源页面过大")
-	}
-	document, err := html.Parse(strings.NewReader(response.Body))
-	return document, response.URL, err
-}
 
 func (d *Downloader) prepareWebProviderMedia(ctx context.Context, media ProviderMedia, sourceName string) (ProviderMedia, error) {
 	address, err := url.Parse(media.URL)

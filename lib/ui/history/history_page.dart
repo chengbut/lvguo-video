@@ -21,8 +21,6 @@ import '../widgets/status_view.dart';
 
 typedef _View = ({
   List<WatchEntry> history,
-  List<SourceSite> sources,
-  String source,
   List<WatchEntry> shown,
   Set<String>? selection,
 });
@@ -42,7 +40,6 @@ class _HistoryPageState extends State<HistoryPage> {
   final _editButton = FocusNode();
   final _searchField = FocusNode();
   final _entered = <Object>{};
-  var _source = '';
   Set<String>? _selection;
 
   @override
@@ -149,19 +146,19 @@ class _HistoryPageState extends State<HistoryPage> {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([widget.store, _query]),
     builder: (context, _) {
-      final history = widget.store.history;
-      final sources = watchedSources(history);
-      final source = sources.any((site) => site.id == _source) ? _source : '';
+      // 跟随当前源显示：不设“全部”，也不在页内手动切。当前源在模块页
+      // 切换后这里自动跟着变（store 是 Listenable，setSource 会通知重建）。
+      final source = widget.store.source;
+      final history = [
+        for (final entry in widget.store.history)
+          if (entry.drama.source == source) entry,
+      ];
       final shown = [
         for (final entry in history)
-          if ((source.isEmpty || entry.drama.source == source) &&
-              matchesWatchTitle(entry, _query.text))
-            entry,
+          if (matchesWatchTitle(entry, _query.text)) entry,
       ];
       final view = (
         history: history,
-        sources: sources,
-        source: source,
         shown: shown,
         selection: _selection?.intersection({
           for (final entry in shown) entry.drama.id,
@@ -194,7 +191,9 @@ class _HistoryPageState extends State<HistoryPage> {
     letterKeyboard: widget.store.televisionKeyboard,
     matches: (query) async => {
       for (final entry in widget.store.history)
-        if (matchesWatchTitle(entry, query)) entry.drama.title,
+        if (entry.drama.source == widget.store.source &&
+            matchesWatchTitle(entry, query))
+          entry.drama.title,
     }.toList(),
   );
 
@@ -299,36 +298,6 @@ class _HistoryPageState extends State<HistoryPage> {
         ),
       );
 
-  Widget _sourceChip(String id, String label, _View view) => FocusRing(
-    radius: 8,
-    child: ChoiceChip(
-      key: ValueKey('history-source-$id'),
-      label: Text(label),
-      showCheckmark: false,
-      selected: view.source == id,
-      onSelected: (_) => setState(() => _source = id),
-    ),
-  );
-
-  Widget? _sources(_View view, {required double inset, bool scroll = false}) {
-    if (view.sources.length < 2) return null;
-    final chips = [
-      _sourceChip('', '全部', view),
-      for (final site in view.sources) _sourceChip(site.id, site.displayName, view),
-    ];
-    if (scroll) {
-      return SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: EdgeInsets.fromLTRB(inset, 4, inset, 8),
-        child: Row(spacing: 8, children: chips),
-      );
-    }
-    return Padding(
-      padding: EdgeInsets.fromLTRB(inset, 4, inset, 8),
-      child: Wrap(spacing: 8, runSpacing: 8, children: chips),
-    );
-  }
-
   Widget _phone(BuildContext context, _View view) {
     final selection = view.selection;
     final root = widget.root;
@@ -395,7 +364,6 @@ class _HistoryPageState extends State<HistoryPage> {
               padding: EdgeInsets.fromLTRB(16, root ? 0 : 4, 16, 8),
               child: _search(),
             ),
-            ?_sources(view, inset: 16, scroll: true),
           ],
         ),
       ),
@@ -451,7 +419,6 @@ class _HistoryPageState extends State<HistoryPage> {
               ),
             ),
           ),
-          ?_sources(view, inset: 24),
         ],
       ),
     ),
@@ -490,7 +457,6 @@ class _HistoryPageState extends State<HistoryPage> {
               ),
             ),
           ),
-          ?_sources(view, inset: televisionInset),
         ],
       ),
     ),

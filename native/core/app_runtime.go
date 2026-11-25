@@ -394,8 +394,6 @@ func nativeDispatch(input nativeInput) (any, error) {
 		return engine.uninstallModule(input.Source)
 	case "sourceDevices":
 		return engine.sourceDevices(ctx, nativeActionSource(input), input.Command == "register")
-	case "soraniAccount", "sourceAccount":
-		return engine.sourceAccount(ctx, nativeActionSource(input), input.Command, input.Account)
 	case "rankingBoards":
 		boards := []RankingBoard{}
 		for _, board := range allRankingBoards() {
@@ -409,11 +407,6 @@ func nativeDispatch(input nativeInput) (any, error) {
 	case "suggestions":
 		items, err := engine.suggestions(ctx, nativeActionSource(input), input.Query)
 		return map[string]any{"items": items}, err
-	case "downloadDirectory":
-		engine.downloads.mu.Lock()
-		root := engine.downloads.root
-		engine.downloads.mu.Unlock()
-		return map[string]string{"directory": root}, nil
 	case "storage":
 		return engine.storage()
 	case "cache":

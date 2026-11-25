@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_scope.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/group_card.dart';
+import '../widgets/liquid_glass.dart';
 
 bool settingsSplit(BuildContext context) =>
     switch (AppScope.formFactorOf(context)) {
@@ -19,7 +20,7 @@ Future<void> saveSetting(
   if (context.mounted) {
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text('$failure')));
+    ).showSnackBar(glassSnackBar(context, '$failure'));
   }
 });
 

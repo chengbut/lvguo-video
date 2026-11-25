@@ -81,6 +81,49 @@ class LiquidGlass extends StatelessWidget {
   }
 }
 
+/// 液态玻璃提示条：全 App 的 SnackBar 统一走这里。默认 SnackBar 是
+/// inverseSurface 实心黑条，和全 App 的玻璃质感不搭；这里把条本身设成
+/// 透明无阴影，内容换成 LiquidGlass（实时模糊 + 高光渐变），文字用
+/// onSurface（亮色玻璃上是深字、暗色玻璃上是浅字，都读得清）。
+/// actionLabel/onAction 对应原来的 SnackBarAction：点了先关条再执行，
+/// 和系统行为一致。悬浮位置仍由主题的 snackBarTheme 管（胶囊上方）。
+SnackBar glassSnackBar(
+  BuildContext context,
+  String message, {
+  String? actionLabel,
+  VoidCallback? onAction,
+  bool persist = true,
+  Duration? duration,
+}) {
+  final theme = Theme.of(context);
+  final textStyle = (theme.textTheme.bodyMedium ?? const TextStyle())
+      .copyWith(color: theme.colorScheme.onSurface);
+  return SnackBar(
+    persist: persist,
+    duration: duration ?? const Duration(seconds: 4),
+    backgroundColor: Colors.transparent,
+    elevation: 0,
+    padding: EdgeInsets.zero,
+    content: LiquidGlass(
+      borderRadius: const BorderRadius.all(Radius.circular(16)),
+      padding: EdgeInsets.fromLTRB(16, 12, actionLabel == null ? 16 : 8, 12),
+      child: Row(
+        children: [
+          Expanded(child: Text(message, style: textStyle)),
+          if (actionLabel != null)
+            TextButton(
+              onPressed: () {
+                ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                onAction?.call();
+              },
+              child: Text(actionLabel),
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
 /// 玻璃质感的圆形图标按钮（播放器控制栏用）。
 class LiquidGlassIconButton extends StatelessWidget {
   const LiquidGlassIconButton({

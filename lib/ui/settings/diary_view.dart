@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../diary_service.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/status_view.dart';
+import '../widgets/liquid_glass.dart';
 
 final _failure = RegExp('err|fail|exception|异常|失败', caseSensitive: false);
 
@@ -56,7 +57,7 @@ class _DiaryViewState extends State<DiaryView> {
     if (mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('日记已复制')));
+      ).showSnackBar(glassSnackBar(context, '日记已复制'));
     }
   }
 

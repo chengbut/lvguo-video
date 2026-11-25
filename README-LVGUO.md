@@ -2,18 +2,15 @@
 
 影视聚合播放器（Flutter 多端应用），支持画中画（PiP）播放。
 
-> 本项目是 [Xanerix/guoapp](https://github.com/Xanerix/guoapp)（小果影视）的
-> 改名衍生版。原项目以 **GNU GPLv3** 开源，衍生版同样遵循 GPLv3；
-> 原作者版权声明与 `LICENSE` 文件保持不变。CHANGELOG.md 保留为上游
-> 历史记录。
+> 本项目是基于上游开源项目（**GNU GPLv3**）的改名衍生版，衍生版同样
+> 遵循 GPLv3；原作者版权声明与 `LICENSE` 文件保持不变。
 
 ## 与上游相比改了什么
 
 - 应用名：**小果影视 → 绿果视频**（`lib/app_build.dart`、`scripts/app_build.py`、
   Android / iOS / macOS / Windows 各端配置、README、DEVELOPMENT.md）。
-- 包名：`com.guoapp.app` → **`com.lvguo.video`**（iOS、macOS、Android 默认
-  applicationId、Windows；Android 的 `namespace` 仍为 `com.guoapp`，
-  仅影响 R 类包名，不影响安装与显示）。
+- 包名：**`com.lvguo.video`**（iOS、macOS、Android 默认 applicationId、
+  Windows；Android 的 `namespace` 与 Kotlin 包名同为 `com.lvguo.video`）。
 - 图标：整套应用图标由蓝灰色改为绿色（iOS AppIcon、macOS 图标、
   Android launcher 图标均已重生成）。
 - 上游的发布流程（`.github/workflows/build.yml`，需要私有站源仓库、
@@ -100,8 +97,7 @@ python scripts/build_ios.py
 
 ## 开发相关
 
-上游文档仍适用：`DEVELOPMENT.md`（已同步改名与包名）、
-`CONTRIBUTING.md`。Dart 代码用 `dart analyze`，Go 核心用
+开发文档见 `DEVELOPMENT.md`（已同步改名与包名）。Dart 代码用 `dart analyze`，Go 核心用
 `go test ./...`（在 `native/` 目录下）。
 
 ## 二进制资源说明（.b64）

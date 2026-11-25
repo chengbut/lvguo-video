@@ -29,6 +29,7 @@ import 'boss_key_tile.dart';
 import 'diary_view.dart';
 import 'settings_rows.dart';
 import 'storage_view.dart';
+import '../widgets/liquid_glass.dart';
 
 enum SettingsGroup {
   appearance('外观', Icons.palette_outlined),
@@ -281,6 +282,14 @@ class SettingsSection extends StatelessWidget {
             value: preferences.autoClearScreen,
             onChanged: (value) => savePreferences(
               preferences.copyWith(autoClearScreen: value),
+            ),
+          ),
+          SwitchTile(
+            title: '默认静音播放',
+            subtitle: '打开后每次进播放先静音，点音量按钮恢复声音',
+            value: preferences.startMuted,
+            onChanged: (value) => savePreferences(
+              preferences.copyWith(startMuted: value),
             ),
           ),
           SwitchTile(
@@ -733,7 +742,7 @@ class SettingsSection extends StatelessWidget {
     if (context.mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('无法打开浏览器，链接已复制')));
+      ).showSnackBar(glassSnackBar(context, '无法打开浏览器，链接已复制'));
     }
   }
 
@@ -803,7 +812,7 @@ class _BackupCardState extends State<_BackupCard> {
     if (message != null && mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ).showSnackBar(glassSnackBar(context, message));
     }
   }
 
@@ -875,7 +884,7 @@ class _RenderingTileState extends State<_RenderingTile> {
     if (!await AppDevice.setCompatibleRendering(enabled) && mounted) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('兼容渲染模式未能保存，请重试')));
+      ).showSnackBar(glassSnackBar(context, '兼容渲染模式未能保存，请重试'));
     }
   }
 

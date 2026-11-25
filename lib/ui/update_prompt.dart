@@ -9,6 +9,7 @@ import '../core_bridge.dart';
 import '../local_store.dart';
 import 'app_scope.dart';
 import 'widgets/focus_ring.dart';
+import 'widgets/liquid_glass.dart';
 
 var _checked = false;
 const _manualCooldown = Duration(seconds: 30);
@@ -66,16 +67,15 @@ Future<void> checkUpdateManually(BuildContext context) async {
     }
   } catch (failure) {
     messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          failure is AppFailure ? '检查更新失败：$failure' : '检查更新失败，请稍后再试',
-        ),
+      glassSnackBar(
+        context,
+        failure is AppFailure ? '检查更新失败：$failure' : '检查更新失败，请稍后再试',
       ),
     );
     return;
   }
   if (update == null) {
-    messenger.showSnackBar(const SnackBar(content: Text('已是最新版本')));
+    messenger.showSnackBar(glassSnackBar(context, '已是最新版本'));
     return;
   }
   if (!context.mounted) return;
@@ -135,6 +135,6 @@ Future<void> _openRelease(BuildContext context, String url) async {
   if (context.mounted) {
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('无法打开浏览器，链接已复制')));
+    ).showSnackBar(glassSnackBar(context, '无法打开浏览器，链接已复制'));
   }
 }

@@ -9,6 +9,7 @@ import '../../local_store.dart';
 import '../../models.dart';
 import '../widgets/cover_image.dart';
 import 'poster_glow.dart';
+import '../widgets/liquid_glass.dart';
 
 const _background = Color(0xFF101015);
 const _accent = Color(0xFF8C7BFF);
@@ -361,7 +362,7 @@ class TelevisionDetailState extends State<TelevisionDetail> {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('$failure')));
+        ).showSnackBar(glassSnackBar(context, '$failure'));
       }
     }),
   );

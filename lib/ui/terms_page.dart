@@ -6,6 +6,7 @@ import '../app_build.dart';
 import '../local_store.dart';
 import 'app_scope.dart';
 import 'widgets/focus_ring.dart';
+import 'widgets/liquid_glass.dart';
 
 const termsVersion = 2;
 const _clauses = [
@@ -66,7 +67,7 @@ class _TermsPageState extends State<TermsPage> {
       setState(() => _busy = false);
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('保存失败：$failure')));
+      ).showSnackBar(glassSnackBar(context, '保存失败：$failure'));
     }
   }
 

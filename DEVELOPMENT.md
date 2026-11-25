@@ -82,8 +82,7 @@ Flutter 界面 + Go 原生核心。站源请求、解析、签名、缓存、下
 - 位置：数据目录下的 `modules/<模块标识>/`，应用启动时加载。Windows 的数据目录是 `%APPDATA%\<包名>`，便携版是程序旁的 `userdata`。
 - 文件：`manifest.json` 与 `main.js`，写法参照 `native/module_example/jsexample`。
 - 安装包：zip，`manifest.json` 和 `main.js` 放在根目录或唯一的一层文件夹里，其余文件忽略，整包不超过 8 MB。在「模块」页里从文件或地址安装，同一标识覆盖旧版本，标识或别名与其他站源重复时拒绝安装；安装和卸载不用重启。
-- 模块商店：读取 GitHub 组织 guoapp-modules 的 `index` 仓库里的 `index.json`（先 raw.githubusercontent.com，失败换 jsDelivr），按其中的仓库和标签下载 `manifest.json` 与 `main.js` 并核对 sha256，再走同样的安装确认。模块的发版和上架方式见该组织的 `template` 与 `index` 仓库。
-- 内置模块：`build_native.py` / `build_ios.py` 把 `--bundle <模块目录>`（可多次指定）和环境变量 `BUNDLED_MODULES`（逗号分隔）里的模块复制到 `native/core/bundled/`（相对路径以仓库根目录为准），由 Go 以 `go:embed` 打进核心；该目录除 `.gitkeep` 外不入库，每次出包前清空重建。应用启动时，未安装或内置版本更高的内置模块写入数据目录的 `modules/`，用户卸载过的不再自动安装（记在 `modules/.bundled-removed.json`），模块商店在「内置」里照常列出，从安装包内的副本安装，索引读不到时也能装；索引里也有同一模块时，「在线仓库」另列一项，从索引下载，已安装模块按两者中较高的版本提示更新。官方包内置红果，来自私有仓库 guoapp-modules/hongguo，CI 用 Secret `HONGGUO_DEPLOY_KEY`（只读部署密钥）检出到 `bundled-modules/hongguo`。
+- 内置模块：`build_native.py` / `build_ios.py` 把 `--bundle <模块目录>`（可多次指定）和环境变量 `BUNDLED_MODULES`（逗号分隔）里的模块复制到 `native/core/bundled/`（相对路径以仓库根目录为准），由 Go 以 `go:embed` 打进核心；该目录除 `.gitkeep` 外不入库，每次出包前清空重建。应用启动时，未安装或内置版本更高的内置模块写入数据目录的 `modules/`，用户卸载过的不再自动安装（记在 `modules/.bundled-removed.json`）。本仓库的构建不指定 `--bundle`，不内置任何模块。
 - 清单：`id`（小写字母、数字、`_`、`-`，最长 32 个字符，须与文件夹同名）、`name`、`version`、`description`、`runtime`（只支持 `js`）、`api`（当前为 `1`）、`adult`（必填，是否限制级内容，`true` 或 `false`）、`hosts`（允许请求的域名，`*.example.com` 匹配子域名）、`capabilities`（可选能力，见下表）、`rankings`（榜单列表，每项 `id`、`name`、`description`）。`mediaAuthPaths`（声明 `mediaAuth` 时必填，见下表）。其余可选字段对应站源描述：`allowEmptyCatalog`、`group`、`groupName`、`entryName`、`skipVipPrompt`、`aliases`、`hostSuffixes`、`baseUrl`、`noHostRotation`、`keepDetailEpisodes`、`continuousFeed`、`browserFingerprint`。
 - 入口：`main.js` 是 CommonJS，用 `module.exports` 导出 `categories(force)`、`catalogPage(page, category)`、`detail(sourceId)`、`resolveMedia(task)`，以及可选的 `validCategory(category)`。`categories` 只取到部分分类时返回 `{ items, incomplete: true }`，应用稍后会重取；`catalogPage` 和 `search` 返回 `{ items, hasMore, warning }`，有剧集又有 `warning` 时作为提示显示。函数必须同步返回，不能是异步函数。需要用户登录时抛出带 `loginRequired = true` 属性的 `Error`。
 - 分集：`detail` 返回的分集可带 `mediaType: "audio"` 标明是音频，播放时显示封面并隐藏画面比例；未声明时，文件只有音轨也按音频处理。多数分集的 `title` 不是「第 N 集」这类序号时，选集改为单列显示标题。
@@ -146,15 +145,6 @@ Windows 数据目录为 `%APPDATA%\<包名>`：`Runner.rc` 不设 CompanyName，
 
 ## 检查更新与使用统计
 
-接收端是 Cloudflare Worker `guoapp-update`（`worker/`，D1 数据库 `guoapp-stats`），地址在编译期由环境变量 `UPDATE_SERVER_URL` 经 `scripts/app_build.py` 注入 Go（CI 取仓库变量 `UPDATE_SERVER_URL`），没设时检查更新和使用统计都不发请求，fork 和本地构建默认不会连到这里。变量可填逗号分隔的多个地址，Go 按顺序尝试，前一个连不上或返回错误时换下一个；CI 里先填国内可直连的中转服务器，再填 Worker。Go 核心（`native/core/app_update.go`）的 `checkUpdate` 请求 `GET /v1/latest`，只读不写；`reportUsage` 请求 `POST /v1/ping`，按北京时间日期和随机编号在 `pings` 表里每天记一行。两者分别由设置里的「启动时检查更新」和「匿名使用统计」控制。各平台点「更新」都只打开发布页，应用内不下载安装包。Worker 每小时从 GitHub 读取最新 Release 写入 `meta` 表。改 Worker 后在 `worker/` 下运行 `npx wrangler deploy`。
+接收端是 Cloudflare Worker（上游实现已从本仓库移除，需要时自行部署），地址在编译期由环境变量 `UPDATE_SERVER_URL` 经 `scripts/app_build.py` 注入 Go（CI 取仓库变量 `UPDATE_SERVER_URL`），没设时检查更新和使用统计都不发请求，fork 和本地构建默认不会连到这里。变量可填逗号分隔的多个地址，Go 按顺序尝试，前一个连不上或返回错误时换下一个。Go 核心（`native/core/app_update.go`）的 `checkUpdate` 请求 `GET /v1/latest`，只读不写；`reportUsage` 请求 `POST /v1/ping`，按北京时间日期和随机编号在 `pings` 表里每天记一行。两者分别由设置里的「启动时检查更新」和「匿名使用统计」控制。各平台点「更新」都只打开发布页，应用内不下载安装包。
 
-在 `worker/` 下查询（`--remote` 查线上库）：
-
-~~~sh
-npx wrangler d1 execute guoapp-stats --remote --command "SELECT day, COUNT(*) AS users FROM pings GROUP BY day ORDER BY day DESC LIMIT 30"   # 日活
-npx wrangler d1 execute guoapp-stats --remote --command "SELECT COUNT(DISTINCT id) FROM pings WHERE day >= date('now', '-30 days')"          # 近 30 天活跃
-npx wrangler d1 execute guoapp-stats --remote --command "SELECT COUNT(DISTINCT id) FROM pings"                                               # 累计装机
-npx wrangler d1 execute guoapp-stats --remote --command "SELECT platform, build, version, COUNT(*) FROM pings WHERE day = date('now', '+8 hours') GROUP BY 1, 2, 3 ORDER BY 4 DESC"  # 今日分布
-~~~
-
-应用显示名：Android 在 `android/app/build.gradle.kts`，Windows 在 `windows/runner/app_branding.cmake`，iOS 由 Xcode「Thin Binary」构建阶段写入，macOS 由 `scripts/package_release.py` 打包时改 `CFBundleDisplayName` / `CFBundleName` / `CFBundleIdentifier` 后重新签名。iOS 的 `CFBundleDisplayName` 用英文名 `GuoApp` 以通过侧载工具的名称校验，中文名写在 `zh-Hans.lproj/InfoPlist.strings`。macOS 关闭了 App Sandbox，以便本地播放代理和自选下载目录正常工作；系统代理由 `MainFlutterWindow.swift` 的 `duanju/device` 通道读取。
+应用显示名：Android 在 `android/app/build.gradle.kts`，Windows 在 `windows/runner/app_branding.cmake`，iOS 由 Xcode「Thin Binary」构建阶段写入，macOS 由 `scripts/package_release.py` 打包时改 `CFBundleDisplayName` / `CFBundleName` / `CFBundleIdentifier` 后重新签名。iOS 的 `CFBundleDisplayName` 用英文名以通过侧载工具的名称校验，中文名写在 `zh-Hans.lproj/InfoPlist.strings`。macOS 关闭了 App Sandbox，以便本地播放代理和自选下载目录正常工作；系统代理由 `MainFlutterWindow.swift` 的 `duanju/device` 通道读取。

@@ -40,59 +40,6 @@ class SourceModule {
   final String error;
 }
 
-class ModuleIndexEntry {
-  const ModuleIndexEntry({
-    required this.id,
-    required this.name,
-    required this.version,
-    this.description = '',
-    this.repo = '',
-    this.adult = false,
-    this.bundled = false,
-  });
-  factory ModuleIndexEntry.fromJson(Map<String, dynamic> json) =>
-      ModuleIndexEntry(
-        id: json['id'] as String? ?? '',
-        name: json['name'] as String? ?? '',
-        version: json['version'] as String? ?? '',
-        description: json['description'] as String? ?? '',
-        repo: json['repo'] as String? ?? '',
-        adult: json['adult'] == true,
-        bundled: json['bundled'] == true,
-      );
-  final String id;
-  final String name;
-  final String version;
-  final String description;
-  final String repo;
-  final bool adult;
-  final bool bundled;
-}
-
-class ModuleStore {
-  const ModuleStore(this.entries, {this.warning = ''});
-  final List<ModuleIndexEntry> entries;
-  final String warning;
-}
-
-bool isNewerModuleVersion(String latest, String installed) {
-  List<int>? parse(String version) {
-    final parts = version.split('.').map(int.tryParse).toList();
-    return parts.length == 3 && !parts.contains(null)
-        ? parts.cast<int>()
-        : null;
-  }
-
-  final next = parse(latest);
-  final current = parse(installed);
-  if (next == null) return false;
-  if (current == null) return latest != installed;
-  for (var index = 0; index < 3; index++) {
-    if (next[index] != current[index]) return next[index] > current[index];
-  }
-  return false;
-}
-
 const moduleCapabilityNames = {
   'search': '搜索',
   'account': '账号登录',
