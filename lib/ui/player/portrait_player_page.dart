@@ -775,7 +775,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
         Positioned(
           left: 0,
           right: 0,
-          bottom: bottom + 110,
+          bottom: bottom + 140,
           child: FadePresence(
             scaleFrom: .9,
             child: _dragging
@@ -786,17 +786,16 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           ),
         ),
         Positioned(
-          key: const ValueKey('progress'),
-          left: 0,
-          right: 0,
-          bottom: bottom + 44,
-          height: 30,
-          child: _chrome(_progressBand(context)),
+          key: const ValueKey('controls'),
+          left: 12,
+          right: 12,
+          bottom: bottom + 52,
+          child: _chrome(_controlBlock(context)),
         ),
         Positioned(
           key: const ValueKey('episodes'),
-          left: 16,
-          right: 16,
+          left: 12,
+          right: 12,
           bottom: bottom,
           height: 44,
           child: _chrome(_episodeStrip()),
@@ -908,33 +907,42 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     );
   }
 
+  // 顶栏照横版的样子（用户 2026-11-25 指定参照横版改）：返回圆钮 +
+  // 集数纯文字（不上玻璃胶囊）+ 小窗 + 设置，同一行。
   Widget _header() {
     final session = _session;
     return Row(
-      spacing: 8,
       children: [
         LiquidGlassIconButton(
-          size: 40,
           onPressed: () => unawaited(Navigator.maybePop(context)),
           tooltip: '返回',
           child: const Icon(Icons.arrow_back_rounded, color: Colors.white),
         ),
-        Expanded(
-          child: LiquidGlass(
-            borderRadius: BorderRadius.circular(20),
-            blur: 14,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-            child: Text(
-              '第${session.episode.number}集',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
-              ),
+        const SizedBox(width: 8),
+        Text(
+          '第${session.episode.number}集',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const Spacer(),
+        if (widget.onMiniWindow case final onMiniWindow?) ...[
+          LiquidGlassIconButton(
+            onPressed: onMiniWindow,
+            tooltip: '小窗',
+            child: const Icon(
+              Icons.picture_in_picture_alt_rounded,
+              color: Colors.white,
             ),
           ),
+          const SizedBox(width: 8),
+        ],
+        LiquidGlassIconButton(
+          onPressed: () => unawaited(_openSettings()),
+          tooltip: '播放设置',
+          child: const Icon(Icons.settings_rounded, color: Colors.white),
         ),
       ],
     );
@@ -963,18 +971,96 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     ),
   );
 
-  // 贴底的液态玻璃通条，里面是一条细进度线，可拖动。
-  // 底色透明：玻璃底色去掉，只留模糊 + 细边框，视频从下面透出来，
-  // 只剩进度线本身可见。
-  Widget _progressBand(BuildContext context) => LiquidGlass(
-    borderRadius: BorderRadius.zero,
-    blur: 14,
-    tint: 0,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: _progress(context),
-    ),
+  // 底部控制块照横版的样子（用户 2026-11-25 指定参照横版改）：
+  // 控制行（播放/暂停、时间、弹幕、全屏）+ 进度行装进同一块玻璃。
+  // 集数条不进块，仍单独一条挂在块下方，按用户要求更透明。
+  Widget _controlBlock(BuildContext context) {
+    final session = _session;
+    return LiquidGlass(
+      borderRadius: BorderRadius.circular(20),
+      blur: 14,
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: 40,
+            child: Row(
+              children: [
+                IconButton(
+                  onPressed: () {
+                    _wake();
+                    session.togglePlayback();
+                  },
+                  tooltip: session.player.state.playing ? '暂停' : '播放',
+                  icon: Icon(
+                    session.player.state.playing
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    color: Colors.white,
+                    size: 28,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                _clock(),
+                const Spacer(),
+                if (session.danmakuSupported) _danmakuButton(context),
+                if (widget.onFullscreen case final onFullscreen?) ...[
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: onFullscreen,
+                    tooltip: '全屏',
+                    icon: const Icon(
+                      Icons.fullscreen_rounded,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (session.store.playbackPreferences.progressLine)
+            SizedBox(height: 26, child: _progress(context)),
+        ],
+      ),
+    );
+  }
+
+  Widget _clock() => PlaybackProgressBuilder(
+    player: _session.player,
+    active: _chromeShown,
+    builder: (context) {
+      final state = _session.player.state;
+      final position = _seekValue != null
+          ? Duration(milliseconds: _seekValue!.round())
+          : state.position;
+      return Text(
+        '${formatClock(position)} / ${formatClock(state.duration)}',
+        maxLines: 1,
+        style: TextStyle(
+          fontSize: 13,
+          color: Colors.white.withValues(alpha: .86),
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      );
+    },
   );
+
+  Widget _danmakuButton(BuildContext context) {
+    final enabled = _session.danmakuEnabled;
+    return IconButton(
+      onPressed: () => unawaited(
+        _session.toggleDanmaku().catchError((Object _) => _saveFailed()),
+      ),
+      tooltip: enabled ? '关闭弹幕' : '打开弹幕',
+      icon: Icon(
+        enabled ? Icons.subtitles_rounded : Icons.subtitles_off_rounded,
+        color: enabled ? Theme.of(context).colorScheme.primary : Colors.white,
+        size: 24,
+      ),
+    );
+  }
 
   Widget _progress(BuildContext context) => PlaybackProgressBuilder(
     player: _session.player,
@@ -999,9 +1085,9 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
         padding: EdgeInsets.zero,
         activeTrackColor: Colors.white,
         thumbColor: Colors.white,
-        // 未播的背景条透明：只留已播的白线、缓冲的淡白线和拇指，
-        // 已播/未播靠白线本身分得清。
-        inactiveTrackColor: Colors.transparent,
+        // 未播轨道给一层淡白：全透明时进度条看着像断在缓冲末尾，
+        // 分不清总长（用户 2026-11-25 截图问“进度条没问题吗”）。
+        inactiveTrackColor: Colors.white.withValues(alpha: .18),
         secondaryActiveTrackColor: Colors.white.withValues(alpha: .4),
         thumbShape: RoundSliderThumbShape(
           enabledThumbRadius: dragging ? 10 : 6,
@@ -1056,7 +1142,10 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     final count = _session.detail.episodes.length;
     return LiquidGlass(
       borderRadius: BorderRadius.circular(12),
-      blur: 14,
+      // 竖版全屏时按用户要求更透明（2026-11-25）：玻璃浓度降到
+      // 0.45、模糊加大，字还读得清，但不抢画面。
+      blur: 18,
+      tint: 0.45,
       child: Material(
         color: Colors.transparent,
         borderRadius: BorderRadius.circular(12),

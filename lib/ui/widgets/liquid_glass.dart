@@ -92,7 +92,7 @@ SnackBar glassSnackBar(
   String message, {
   String? actionLabel,
   VoidCallback? onAction,
-  bool persist = true,
+  bool persist = false,
   Duration? duration,
 }) {
   final theme = Theme.of(context);
@@ -100,7 +100,9 @@ SnackBar glassSnackBar(
       .copyWith(color: theme.colorScheme.onSurface);
   return SnackBar(
     persist: persist,
-    duration: duration ?? const Duration(seconds: 4),
+    duration:
+        duration ??
+        Duration(seconds: actionLabel != null ? 6 : 4),
     backgroundColor: Colors.transparent,
     elevation: 0,
     padding: EdgeInsets.zero,
