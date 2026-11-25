@@ -53,6 +53,10 @@ class _HistoryPageState extends State<HistoryPage> {
 
   @override
   void dispose() {
+    // 极端情况：编辑中途页面被销毁，别留一个藏胶囊的信号在 shell 里。
+    final element = context
+        .getElementForInheritedWidgetOfExactType<ShellCapsuleHidden>();
+    (element?.widget as ShellCapsuleHidden?)?.notifier?.value = false;
     _query.dispose();
     _firstPoster.dispose();
     _editButton.dispose();
@@ -73,21 +77,32 @@ class _HistoryPageState extends State<HistoryPage> {
         }
       });
 
+  // 编辑态同步给 shell：进编辑藏胶囊底栏（删按钮是页面底栏，胶囊会
+  // 盖住它），退出编辑再滑回来。ValueNotifier 写相同值不通知，不用怕重复写。
+  void _syncCapsuleHidden() {
+    ShellCapsuleHidden.of(context)?.value = _selection != null;
+  }
+
   void _startEditing() {
     setState(() => _selection = {});
+    _syncCapsuleHidden();
     _keepFocus(_firstPoster);
   }
 
   void _finishEditing() {
     setState(() => _selection = null);
+    _syncCapsuleHidden();
     _keepFocus(_editButton);
   }
 
-  void _toggle(String id) => setState(() {
-    final selection = {...?_selection};
-    if (!selection.remove(id)) selection.add(id);
-    _selection = selection;
-  });
+  void _toggle(String id) {
+    setState(() {
+      final selection = {...?_selection};
+      if (!selection.remove(id)) selection.add(id);
+      _selection = selection;
+    });
+    _syncCapsuleHidden();
+  }
 
   Future<void> _remove(Set<String> ids, {required bool clear}) async {
     if (ids.isEmpty) return;
@@ -126,6 +141,7 @@ class _HistoryPageState extends State<HistoryPage> {
     await saveSetting(context, () => widget.store.removeHistory(ids));
     if (!mounted) return;
     setState(() => _selection = null);
+    _syncCapsuleHidden();
     _keepFocus(_firstPoster, _searchField);
   }
 
@@ -222,7 +238,10 @@ class _HistoryPageState extends State<HistoryPage> {
     final everything = view.selection!.length == all.length;
     return _textButton(
       everything ? '取消全选' : '全选',
-      () => setState(() => _selection = everything ? {} : all),
+      () {
+        setState(() => _selection = everything ? {} : all);
+        _syncCapsuleHidden();
+      },
     );
   }
 
@@ -632,7 +651,10 @@ class _HistoryPageState extends State<HistoryPage> {
             )
           : () => _toggle(drama.id),
       onMore: selection == null
-          ? () => setState(() => _selection = {drama.id})
+          ? () {
+              setState(() => _selection = {drama.id});
+              _syncCapsuleHidden();
+            }
           : null,
     );
     // 收藏 = 追剧：海报右上角爱心，复用 store.toggleFavorite / isFavorite，
