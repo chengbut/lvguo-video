@@ -78,6 +78,23 @@ class ShellBars extends InheritedNotifier<ValueNotifier<bool>> {
       true;
 }
 
+/// 历史页编辑模式时隐藏胶囊底栏的信号：删除按钮是页面的
+/// bottomNavigationBar，胶囊悬浮在它上面会盖住（原生玻璃半透明，
+/// 红色还会透出来把整条底栏染红）。历史页在进入/退出编辑时写这个
+/// notifier，shell 只在历史 tab 激活时才听它——切到别的 tab 胶囊照常显示。
+class ShellCapsuleHidden extends InheritedNotifier<ValueNotifier<bool>> {
+  const ShellCapsuleHidden({
+    super.key,
+    required super.notifier,
+    required super.child,
+  });
+
+  static ValueNotifier<bool>? of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<ShellCapsuleHidden>()
+          ?.notifier;
+}
+
 class HideOnScroll extends StatelessWidget {
   const HideOnScroll({super.key, required this.alignment, required this.child});
   final Alignment alignment;
@@ -123,6 +140,7 @@ class _AppShellState extends State<AppShell> {
   final _explore = GlobalKey<ExplorePageState>();
   static const _revealVelocity = 400.0;
   final _barsShown = ValueNotifier(true);
+  final _capsuleHidden = ValueNotifier(false);
   final _scrollClock = Stopwatch()..start();
   var _scrollVelocity = VelocityTracker.withKind(PointerDeviceKind.touch);
   var _tab = AppTab.explore;
@@ -179,6 +197,7 @@ class _AppShellState extends State<AppShell> {
     _mineEntry.dispose();
     _header.dispose();
     _barsShown.dispose();
+    _capsuleHidden.dispose();
     _exitWindow?.cancel();
     _converter?.dispose();
     _merges?.dispose();
@@ -379,52 +398,67 @@ class _AppShellState extends State<AppShell> {
       child: switch (AppScope.formFactorOf(context)) {
         FormFactor.phone => ShellBars(
           notifier: _barsShown,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: Scaffold(
-                  body: NotificationListener<ScrollNotification>(
-                    onNotification: _scrolled,
-                    child: pages,
-                  ),
-                ),
-              ),
-              // 胶囊栏悬浮在内容之上：它本身就是 Stack 里的一层，正常接
-              // 手势；胶囊之外的区域本来就是空的，手指直接穿透到底层列
-              // 表滑动。滑动时底栏不消失（不再用 HideOnScroll 包它）。
-              // 进子页面时底栏滑出 + 淡出、回来时滑入 + 淡入：常驻在
-              // 树里做位移和透明度动画，只改过渡，不改显隐逻辑本身。
-              Positioned(
-                left: 16,
-                right: 16,
-                bottom: 10,
-                child: SafeArea(
-                  top: false,
-                  child: AnimatedSlide(
-                    offset: covered ? const Offset(0, 1.6) : Offset.zero,
-                    duration: Motion.of(
-                      context,
-                      const Duration(milliseconds: 350),
-                    ),
-                    curve: covered ? Motion.exit : Motion.enter,
-                    child: AnimatedOpacity(
-                      opacity: covered ? 0 : 1,
-                      duration: Motion.of(context, Motion.long),
-                      curve: Motion.standard,
-                      child: IgnorePointer(
-                        ignoring: covered,
-                        child: _CapsuleBar(
-                          tabs: phoneTabs,
-                          selected: _tab,
-                          onTap: _tap,
-                          badged: _badged,
-                        ),
-                      ),
+          child: ShellCapsuleHidden(
+            notifier: _capsuleHidden,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: Scaffold(
+                    body: NotificationListener<ScrollNotification>(
+                      onNotification: _scrolled,
+                      child: pages,
                     ),
                   ),
                 ),
-              ),
-            ],
+                // 胶囊栏悬浮在内容之上：它本身就是 Stack 里的一层，正常接
+                // 手势；胶囊之外的区域本来就是空的，手指直接穿透到底层列
+                // 表滑动。滑动时底栏不消失（不再用 HideOnScroll 包它）。
+                // 进子页面时底栏滑出 + 淡出、回来时滑入 + 淡入：常驻在
+                // 树里做位移和透明度动画，只改过渡，不改显隐逻辑本身。
+                // 历史页编辑模式也一样藏起来（删按钮是页面底栏，胶囊会
+                // 盖住它），只在历史 tab 激活时听这个信号。
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 10,
+                  child: SafeArea(
+                    top: false,
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: _capsuleHidden,
+                      builder: (context, hidden, _) {
+                        final hide =
+                            covered ||
+                            (hidden && _tab == AppTab.history);
+                        return AnimatedSlide(
+                          offset: hide
+                              ? const Offset(0, 1.6)
+                              : Offset.zero,
+                          duration: Motion.of(
+                            context,
+                            const Duration(milliseconds: 350),
+                          ),
+                          curve: hide ? Motion.exit : Motion.enter,
+                          child: AnimatedOpacity(
+                            opacity: hide ? 0 : 1,
+                            duration: Motion.of(context, Motion.long),
+                            curve: Motion.standard,
+                            child: IgnorePointer(
+                              ignoring: hide,
+                              child: _CapsuleBar(
+                                tabs: phoneTabs,
+                                selected: _tab,
+                                onTap: _tap,
+                                badged: _badged,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
         FormFactor.pad || FormFactor.window => _wide(pages),
