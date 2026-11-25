@@ -72,6 +72,13 @@ abstract final class AppTheme {
         space: 1,
         thickness: 1,
       ),
+      snackBarTheme: const SnackBarThemeData(
+        // 全 App 的提示条一律悬浮在胶囊底栏上方：胶囊高 64 + 下边距 10 +
+        // 底部安全区（iPhone 约 34，安卓三键导航约 48），再留一点空隙，
+        // 取 128。平板/桌面没有胶囊，提示条会浮得稍高一点，但不会被盖住。
+        behavior: SnackBarBehavior.floating,
+        insetPadding: EdgeInsets.fromLTRB(16, 0, 16, 128),
+      ),
     );
     final titled = theme.copyWith(
       appBarTheme: theme.appBarTheme.copyWith(
@@ -107,6 +114,11 @@ abstract final class AppTheme {
     return theme.copyWith(
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
       focusColor: colors.primary.withValues(alpha: 0.16),
+      // 电视没有胶囊底栏，提示条不用浮那么高。
+      snackBarTheme: const SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        insetPadding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+      ),
       iconButtonTheme: IconButtonThemeData(style: button),
       filledButtonTheme: FilledButtonThemeData(style: button),
       outlinedButtonTheme: OutlinedButtonThemeData(style: button),
