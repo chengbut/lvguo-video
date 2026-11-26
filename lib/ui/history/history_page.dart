@@ -264,14 +264,14 @@ class _HistoryPageState extends State<HistoryPage> {
         final record = records[index];
         final progress = record.progress;
         final title = progress.title.isEmpty ? '未知文件' : progress.title;
-        final watched = progress.position.inSeconds;
-        final total = progress.duration.inSeconds;
+        final watched = progress.position.round();
+        final total = progress.duration.round();
         final state = total > 0 && watched >= total - 5
             ? '已看完'
             : total > 0
-            ? '看到 ${_clock(progress.position)} / ${_clock(progress.duration)}'
+            ? '看到 ${_clock(Duration(seconds: progress.position.round()))} / ${_clock(Duration(seconds: progress.duration.round()))}'
             : watched > 0
-            ? '看到 ${_clock(progress.position)}'
+            ? '看到 ${_clock(Duration(seconds: progress.position.round()))}'
             : '未开始';
         return LiquidGlass(
           borderRadius: BorderRadius.circular(16),

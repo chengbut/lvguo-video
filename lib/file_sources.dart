@@ -696,6 +696,14 @@ class WebDavSourceClient implements FileSourceClient {
 
   @override
   String progressKey(FileEntry entry) => _dav.resolve(entry.href).toString();
+
+  @override
+  FilePlayItem playItem(FileEntry entry) => FilePlayItem(
+    title: entry.name,
+    progressKey: progressKey(entry),
+    ref: entry.href,
+    loadTarget: () => target(entry),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +754,14 @@ class FtpSourceClient implements FileSourceClient {
   @override
   String progressKey(FileEntry entry) =>
       'src:${source.id}:ftp:${entry.href}';
+
+  @override
+  FilePlayItem playItem(FileEntry entry) => FilePlayItem(
+    title: entry.name,
+    progressKey: progressKey(entry),
+    ref: entry.href,
+    loadTarget: () => target(entry),
+  );
 
   /// ftp:// 播放地址：账号密码做 URL 编码，路径逐段编码。
   String playUrl(String path) {
@@ -872,8 +888,8 @@ class _FtpConnection {
     }
     socket.encoding = utf8;
     final queue = _FtpLineQueue();
-    final subscription = socket
-        .transform(utf8.decoder)
+    final subscription = utf8.decoder
+        .bind(socket)
         .transform(const LineSplitter())
         .listen(
           queue.add,
@@ -889,7 +905,7 @@ class _FtpConnection {
         ok: null,
       );
       if (user == 331) {
-        await connection._expect2(
+        connection._expect2(
           await connection._raw('PASS $password'),
           const {230},
           '账号或密码不正确',
@@ -990,8 +1006,8 @@ class _FtpConnection {
     } on SocketException {
       throw FileSourceFailure('FTP 数据连接失败，请检查网络/防火墙');
     }
-    final collected = data
-        .transform(utf8.decoder)
+    final collected = utf8.decoder
+        .bind(data)
         .transform(const LineSplitter())
         .toList();
     _socket.write('LIST $dir\r\n');
@@ -1147,6 +1163,14 @@ class TianyiSourceClient implements FileSourceClient {
 
   @override
   String progressKey(FileEntry entry) => 'src:${source.id}:189:${entry.href}';
+
+  @override
+  FilePlayItem playItem(FileEntry entry) => FilePlayItem(
+    title: entry.name,
+    progressKey: progressKey(entry),
+    ref: entry.href,
+    loadTarget: () => target(entry),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,4 +1298,12 @@ class MobileSourceClient implements FileSourceClient {
 
   @override
   String progressKey(FileEntry entry) => 'src:${source.id}:139:${entry.href}';
+
+  @override
+  FilePlayItem playItem(FileEntry entry) => FilePlayItem(
+    title: entry.name,
+    progressKey: progressKey(entry),
+    ref: entry.href,
+    loadTarget: () => target(entry),
+  );
 }
