@@ -43,19 +43,7 @@ jobs:
 
       - name: Build (unsigned)
         working-directory: ios-native
-        run: |
-          set -o pipefail
-          xcodebuild build \
-            -project LvguoNative.xcodeproj \
-            -scheme LvguoNative \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build/DerivedData \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            2>&1 | tee build.log
+        run: bash ci-build.sh
 
       - name: Surface build errors as annotations
         if: failure()
