@@ -21,10 +21,14 @@ class CloudLoginResult {
 /// 通过才算登录成功。桌面端没有 WebView 实现，页面直接提示改用
 /// 备用粘贴方式。
 ///
+/// 移动云盘令牌的来源（据 cloud139 README 与 Alist 139 驱动文档）：
+/// 就是 yun.139.com 域名下名为 `authorization` 的 Cookie 的值，
+/// 请求时放在 `Authorization: Basic <该值>` 头里；hcy 接口不认
+/// 整段 Cookie 头，所以必须把这一项单独抠出来当凭据。另外再全量
+/// 扫 localStorage/sessionStorage（含嵌套 JSON）兜底，逐个探活。
+///
 /// 实测风险（未实测）：Android 的 Cookie 解析对含 '=' 的值历史上
-/// 有过截断问题；移动云盘的 Authorization 若只存在于请求头生成
-/// 逻辑而非 Cookie/localStorage，可能抓不到，此时探活会失败、
-/// 页面停留在报错状态，用户可改走备用粘贴。
+/// 有过截断问题，所以管理器与 document.cookie 两路都读、互相补。
 class CloudLoginPage extends StatefulWidget {
   const CloudLoginPage({super.key, required this.type});
 
@@ -55,18 +59,26 @@ class _CloudLoginPageState extends State<CloudLoginPage> {
       _status = '内置网页登录只支持手机端，这个平台请用备用粘贴方式。';
       return;
     }
+    // WebView 配置要点（实测教训）：移动/天翼登录页的短信验证码
+    // 接口会按 UA 与浏览器指纹拦截，WebView 默认 UA（带 App 标识
+    // 的那串）会被拒发验证码，所以统一设成标准 iPhone Safari
+    // UA；登录页全靠 JS，JavaScript 必须开；Cookie 必须可写可
+    // 读且持久——webview_flutter 默认控制器在 iOS 走 WKWebView
+    // 的默认（持久化）数据存储、Android 走 WebView 默认 Cookie
+    // 管理，本页没有设置任何无痕/拦截 Cookie 的选项，登录态能
+    // 落盘并被 WebViewCookieManager 读到，不要改成无痕配置。
     final controller = WebViewController()
+      ..setUserAgent(
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) '
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 '
+        'Mobile/15E148 Safari/604.1',
+      )
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (url) {
             if (!mounted) return;
-            final loggedIn = _tianyi
-                ? url.contains('cloud.189.cn/web/main')
-                : url.contains('yun.139.com') && !url.contains('login');
-            if (loggedIn) {
-              setState(() => _status = '检测到已进入网盘页面，点右上角「完成」读取登录状态。');
-            }
+            unawaited(_refreshLoginHint(url));
           },
         ),
       )
@@ -74,8 +86,48 @@ class _CloudLoginPageState extends State<CloudLoginPage> {
     _controller = controller;
   }
 
-  /// 读 Cookie 存储里该服务域名下的全部 Cookie，拼成 Cookie 头。
-  Future<String> _readCookies() async {
+  /// URL 是否还在登录页：路径/参数里带 login/passport/signin
+  /// 等登录标记。注意移动云盘是单页应用，登录表单就渲染在不带
+  /// login 字样的壳 URL 里，所以这一步只能排除明显的登录页，
+  /// 最终判断必须再叠加关键 Cookie 是否存在（见下）。
+  static bool _looksLikeLoginPage(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('login') ||
+        lower.contains('passport') ||
+        lower.contains('signin');
+  }
+
+  int _hintSeq = 0;
+
+  /// 页面加载完后刷新底部提示：只有「不在登录页」且「关键
+  /// Cookie 已存在」才提示已进入网盘——移动查名为 authorization
+  /// 的 Cookie（登录成功后才种下，见类注释）；天翼客户端用整段
+  /// Cookie 头、没有单一关键项，退而求其次用「在 cloud.189.cn
+  /// 域内 + Cookie 表非空」。只凭 URL 判断会把还停在登录表单的
+  /// 单页壳 URL 误报成已登录（2026-11-27 实测踩过）。
+  Future<void> _refreshLoginHint(String url) async {
+    final seq = ++_hintSeq;
+    if (_busy) return;
+    if (_looksLikeLoginPage(url)) {
+      setState(
+        () => _status = '请先在页面里完成登录，成功进入网盘后再点右上角「完成」。',
+      );
+      return;
+    }
+    final cookieMap = await _readCookieMap();
+    if (!mounted || seq != _hintSeq || _busy) return;
+    final hasKeyCookie = _tianyi
+        ? url.contains('cloud.189.cn') && cookieMap.isNotEmpty
+        : cookieMap.keys.any((name) => name.toLowerCase() == 'authorization');
+    setState(() {
+      _status = hasKeyCookie
+          ? '检测到已进入网盘页面，点右上角「完成」读取登录状态。'
+          : '请先在页面里完成登录，成功进入网盘后再点右上角「完成」。';
+    });
+  }
+
+  /// 读 Cookie 存储里该服务域名下的全部 Cookie，返回名称 → 值。
+  Future<Map<String, String>> _readCookieMap() async {
     final manager = WebViewCookieManager();
     final byName = <String, String>{};
     final domains = _tianyi
@@ -114,35 +166,53 @@ class _CloudLoginPageState extends State<CloudLoginPage> {
         }
       } catch (_) {}
     }
-    return [for (final e in byName.entries) '${e.key}=${e.value}'].join('; ');
+    return byName;
   }
 
-  /// 移动云盘的 Authorization 可能存在 localStorage 里：扫一遍，
-  /// 找键名带 auth/token 且值够长的，当候选凭据。
-  Future<String?> _readStoredToken() async {
+  /// 把 Cookie 表拼成 Cookie 头（天翼用整段 Cookie 探活）。
+  String _cookieHeader(Map<String, String> byName) =>
+      [for (final e in byName.entries) '${e.key}=${e.value}'].join('; ');
+
+  static String _stripBasic(String value) =>
+      value.startsWith('Basic ') ? value.substring(6).trim() : value;
+
+  /// 移动云盘令牌兜底扫描：localStorage + sessionStorage 逐键看，
+  /// 键名带 auth/token 的直接收；值是 JSON 的递归挖里面键名带
+  /// auth/token 的字符串字段。返回全部候选（已去 Basic 前缀）。
+  Future<List<String>> _readStoredTokens() async {
     final controller = _controller;
-    if (controller == null) return null;
+    if (controller == null) return const [];
     try {
       final raw = await controller.runJavaScriptReturningResult(
-        '(function(){var out={};try{for(var i=0;i<localStorage.length;i++)'
-        '{var k=localStorage.key(i);out[k]=localStorage.getItem(k);}}catch(e){}'
+        '(function(){var out=[];var seen={};'
+        'function push(v){if(typeof v!=="string")return;v=v.trim();'
+        'if(v.length>=16&&!seen[v]){seen[v]=1;out.push(v);}}'
+        'function walk(k,v){if(typeof v==="string"){'
+        'if(/auth|token/i.test(k))push(v);}'
+        'else if(v&&typeof v==="object"){for(var kk in v)walk(kk,v[kk]);}}'
+        'function scan(store){if(!store)return;'
+        'for(var i=0;i<store.length;i++){var k=store.key(i);'
+        'var raw=store.getItem(k);if(raw==null)continue;'
+        'try{walk(k,JSON.parse(raw));}catch(e){}'
+        'if(/auth|token/i.test(k))push(raw);}}'
+        'try{scan(localStorage);}catch(e){}'
+        'try{scan(sessionStorage);}catch(e){}'
         'return JSON.stringify(out);})()',
       );
       var text = '$raw';
       if (text.startsWith('"')) {
-        text = jsonDecode(text) as String;
+        final decoded = jsonDecode(text);
+        if (decoded is String) text = decoded;
       }
-      final map = jsonDecode(text);
-      if (map is! Map) return null;
-      for (final entry in map.entries) {
-        final key = '${entry.key}'.toLowerCase();
-        var value = '${entry.value}'.trim();
-        if (!key.contains('auth') && !key.contains('token')) continue;
-        if (value.startsWith('Basic ')) value = value.substring(6).trim();
-        if (value.length >= 16) return value;
-      }
-    } catch (_) {}
-    return null;
+      final list = jsonDecode(text);
+      if (list is! List) return const [];
+      return [
+        for (final item in list)
+          if ('$item'.trim().length >= 16) _stripBasic('$item'.trim()),
+      ];
+    } catch (_) {
+      return const [];
+    }
   }
 
   Future<void> _finish() async {
@@ -152,11 +222,28 @@ class _CloudLoginPageState extends State<CloudLoginPage> {
       _status = '正在读取登录状态并验证…';
     });
     try {
-      final cookie = await _readCookies();
-      final candidates = <String>[
-        if (!_tianyi) ...[?await _readStoredToken()],
-        if (cookie.isNotEmpty) cookie,
-      ];
+      final cookieMap = await _readCookieMap();
+      final cookie = _cookieHeader(cookieMap);
+      final candidates = <String>[];
+      void addCandidate(String? value) {
+        final v = value?.trim() ?? '';
+        if (v.isNotEmpty && !candidates.contains(v)) candidates.add(v);
+      }
+
+      if (!_tianyi) {
+        // 移动令牌首选 authorization Cookie 的值（见类注释的来源
+        // 说明）；其次 storage 全量扫描的候选；整段 Cookie 垫底——
+        // MobileSourceClient 也会再从整段里抠 authorization 项。
+        for (final e in cookieMap.entries) {
+          if (e.key.toLowerCase() == 'authorization') {
+            addCandidate(_stripBasic(e.value.trim()));
+          }
+        }
+        for (final token in await _readStoredTokens()) {
+          addCandidate(token);
+        }
+      }
+      addCandidate(cookie);
       if (candidates.isEmpty) {
         setState(() {
           _busy = false;

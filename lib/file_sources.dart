@@ -1180,27 +1180,53 @@ class TianyiSourceClient implements FileSourceClient {
 /// 中国移动云盘原生客户端（实验性，未实测）：按 Alist 开源 139
 /// 驱动公开的新个人云接口形态实现——personal-kd-njs.yun.139.com
 /// 的 hcy/file/list 列目录、hcy/file/download 现取下载地址，
-/// Authorization 头鉴权（凭据也可能是整段 Cookie，自动判断）。
+/// Authorization 头鉴权。令牌本体是 yun.139.com 下名为
+/// authorization 的 Cookie 的值（cloud139 README / Alist 文档）；
+/// hcy 接口只认 Authorization 头、不认 Cookie 头，所以凭据若是
+/// 整段 Cookie 串，先从里面抠出 authorization 项再当令牌用，
+/// 抠不到才整段当 Cookie 头发送。固定头对齐 Alist 驱动
+/// drivers/139 的 shareHeaders（hcy-cool-flag / CMS-DEVICE /
+/// x-m4c-caller / X-Yun-Api-Version / Origin）。
 class MobileSourceClient implements FileSourceClient {
   MobileSourceClient(this.source);
   final FileSource source;
 
   static const _base = 'https://personal-kd-njs.yun.139.com';
 
+  /// 凭据是整段 Cookie 串时，抠其中名为 authorization 的一项。
+  String? get _cookieToken {
+    final value = source.credential;
+    if (!value.contains('=')) return null;
+    for (final part in value.split(';')) {
+      final cut = part.indexOf('=');
+      if (cut <= 0) continue;
+      if (part.substring(0, cut).trim().toLowerCase() == 'authorization') {
+        final token = part.substring(cut + 1).trim();
+        if (token.isNotEmpty) return token;
+      }
+    }
+    return null;
+  }
+
   bool get _cookieMode {
     final value = source.credential;
-    return value.contains(';') && value.contains('=');
+    return _cookieToken == null && value.contains(';') && value.contains('=');
   }
 
   Map<String, String> get _headers {
-    final value = source.credential;
+    final raw = source.credential;
+    final token = _cookieToken ?? raw;
     return {
       if (_cookieMode)
-        'Cookie': value
+        'Cookie': raw
       else
-        'Authorization': value.startsWith('Basic ') ? value : 'Basic $value',
+        'Authorization': token.startsWith('Basic ') ? token : 'Basic $token',
       'x-yun-channel-source': '10000034',
       'x-yun-api-version': 'v1',
+      'hcy-cool-flag': '1',
+      'CMS-DEVICE': 'default',
+      'x-m4c-caller': 'PC',
+      'Origin': 'https://yun.139.com',
       'Referer': 'https://yun.139.com/',
       'User-Agent': _browserUserAgent,
       'Accept': 'application/json, text/plain, */*',
