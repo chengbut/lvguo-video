@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 
 import '../../drama_feed.dart';
 import '../../explore_feed.dart';
+import '../../file_sources.dart';
 import '../../local_store.dart';
 import '../../models.dart';
 import '../app_scope.dart';
 import '../cover_blur.dart';
+import '../files/file_source_widgets.dart';
 import '../shell/app_shell.dart';
 import '../theme/motion.dart';
 import '../detail/detail_page.dart';
@@ -17,8 +19,8 @@ import '../widgets/category_tabs.dart';
 import '../widgets/choice_panel.dart';
 import '../widgets/drama_grid.dart';
 import '../widgets/follow_button.dart';
+import '../widgets/liquid_glass.dart';
 import '../widgets/motion/motion_widgets.dart';
-import '../widgets/page_header.dart';
 import '../widgets/pull_refresh.dart';
 import '../widgets/source_bar.dart';
 import '../widgets/status_view.dart';
@@ -46,6 +48,12 @@ class ExplorePageState extends State<ExplorePage> {
   bool _paged = false;
   bool _dragging = false;
   String _shown = '';
+  // 顶部「站源 / 文件源」分段开关：切到文件源只换 body（IndexedStack
+  // 两边都留活），站源模式的分页、滚动位置不重置。电视端没有这个开关。
+  bool _filesMode = false;
+
+  FileSourceStore get _files =>
+      FileSourceStore.instance(widget.store.preferences);
 
   @override
   void didChangeDependencies() {
@@ -140,6 +148,128 @@ class ExplorePageState extends State<ExplorePage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _toTop());
   }
 
+  /// 新顶栏两行：第一行左是液态玻璃分段开关「站源 / 文件源」，右是
+  /// 搜索（文件源模式下搜索、换一换这些站源专属动作隐藏）；第二行
+  /// 站源模式是站源名（点击切换站源），文件源模式显示「文件源」。
+  Widget _header(
+    BuildContext context,
+    SourceSite? source,
+    ExploreFeed explore,
+    FormFactor form,
+  ) {
+    final phone = form == FormFactor.phone;
+    final inset = phone ? 16.0 : 24.0;
+    final filesMode = _filesMode;
+    final nameStyle = Theme.of(context).textTheme.headlineSmall?.copyWith(
+      fontSize: 22,
+      fontWeight: FontWeight.w800,
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(inset, 10, inset, 0),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 176,
+                child: GlassSegmentedControl(
+                  labels: const ['站源', '文件源'],
+                  selected: filesMode ? 1 : 0,
+                  onSelected: (index) =>
+                      setState(() => _filesMode = index == 1),
+                ),
+              ),
+              const Spacer(),
+              if (!filesMode) ...[
+                if (widget.store.blurCoversButton)
+                  if (CoverBlurScope.of(context) case final blur?)
+                    BarButton(
+                      icon: blur.mode != CoverBlur.off
+                          ? Icons.visibility_off_rounded
+                          : Icons.visibility_rounded,
+                      tooltip: blur.mode != CoverBlur.off ? '显示封面' : '模糊封面',
+                      onPressed: blur.onToggle,
+                    ),
+                if (phone)
+                  BarButton(
+                    icon: Icons.search_rounded,
+                    tooltip: source == null ? '搜索' : '在 ${source.displayName} 中搜索',
+                    onPressed: source == null
+                        ? null
+                        : () => openSearch(context, widget.store, source!),
+                  )
+                else ...[
+                  RecentSearchField(
+                    width: MediaQuery.sizeOf(context).width >= 900
+                        ? 320
+                        : 240,
+                    hint: '在 ${source?.displayName ?? ''} 中搜索',
+                    controller: _search,
+                    recent: widget.store.recentSearches,
+                    onSubmitted: source == null
+                        ? (_) {}
+                        : (query) => _searchSubmitted(source!, query),
+                    onForget: (query) => widget.store
+                        .forgetSearch(query)
+                        .catchError((Object _) {}),
+                  ),
+                  const SizedBox(width: 4),
+                ],
+                // 右上角是换一换：只在推荐 tab 显示，洗牌中禁用（同旧顶栏）。
+                if (explore.recommending)
+                  BarButton(
+                    icon: Icons.refresh_rounded,
+                    tooltip: '换一换',
+                    onPressed: explore.shuffling
+                        ? null
+                        : () => unawaited(explore.shuffleRecommendations()),
+                  ),
+              ],
+            ],
+          ),
+        ),
+        Padding(
+          padding: EdgeInsets.fromLTRB(inset + 4, 4, inset, 0),
+          child: SizedBox(
+            height: 40,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: filesMode
+                  ? Text('文件源', style: nameStyle)
+                  : Builder(
+                      builder: (anchor) => InkWell(
+                        onTap: source == null
+                            ? null
+                            : () => pickSource(anchor, widget.store),
+                        borderRadius: BorderRadius.circular(8),
+                        child: Text(
+                          source?.displayName ?? '发现',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: nameStyle,
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 文件源模式的 body：和资源页文件源组同一份数据的卡片列表，
+  /// 点卡片进文件浏览页（HTTP 拉取直接播放）。
+  Widget _fileBody(double inset) => ListView(
+    padding: EdgeInsets.fromLTRB(
+      inset,
+      12,
+      inset,
+      24 + capsuleBarClearance(context),
+    ),
+    children: [FileSourceCards(files: _files)],
+  );
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([_explore!, widget.store]),
@@ -151,23 +281,31 @@ class ExplorePageState extends State<ExplorePage> {
       final desktop = form == FormFactor.window;
       _paged = _swipes(form);
       if (!_paged) _resetScroll(explore, deferred: false);
+      final filesMode = _filesMode && !television;
+      final inset = switch (form) {
+        FormFactor.phone => 16.0,
+        FormFactor.pad || FormFactor.window => 24.0,
+        FormFactor.television => televisionInset,
+      };
       if (source == null) {
         return Scaffold(
           body: SafeArea(
             bottom: false,
             child: Column(
               children: [
-                if (!television) const PageHeader(title: '发现'),
+                if (!television) _header(context, null, explore, form),
                 Expanded(
-                  child: SourceSite.values.isEmpty
+                  child: filesMode
+                      ? _fileBody(inset)
+                      : SourceSite.values.isEmpty
                       ? const StatusView(
                           title: '还没有安装站源',
-                          message: '站源以模块的形式提供，请在 我的 › 模块 安装。',
+                          message: '站源以模块的形式提供，请在底栏「资源」页安装。',
                           icon: Icons.extension_off_rounded,
                         )
                       : const StatusView(
                           title: '暂无可用站源',
-                          message: '请在 我的 › 模块 中开启站源。',
+                          message: '请在底栏「资源」页中开启站源。',
                           icon: Icons.public_off_rounded,
                         ),
                 ),
@@ -176,11 +314,6 @@ class ExplorePageState extends State<ExplorePage> {
           ),
         );
       }
-      final inset = switch (form) {
-        FormFactor.phone => 16.0,
-        FormFactor.pad || FormFactor.window => 24.0,
-        FormFactor.television => televisionInset,
-      };
       final tabs = Padding(
         padding: EdgeInsets.symmetric(
           horizontal: form == FormFactor.phone ? 0 : inset,
@@ -204,64 +337,30 @@ class ExplorePageState extends State<ExplorePage> {
               if (!television)
                 HideOnScroll(
                   alignment: Alignment.bottomCenter,
-                  child: SourceBar(
-                    source: source.displayName,
-                    searchController: _search,
-                    recentSearches: widget.store.recentSearches,
-                    onForgetSearch: (query) => widget.store
-                        .forgetSearch(query)
-                        .catchError((Object _) {}),
-                    onSwitchSource: (anchor) =>
-                        pickSource(anchor, widget.store),
-                    onOpenSearch: () =>
-                        openSearch(context, widget.store, source),
-                    onSearchSubmitted: (query) =>
-                        _searchSubmitted(source, query),
-                    leading: [
-                      if (widget.store.blurCoversButton)
-                        if (CoverBlurScope.of(context) case final blur?)
-                          BarButton(
-                            icon: blur.mode != CoverBlur.off
-                                ? Icons.visibility_off_rounded
-                                : Icons.visibility_rounded,
-                            tooltip: blur.mode != CoverBlur.off
-                                ? '显示封面'
-                                : '模糊封面',
-                            onPressed: blur.onToggle,
-                          ),
-                    ],
-                    actions: [
-                      // 右上角是换一换：图标用通用刷新样式，功能仍是推荐页
-                      // 换一批（ExploreFeed.shuffleRecommendations，榜单
-                      // 热度加权随机、排除上一批）；只在推荐 tab 显示，
-                      // 洗牌中禁用。下拉刷新走另一套，不受影响。
-                      if (explore.recommending)
-                        BarButton(
-                          icon: Icons.refresh_rounded,
-                          tooltip: '换一换',
-                          onPressed: explore.shuffling
-                              ? null
-                              : () => unawaited(
-                                  explore.shuffleRecommendations(),
-                                ),
-                        ),
-                    ],
-                  ),
+                  child: _header(context, source, explore, form),
                 ),
-              if (!television || explore.feed!.items.isEmpty) tabs,
+              if (!filesMode && (!television || explore.feed!.items.isEmpty))
+                tabs,
               Expanded(
-                child: _paged
-                    ? _pagerView(explore, inset, tabs)
-                    : _content(
-                        explore,
-                        explore.tab,
-                        explore.feed!,
-                        inset,
-                        television,
-                        tabs,
-                        _scroll,
-                        _refreshKey,
-                      ),
+                child: IndexedStack(
+                  index: filesMode ? 1 : 0,
+                  sizing: StackFit.expand,
+                  children: [
+                    _paged
+                        ? _pagerView(explore, inset, tabs)
+                        : _content(
+                            explore,
+                            explore.tab,
+                            explore.feed!,
+                            inset,
+                            television,
+                            tabs,
+                            _scroll,
+                            _refreshKey,
+                          ),
+                    _fileBody(inset),
+                  ],
+                ),
               ),
             ],
           ),

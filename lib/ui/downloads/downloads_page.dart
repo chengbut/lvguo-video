@@ -658,7 +658,7 @@ class _DownloadsPageState extends State<DownloadsPage>
         if (counts[state] case final count?) '$label $count',
     ].join(' · ');
     return ListView.separated(
-      padding: EdgeInsets.fromLTRB(inset, 8, inset, 32),
+      padding: EdgeInsets.fromLTRB(inset, 8, inset, 32 + capsuleBarClearance(context)),
       itemCount: view.pending.length + 1,
       separatorBuilder: (_, index) => SizedBox(height: index == 0 ? 4 : 8),
       itemBuilder: (context, index) => index == 0
@@ -712,7 +712,7 @@ class _DownloadsPageState extends State<DownloadsPage>
         ? 16.0
         : 24.0;
     return ListView.separated(
-      padding: EdgeInsets.fromLTRB(inset, 12, inset, 32),
+      padding: EdgeInsets.fromLTRB(inset, 12, inset, 32 + capsuleBarClearance(context)),
       itemCount: tasks.length,
       separatorBuilder: (_, _) => const SizedBox(height: 8),
       itemBuilder: (context, index) => _MergeRow(
@@ -757,7 +757,7 @@ class _DownloadsPageState extends State<DownloadsPage>
         final (columns, gap, runGap) = _grid(context, width);
         final tile = (width - gap * (columns - 1)) / columns;
         return GridView.builder(
-          padding: EdgeInsets.fromLTRB(inset, 12, inset, 32),
+          padding: EdgeInsets.fromLTRB(inset, 12, inset, 32 + capsuleBarClearance(context)),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: columns,
             crossAxisSpacing: gap,

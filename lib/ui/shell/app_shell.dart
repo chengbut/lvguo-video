@@ -11,6 +11,7 @@ import '../../follow_updater.dart';
 import '../../local_store.dart';
 import '../../models.dart';
 import '../app_scope.dart';
+import '../downloads/downloads_page.dart';
 import '../explore/explore_page.dart';
 import '../explore/source_actions.dart';
 import '../follow/follow_page.dart';
@@ -30,7 +31,8 @@ enum AppTab {
   explore('发现', Icons.explore_outlined, Icons.explore),
   follow('追剧', Icons.bookmark_border_rounded, Icons.bookmark_rounded),
   history('历史', Icons.history_rounded, Icons.history_rounded),
-  modules('模块', Icons.extension_outlined, Icons.extension_rounded),
+  modules('资源', Icons.extension_outlined, Icons.extension_rounded),
+  downloads('下载', Icons.download_outlined, Icons.download_rounded),
   mine('我的', Icons.person_outline_rounded, Icons.person_rounded);
 
   const AppTab(this.label, this.icon, this.selectedIcon);
@@ -213,6 +215,7 @@ class _AppShellState extends State<AppShell> {
         AppTab.explore ||
         AppTab.follow ||
         AppTab.modules ||
+        AppTab.downloads ||
         AppTab.mine => true,
       })
         tab,
@@ -329,6 +332,12 @@ class _AppShellState extends State<AppShell> {
     ),
     AppTab.history => HistoryPage(store: widget.store, root: true),
     AppTab.modules => ModulesPage(store: widget.store),
+    AppTab.downloads => DownloadsPage(
+      store: widget.store,
+      downloads: _downloads!,
+      converter: _converter!,
+      merges: _merges!,
+    ),
     AppTab.mine => MinePage(
       store: widget.store,
       downloads: _downloads!,
@@ -377,7 +386,7 @@ class _AppShellState extends State<AppShell> {
     final television = AppScope.of(context).television;
     final tabs = _tabs;
     if (!tabs.contains(_tab)) _tab = AppTab.explore;
-    // 手机底栏只保留发现、历史、模块、我的；追剧页本身保留，从电视端与侧栏进入。
+    // 手机底栏是发现、历史、资源、下载、我的；追剧页本身保留，从电视端与侧栏进入。
     final phoneTabs = tabs.where((tab) => tab != AppTab.follow).toList();
     if (AppScope.formFactorOf(context) == FormFactor.phone &&
         !phoneTabs.contains(_tab)) {
@@ -484,7 +493,8 @@ class _AppShellState extends State<AppShell> {
                           AppTab.mine => _mineEntry,
                           AppTab.explore ||
                           AppTab.history ||
-                          AppTab.modules => null,
+                          AppTab.modules ||
+                          AppTab.downloads => null,
                         };
                         if (event is KeyUpEvent ||
                             event.logicalKey != LogicalKeyboardKey.arrowDown ||
@@ -506,7 +516,7 @@ class _AppShellState extends State<AppShell> {
     );
   }
 
-  Widget _badged(AppTab tab, Widget icon) => tab == AppTab.mine
+  Widget _badged(AppTab tab, Widget icon) => tab == AppTab.downloads
       ? _DownloadBadge(downloads: _downloads!, child: icon)
       : icon;
 

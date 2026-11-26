@@ -146,7 +146,7 @@ class _HistoryPageState extends State<HistoryPage> {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([widget.store, _query]),
     builder: (context, _) {
-      // 跟随当前源显示：不设“全部”，也不在页内手动切。当前源在模块页
+      // 跟随当前源显示：不设“全部”，也不在页内手动切。当前源在资源页
       // 切换后这里自动跟着变（store 是 Listenable，setSource 会通知重建）。
       final source = widget.store.source;
       final history = [

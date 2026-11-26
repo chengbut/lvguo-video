@@ -47,7 +47,7 @@ class SourceBar extends StatelessWidget {
       onPressed: onOpenSearch,
     );
     return switch (form) {
-      // 手机顶栏不显示切换站源按钮（已删）；手机端改由底栏“模块”页切源——
+      // 手机顶栏不显示切换站源按钮（已删）；手机端改由底栏“资源”页切源——
       // 每行已开启的站源有“设为当前”按钮，点一下就切过去（见 modules_page）。
       FormFactor.phone => PageHeader(
         title: source,
@@ -59,7 +59,7 @@ class SourceBar extends StatelessWidget {
           ...leading,
           switcher,
           const SizedBox(width: 4),
-          _RecentSearchField(
+          RecentSearchField(
             width: MediaQuery.sizeOf(context).width >= 900 ? 320 : 240,
             hint: hint,
             controller: searchController,
@@ -92,8 +92,8 @@ class SourceBar extends StatelessWidget {
   }
 }
 
-class _RecentSearchField extends StatefulWidget {
-  const _RecentSearchField({
+class RecentSearchField extends StatefulWidget {
+  const RecentSearchField({
     required this.width,
     required this.hint,
     required this.controller,
@@ -109,10 +109,10 @@ class _RecentSearchField extends StatefulWidget {
   final ValueChanged<String>? onForget;
 
   @override
-  State<_RecentSearchField> createState() => _RecentSearchFieldState();
+  State<RecentSearchField> createState() => _RecentSearchFieldState();
 }
 
-class _RecentSearchFieldState extends State<_RecentSearchField> {
+class _RecentSearchFieldState extends State<RecentSearchField> {
   final _ownController = TextEditingController();
   final _focus = FocusNode();
   final _overlay = OverlayPortalController()..show();

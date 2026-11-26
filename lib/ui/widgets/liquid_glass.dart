@@ -126,6 +126,96 @@ SnackBar glassSnackBar(
   );
 }
 
+/// 液态玻璃分段开关：一排等宽选项，选中项下面垫一块滑动的实心胶囊，
+/// 质感和底栏胶囊一致（发现页顶部的「站源 / 文件源」切换用）。
+class GlassSegmentedControl extends StatelessWidget {
+  const GlassSegmentedControl({
+    super.key,
+    required this.labels,
+    required this.selected,
+    required this.onSelected,
+  });
+  final List<String> labels;
+  final int selected;
+  final ValueChanged<int> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final index = selected.clamp(0, labels.length - 1);
+    return LiquidGlass(
+      borderRadius: BorderRadius.circular(22),
+      blur: 20,
+      child: SizedBox(
+        height: 44,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final segment = constraints.maxWidth / labels.length;
+            return Stack(
+              children: [
+                AnimatedAlign(
+                  alignment: Alignment(
+                    labels.length > 1
+                        ? -1 + 2 * index / (labels.length - 1)
+                        : 0,
+                    0,
+                  ),
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOutBack,
+                  child: SizedBox(
+                    width: segment,
+                    height: 44,
+                    child: Center(
+                      child: Container(
+                        width: segment - 6,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          color: colors.secondaryContainer.withValues(
+                            alpha: .85,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                Material(
+                  type: MaterialType.transparency,
+                  child: Row(
+                    children: [
+                      for (final (i, label) in labels.indexed)
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => onSelected(i),
+                            customBorder: const StadiumBorder(),
+                            child: Center(
+                              child: Text(
+                                label,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: i == index
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
+                                  color: i == index
+                                      ? colors.onSecondaryContainer
+                                      : colors.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
 /// 玻璃质感的圆形图标按钮（播放器控制栏用）。
 class LiquidGlassIconButton extends StatelessWidget {
   const LiquidGlassIconButton({

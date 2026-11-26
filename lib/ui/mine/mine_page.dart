@@ -6,7 +6,6 @@ import '../../merge_queue.dart';
 import '../../download_overview.dart';
 import '../../local_store.dart';
 import '../app_scope.dart';
-import '../downloads/downloads_page.dart';
 import '../shell/app_shell.dart';
 import '../settings/settings_page.dart';
 import '../settings/settings_sections.dart';
@@ -49,16 +48,6 @@ class MinePage extends StatelessWidget {
     ),
   );
 
-  void _openDownloads(BuildContext context) => openPage<void>(
-    context,
-    (_) => DownloadsPage(
-      store: store,
-      downloads: downloads,
-      converter: converter,
-      merges: merges,
-    ),
-  );
-
   void _openSettingsGroup(BuildContext context, SettingsGroup group) =>
       openPage<void>(
         context,
@@ -69,17 +58,10 @@ class MinePage extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     spacing: 12,
     children: [
-      if (store.canDownload)
-        _Entry(
-          icon: Icons.download_rounded,
-          title: '下载',
-          onTap: () => _openDownloads(context),
-        ),
-      // 原设置页的 8 个组，按设置页里的顺序排在「下载」后面；
-      // 点进去是直开子页面的 SettingsGroupPage，和原来一样。
-      // 注意这里的「下载」是下载设置（默认画质、VIP 集、同时下载数量），
-      // 上面那个「下载」是下载管理（已下载的剧），目的地不同，两个都留着，
-      // 副标题能区分。
+      // 下载管理已移到底栏「下载」键，这里不再放下载入口卡。
+      // 下面是原设置页的 8 个组，按设置页里的顺序排；点进去是直开
+      // 子页面的 SettingsGroupPage，和原来一样。其中「下载」组是下载
+      // 设置（默认画质、VIP 集、同时下载数量），不是下载管理。
       for (final group in SettingsGroup.values)
         if (group.visible)
           _Entry(
@@ -133,7 +115,7 @@ class MinePage extends StatelessWidget {
     );
     // 电视端没有设置列表页了：8 个设置组卡片排成 Wrap，
     // 一行排不下自动换行（卡片宽 320，1080p 上一行 5 张）。
-    // 模块入口已删（底栏已有模块键），焦点落在第一张设置组卡片上。
+    // 资源入口已删（底栏已有资源键），焦点落在第一张设置组卡片上。
     final groups = [
       for (final group in SettingsGroup.values)
         if (group.visible) group,

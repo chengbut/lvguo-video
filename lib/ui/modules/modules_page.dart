@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -7,10 +8,12 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
 import '../../core_bridge.dart';
+import '../../file_sources.dart';
 import '../../local_store.dart';
 import '../../models.dart';
 import '../../source_modules.dart';
 import '../app_scope.dart';
+import '../files/file_source_widgets.dart';
 import '../settings/settings_rows.dart';
 import '../shell/app_shell.dart';
 import 'module_install.dart';
@@ -51,16 +54,14 @@ List<SourceModule> _arranged(List<SourceModule> modules, List<String> order) {
   return [for (final id in order) ?byId.remove(id), ...byId.values];
 }
 
-const _tabLabels = ['已安装', '手动'];
+const _sectionLabels = ['站源', '文件源'];
 
-class _ModulesPageState extends State<ModulesPage>
-    with SingleTickerProviderStateMixin {
-  late final _tabs = TabController(length: _tabLabels.length, vsync: this)
-    ..addListener(_tabChanged);
+class _ModulesPageState extends State<ModulesPage> {
   List<SourceModule>? _modules;
   List<String>? _moving;
   String? _error;
   bool _busy = false;
+  var _section = 0;
   final _groupsScope = FocusScopeNode(
     debugLabel: 'modules-groups',
     traversalEdgeBehavior: TraversalEdgeBehavior.parentScope,
@@ -69,10 +70,12 @@ class _ModulesPageState extends State<ModulesPage>
     debugLabel: 'modules-detail',
     traversalEdgeBehavior: TraversalEdgeBehavior.parentScope,
   );
-  final _groupFocus = [for (final _ in _tabLabels) FocusNode()];
+  final _groupFocus = [for (final _ in _sectionLabels) FocusNode()];
   var _detailFocused = false;
 
   LocalStore get _store => widget.store;
+
+  FileSourceStore get _files => FileSourceStore.instance(_store.preferences);
 
   AppRepository get _repository => AppScope.of(context).repository;
 
@@ -88,17 +91,12 @@ class _ModulesPageState extends State<ModulesPage>
 
   @override
   void dispose() {
-    _tabs.dispose();
     _groupsScope.dispose();
     _detailScope.dispose();
     for (final node in _groupFocus) {
       node.dispose();
     }
     super.dispose();
-  }
-
-  void _tabChanged() {
-    if (!_tabs.indexIsChanging) setState(() {});
   }
 
   Future<void> _refresh() async {
@@ -298,24 +296,18 @@ class _ModulesPageState extends State<ModulesPage>
 
   Widget _reorderable(
     List<SourceModule> modules,
-    List<Widget> header,
-    Widget Function(SourceModule) card,
-  ) => ReorderableListView(
-    // 底部留出胶囊底栏的高度，最后一张模块卡能完整滑出来、不被底栏盖住
+    Widget Function(SourceModule) card, {
+    bool shrinkWrap = false,
+  }) => ReorderableListView(
+    // shrinkWrap 时嵌在手机端的整页滚动里，自己不滚；否则自己滚动，
+    // 底部留出胶囊底栏的高度，最后一张卡能完整滑出来、不被底栏盖住
     //（电视端没有胶囊，capsuleBarClearance 返回 0）。
-    padding: EdgeInsets.fromLTRB(
-      16,
-      8,
-      16,
-      24 + capsuleBarClearance(context),
-    ),
+    shrinkWrap: shrinkWrap,
+    physics: shrinkWrap ? const NeverScrollableScrollPhysics() : null,
+    padding: shrinkWrap
+        ? EdgeInsets.zero
+        : EdgeInsets.fromLTRB(16, 8, 16, 24 + capsuleBarClearance(context)),
     buildDefaultDragHandles: false,
-    header: header.isEmpty
-        ? null
-        : Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: Column(spacing: 12, children: header),
-          ),
     onReorderItem: (from, to) => _reorder(modules, from, to),
     proxyDecorator: (child, _, animation) => ScaleTransition(
       scale: Tween(begin: 1.0, end: 1.03).animate(animation),
@@ -334,52 +326,63 @@ class _ModulesPageState extends State<ModulesPage>
     ],
   );
 
-  Widget _installedTab() {
-    final modules = switch (_modules) {
-      final loaded? => _arranged(
-        loaded,
-        _moving ?? [for (final site in SourceSite.allValues) site.id],
-      ),
-      null => null,
-    };
-    final enabled = _canInstall;
-    Widget card(SourceModule module) => _InstalledCard(
-      module: module,
-      enabled: _store.sourceEnabled(module.id),
-      // 只有无错、可访问且已开启的源才能切成当前源；已经是当前源的不给按钮。
-      isCurrent: _store.source == module.id,
-      onSwitch: _toggleFor(module) != null &&
-              _store.sourceEnabled(module.id) &&
-              _store.source != module.id
-          ? () => _switchSource(module)
-          : null,
-      onToggle: _toggleFor(module),
-      onDetails: AppScope.of(context).television
-          ? () => _menu(module)
-          : () => _details(module),
-      onUninstall: enabled ? () => _uninstall(module) : null,
-    );
-    final header = [if (_error case final error?) _Note(error)];
-    if (modules != null &&
+  List<SourceModule>? get _arrangedModules => switch (_modules) {
+    final loaded? => _arranged(
+      loaded,
+      _moving ?? [for (final site in SourceSite.allValues) site.id],
+    ),
+    null => null,
+  };
+
+  Widget _stationCard(SourceModule module) => _InstalledCard(
+    module: module,
+    enabled: _store.sourceEnabled(module.id),
+    // 只有无错、可访问且已开启的源才能切成当前源；已经是当前源的不给按钮。
+    isCurrent: _store.source == module.id,
+    onSwitch: _toggleFor(module) != null &&
+            _store.sourceEnabled(module.id) &&
+            _store.source != module.id
+        ? () => _switchSource(module)
+        : null,
+    onToggle: _toggleFor(module),
+    onDetails: AppScope.of(context).television
+        ? () => _menu(module)
+        : () => _details(module),
+    onUninstall: _canInstall ? () => _uninstall(module) : null,
+  );
+
+  bool get _canReorder {
+    final modules = _arrangedModules;
+    return modules != null &&
         modules.length > 1 &&
         !_store.locked &&
-        !AppScope.of(context).television) {
-      return _reorderable(modules, header, card);
-    }
-    return _list([
-      ...header,
-      if (modules == null && _error == null)
-        const _Loading()
-      else if (modules != null && modules.isEmpty)
-        const _Note('还没有安装模块。站源以模块的形式提供，可以手动安装（选择本地文件或输入下载地址）。')
-      else if (modules != null)
-        for (final module in modules) card(module),
-    ]);
+        !AppScope.of(context).television;
   }
 
-  Widget _manualTab() {
+  /// 站源卡片区（卡片与原已安装列表完全一致）。shrinkWrap 时嵌在
+  /// 手机端的整页滚动里，否则自己成一个滚动列表（电视详情区）。
+  Widget _stationCards({required bool shrinkWrap}) {
+    final modules = _arrangedModules;
+    if (modules == null && _error == null) return const _Loading();
+    if (modules != null && modules.isEmpty) {
+      return const _Note('还没有安装站源模块。点「+ 添加」，选择本地文件或输入下载地址安装。');
+    }
+    if (modules == null) return const SizedBox.shrink();
+    if (_canReorder) {
+      return _reorderable(modules, _stationCard, shrinkWrap: shrinkWrap);
+    }
+    if (shrinkWrap) {
+      return Column(
+        spacing: 12,
+        children: [for (final module in modules) _stationCard(module)],
+      );
+    }
+    return _list([for (final module in modules) _stationCard(module)]);
+  }
+
+  List<Widget> _installTiles() {
     final enabled = _canInstall;
-    return _list([
+    return [
       GroupCard(
         children: [
           SettingsTile(
@@ -398,42 +401,129 @@ class _ModulesPageState extends State<ModulesPage>
           ),
         ],
       ),
-    ]);
+    ];
   }
 
-  Widget _tabBar() => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 4),
-    child: TabBar(
-      controller: _tabs,
-      isScrollable: true,
-      tabAlignment: TabAlignment.start,
-      labelStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-      unselectedLabelStyle: const TextStyle(
-        fontSize: 15,
-        fontWeight: FontWeight.w500,
+  /// 站源组头「+ 添加」：弹框里走原手动安装流程（选文件 / 填地址）。
+  Future<void> _addStationSource() => showDialog<void>(
+    context: context,
+    builder: (dialog) => AlertDialog(
+      title: const Text('添加站源模块'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        spacing: 12,
+        children: [
+          GroupCard(
+            children: [
+              SettingsTile(
+                title: '选择本地文件',
+                enabled: _canInstall,
+                onTap: _canInstall
+                    ? () {
+                        Navigator.pop(dialog);
+                        unawaited(_installFile());
+                      }
+                    : null,
+              ),
+            ],
+          ),
+          GroupCard(
+            children: [
+              SettingsTile(
+                title: '输入下载地址',
+                enabled: _canInstall,
+                onTap: _canInstall
+                    ? () {
+                        Navigator.pop(dialog);
+                        unawaited(_installAddress());
+                      }
+                    : null,
+              ),
+            ],
+          ),
+        ],
       ),
-      tabs: [for (final label in _tabLabels) Tab(text: label)],
     ),
   );
 
-  Widget _body() => Column(
-    children: [
-      if (_busy) const LinearProgressIndicator(),
-      Expanded(
-        child: TabBarView(
-          controller: _tabs,
-          children: [_installedTab(), _manualTab()],
+  /// 手机/平板/桌面：单页滚动两组——站源组、文件源组，组头右侧带
+  /// 各自的添加入口，不再分标签页。
+  Widget _standard() => Scaffold(
+    appBar: AppBar(
+      title: const Text('资源'),
+      actions: const [SizedBox(width: 8)],
+    ),
+    body: Column(
+      children: [
+        if (_busy) const LinearProgressIndicator(),
+        Expanded(
+          child: ListView(
+            // 底部留出胶囊底栏的高度，最后一张卡能完整滑出来。
+            padding: EdgeInsets.fromLTRB(
+              16,
+              8,
+              16,
+              24 + capsuleBarClearance(context),
+            ),
+            children: [
+              if (_error case final error?) ...[
+                _Note(error),
+                const SizedBox(height: 12),
+              ],
+              SectionHeader(
+                title: '站源',
+                action: '+ 添加',
+                onAction: () => unawaited(_addStationSource()),
+                padding: const EdgeInsets.fromLTRB(4, 4, 0, 0),
+              ),
+              const SizedBox(height: 8),
+              _stationCards(shrinkWrap: true),
+              SectionHeader(
+                title: '文件源',
+                action: '+ 添加文件源',
+                onAction: () =>
+                    unawaited(addFileSource(context, files: _files)),
+                padding: const EdgeInsets.fromLTRB(4, 20, 0, 0),
+              ),
+              const SizedBox(height: 8),
+              FileSourceCards(files: _files),
+            ],
+          ),
         ),
-      ),
-    ],
+      ],
+    ),
   );
 
-  Widget _content() => switch (_tabs.index) {
-    0 => _installedTab(),
-    _ => _manualTab(),
+  Widget _content() => switch (_section) {
+    0 => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_error case final error?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, televisionInset, 0),
+            child: _Note(error),
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 8, televisionInset, 12),
+          child: Column(spacing: 12, children: _installTiles()),
+        ),
+        Expanded(child: _stationCards(shrinkWrap: false)),
+      ],
+    ),
+    _ => _list([
+      GroupCard(
+        children: [
+          SettingsTile(
+            title: '添加文件源',
+            onTap: () => unawaited(addFileSource(context, files: _files)),
+          ),
+        ],
+      ),
+      FileSourceCards(files: _files),
+    ]),
   };
 
-  void _select(int index) => _tabs.index = index;
+  void _select(int index) => setState(() => _section = index);
 
   FocusNode? _detailTarget({required bool resume}) {
     final last = _detailScope.focusedChild;
@@ -464,7 +554,7 @@ class _ModulesPageState extends State<ModulesPage>
     if (focus != null && focus.focusInDirection(TraversalDirection.left)) {
       return KeyEventResult.handled;
     }
-    revealFocus(_groupFocus[_tabs.index]);
+    revealFocus(_groupFocus[_section]);
     return KeyEventResult.handled;
   }
 
@@ -480,7 +570,7 @@ class _ModulesPageState extends State<ModulesPage>
             child: Padding(
               padding: const EdgeInsets.only(left: 8),
               child: Text(
-                '模块',
+                '资源',
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                   fontSize: 22,
                   fontWeight: FontWeight.w800,
@@ -496,14 +586,14 @@ class _ModulesPageState extends State<ModulesPage>
           child: ListView(
             padding: const EdgeInsets.fromLTRB(televisionInset, 4, 16, 27),
             children: [
-              for (final (index, label) in _tabLabels.indexed)
+              for (final (index, label) in _sectionLabels.indexed)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: SettingsGroupItem(
                     label: label,
-                    selected: index == _tabs.index,
+                    selected: index == _section,
                     focusNode: _groupFocus[index],
-                    autofocus: index == _tabs.index,
+                    autofocus: index == _section,
                     onTap: () => _select(index),
                     onFocus: () => _select(index),
                   ),
@@ -528,7 +618,7 @@ class _ModulesPageState extends State<ModulesPage>
                 child: Semantics(
                   header: true,
                   child: Text(
-                    _tabLabels[_tabs.index],
+                    _sectionLabels[_section],
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
@@ -544,7 +634,7 @@ class _ModulesPageState extends State<ModulesPage>
       ),
       if (_busy) const LinearProgressIndicator(),
       Expanded(
-        child: KeyedSubtree(key: ValueKey(_tabs.index), child: _content()),
+        child: KeyedSubtree(key: ValueKey(_section), child: _content()),
       ),
     ],
   );
@@ -552,7 +642,7 @@ class _ModulesPageState extends State<ModulesPage>
   Widget _television() => PopScope(
     canPop: !_detailFocused,
     onPopInvokedWithResult: (didPop, _) {
-      if (!didPop) revealFocus(_groupFocus[_tabs.index]);
+      if (!didPop) revealFocus(_groupFocus[_section]);
     },
     child: Scaffold(
       body: SafeArea(
@@ -587,19 +677,8 @@ class _ModulesPageState extends State<ModulesPage>
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: _store,
-    builder: (context, _) => AppScope.of(context).television
-        ? _television()
-        : Scaffold(
-            appBar: AppBar(
-              title: const Text('模块'),
-              actions: const [SizedBox(width: 8)],
-              bottom: PreferredSize(
-                preferredSize: const Size.fromHeight(48),
-                child: _tabBar(),
-              ),
-            ),
-            body: _body(),
-          ),
+    builder: (context, _) =>
+        AppScope.of(context).television ? _television() : _standard(),
   );
 }
 

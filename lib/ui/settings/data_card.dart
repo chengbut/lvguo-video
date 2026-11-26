@@ -171,7 +171,7 @@ class _DataCardState extends State<DataCard> {
         ),
         SettingsTile(
           title: '删除全部数据',
-          subtitle: '删除用户、记录、设置、模块、缓存和已下载的视频，完成后退出应用',
+          subtitle: '删除用户、记录、设置、站源模块、缓存和已下载的视频，完成后退出应用',
           enabled: !_clearing,
           onTap: _deleteAll,
         ),

@@ -821,7 +821,7 @@ class _BackupCardState extends State<_BackupCard> {
         ),
         SettingsTile(
           title: '恢复备份',
-          subtitle: '替换本机的用户、追剧、观看记录、设置和站源开关，已下载视频保留，完成后可安装备份里的模块',
+          subtitle: '替换本机的用户、追剧、观看记录、设置和站源开关，已下载视频保留，完成后可安装备份里的站源模块',
           enabled: !_busy,
           onTap: () => _run(() => restoreBackupFile(context, widget.store)),
         ),
