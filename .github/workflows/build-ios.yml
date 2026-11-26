@@ -1,0 +1,87 @@
+# Build 绿果视频 native iOS app (unsigned) — native-rewrite branch only.
+#
+# Builds the SwiftUI app in ios-native/ on a macOS runner with the newest
+# Xcode (iOS 26 SDK is required for Liquid Glass) and uploads an unsigned
+# .ipa (Payload/*.app zipped) as an artifact. No signing, no secrets.
+# Scoped to the native-rewrite branch + ios-native paths so it never
+# interferes with the Flutter workflows on main.
+
+name: Build Native iOS (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [native-rewrite]
+    paths:
+      - 'ios-native/**'
+      - '.github/workflows/build-ios.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lvguo-native-ios-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app || true
+          XCODE_APP="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1)"
+          if [ -n "$XCODE_APP" ]; then
+            echo "Selecting $XCODE_APP"
+            sudo xcode-select -s "$XCODE_APP"
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build (unsigned)
+        working-directory: ios-native
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project LvguoNative.xcodeproj \
+            -scheme LvguoNative \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log
+
+      - name: Surface build errors as annotations
+        if: failure()
+        working-directory: ios-native
+        run: |
+          if [ -f build.log ]; then
+            grep -E "error:|BUILD FAILED|The following build commands failed" build.log | head -n 8 | while IFS= read -r line; do
+              esc="$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g')"
+              echo "::error::$esc"
+            done
+          fi
+
+      - name: Package unsigned IPA
+        working-directory: ios-native
+        run: |
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/LvguoNative.app"
+          test -d "$APP_PATH"
+          rm -rf Payload lvguo-native-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          /usr/bin/zip -qry lvguo-native-unsigned.ipa Payload
+          ls -lh lvguo-native-unsigned.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lvguo-native-ios-unsigned
+          path: ios-native/lvguo-native-unsigned.ipa
+          if-no-files-found: error
