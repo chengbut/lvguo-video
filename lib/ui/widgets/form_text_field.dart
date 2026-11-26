@@ -16,6 +16,7 @@ class FormTextField extends StatelessWidget {
     this.enabled = true,
     this.autofocus = false,
     this.maxLength,
+    this.maxLines,
     this.onSubmitted,
   });
   final TextEditingController controller;
@@ -26,6 +27,7 @@ class FormTextField extends StatelessWidget {
   final bool enabled;
   final bool autofocus;
   final int? maxLength;
+  final int? maxLines;
   final ValueChanged<String>? onSubmitted;
 
   @override
@@ -39,6 +41,7 @@ class FormTextField extends StatelessWidget {
           enabled: enabled,
           autofocus: autofocus,
           obscureText: obscure,
+          maxLines: obscure ? 1 : maxLines,
           keyboardType: url ? TextInputType.url : null,
           enableSuggestions: !obscure && !url,
           autocorrect: !obscure && !url,

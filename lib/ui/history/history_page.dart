@@ -2,12 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../file_sources.dart';
 import '../../local_store.dart';
 import '../../models.dart';
 import '../../source_modules.dart';
 import '../../watch_history.dart';
 import '../app_scope.dart';
 import '../detail/detail_page.dart';
+import '../files/file_player_page.dart';
+import '../widgets/liquid_glass.dart';
 import '../settings/settings_rows.dart';
 import '../shell/app_shell.dart';
 import '../theme/motion.dart';
@@ -42,9 +45,15 @@ class _HistoryPageState extends State<HistoryPage> {
   final _entered = <Object>{};
   Set<String>? _selection;
 
+  // 顶部「站源 / 文件源」分段开关（与首页同款）：文件源模式整页换成
+  // 文件观看记录，两个模式用 IndexedStack 各自保活、互不干扰。
+  bool _filesMode = false;
+  late final FileSourceStore _files;
+
   @override
   void initState() {
     super.initState();
+    _files = FileSourceStore.instance(widget.store.preferences);
     if (!widget.root) _keepFocus(_firstPoster);
   }
 
@@ -144,7 +153,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: Listenable.merge([widget.store, _query]),
+    listenable: Listenable.merge([widget.store, _query, _files]),
     builder: (context, _) {
       // 跟随当前源显示：不设“全部”，也不在页内手动切。当前源在资源页
       // 切换后这里自动跟着变（store 是 Listenable，setSource 会通知重建）。
@@ -169,14 +178,229 @@ class _HistoryPageState extends State<HistoryPage> {
         onPopInvokedWithResult: (didPop, _) {
           if (!didPop) _finishEditing();
         },
-        child: switch (AppScope.formFactorOf(context)) {
-          FormFactor.phone => _phone(context, view),
-          FormFactor.pad || FormFactor.window => _wide(context, view),
-          FormFactor.television => _television(context, view),
-        },
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              if (AppScope.formFactorOf(context) != FormFactor.television)
+                _switchBar(
+                  context,
+                  filesMode: _filesMode,
+                ),
+              Expanded(
+                child: IndexedStack(
+                  index: _filesMode ? 1 : 0,
+                  sizing: StackFit.expand,
+                  children: [
+                    switch (AppScope.formFactorOf(context)) {
+                      FormFactor.phone => _phone(context, view),
+                      FormFactor.pad ||
+                      FormFactor.window => _wide(context, view),
+                      FormFactor.television => _television(context, view),
+                    },
+                    _fileHistory(context),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       );
     },
   );
+
+  // 顶部开关行：与首页同款规格——左侧 176 宽玻璃分段开关；电视端不显示，
+  // 恒为站源模式。文件源模式右侧是「清空」。
+  Widget _switchBar(BuildContext context, {required bool filesMode}) {
+    final phone = AppScope.formFactorOf(context) == FormFactor.phone;
+    final inset = phone ? 16.0 : 24.0;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(inset, 10, inset, 0),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 176,
+            child: GlassSegmentedControl(
+              labels: const ['站源', '文件源'],
+              selected: filesMode ? 1 : 0,
+              onSelected: (index) => setState(() => _filesMode = index == 1),
+            ),
+          ),
+          const Spacer(),
+          if (filesMode && _files.records.isNotEmpty)
+            TextButton.icon(
+              onPressed: _clearFileRecords,
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+              label: const Text('清空'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // —— 文件源模式：整页文件观看记录 ——
+
+  Widget _fileHistory(BuildContext context) {
+    final phone = AppScope.formFactorOf(context) == FormFactor.phone;
+    final inset = phone ? 16.0 : 24.0;
+    final records = _files.records;
+    if (records.isEmpty) {
+      return const StatusView(
+        icon: Icons.movie_outlined,
+        title: '还没有文件观看记录',
+        message: '在文件源里播放视频后会出现在这里。',
+      );
+    }
+    return ListView.separated(
+      padding: EdgeInsets.fromLTRB(
+        inset,
+        12,
+        inset,
+        24 + capsuleBarClearance(context),
+      ),
+      itemCount: records.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final record = records[index];
+        final progress = record.progress;
+        final title = progress.title.isEmpty ? '未知文件' : progress.title;
+        final watched = progress.position.inSeconds;
+        final total = progress.duration.inSeconds;
+        final state = total > 0 && watched >= total - 5
+            ? '已看完'
+            : total > 0
+            ? '看到 ${_clock(progress.position)} / ${_clock(progress.duration)}'
+            : watched > 0
+            ? '看到 ${_clock(progress.position)}'
+            : '未开始';
+        return LiquidGlass(
+          borderRadius: BorderRadius.circular(16),
+          tint: 0.5,
+          child: ListTile(
+            leading: const Icon(Icons.movie_outlined),
+            title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            subtitle: Text(
+              '${progress.sourceName.isEmpty ? '文件源' : progress.sourceName} · $state · ${_whenLabel(progress.updatedAt)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: '删除这条记录',
+              onPressed: () => _removeFileRecord(record),
+            ),
+            onTap: () => _resumeFile(record),
+          ),
+        );
+      },
+    );
+  }
+
+  String _clock(Duration value) {
+    final total = value.inSeconds;
+    final hours = total ~/ 3600;
+    final minutes = (total % 3600) ~/ 60;
+    final seconds = total % 60;
+    String two(int part) => part.toString().padLeft(2, '0');
+    return hours > 0
+        ? '$hours:${two(minutes)}:${two(seconds)}'
+        : '${two(minutes)}:${two(seconds)}';
+  }
+
+  String _whenLabel(DateTime time) {
+    String two(int part) => part.toString().padLeft(2, '0');
+    final now = DateTime.now();
+    if (time.year == now.year &&
+        time.month == now.month &&
+        time.day == now.day) {
+      return '今天 ${two(time.hour)}:${two(time.minute)}';
+    }
+    if (time.year == now.year) return '${time.month}月${time.day}日';
+    return '${time.year}-${two(time.month)}-${two(time.day)}';
+  }
+
+  void _resumeFile(FileHistoryRecord record) {
+    final progress = record.progress;
+    final title = progress.title.isEmpty ? '未知文件' : progress.title;
+    Future<FilePlayTarget> load() async {
+      final source = _files.sourceById(progress.sourceId);
+      // 原生 / FTP 源的播放地址拼法特殊：按记录里的条目标识现取。
+      if (source != null && progress.ref.isNotEmpty) {
+        return createFileSourceClient(source).target(
+          FileEntry(
+            name: progress.title,
+            href: progress.ref,
+            isDirectory: false,
+          ),
+        );
+      }
+      final url = progress.url.isNotEmpty ? progress.url : record.key;
+      return FilePlayTarget(url: url, headers: source?.authHeaders ?? const {});
+    }
+
+    openPage<void>(
+      context,
+      (_) => FilePlayerPage(
+        playlist: [
+          FilePlayItem(
+            title: title,
+            progressKey: record.key,
+            ref: progress.ref,
+            loadTarget: load,
+          ),
+        ],
+        index: 0,
+        files: _files,
+        sourceName: progress.sourceName,
+        sourceId: progress.sourceId,
+      ),
+    );
+  }
+
+  Future<bool> _confirmFileAction({
+    required String title,
+    required String message,
+    required String confirmLabel,
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return ok ?? false;
+  }
+
+  Future<void> _removeFileRecord(FileHistoryRecord record) async {
+    final ok = await _confirmFileAction(
+      title: '删除这条记录？',
+      message: record.progress.title.isEmpty
+          ? '只删除观看进度记录，不会删除源文件。'
+          : '只删除「${record.progress.title}」的观看进度记录，不会删除源文件。',
+      confirmLabel: '删除',
+    );
+    if (ok) _files.removeProgress(record.key);
+  }
+
+  Future<void> _clearFileRecords() async {
+    final ok = await _confirmFileAction(
+      title: '清空文件观看记录？',
+      message: '只清空观看进度记录，不会删除任何源文件。',
+      confirmLabel: '清空',
+    );
+    if (ok) _files.clearProgress();
+  }
 
   Set<String> _ids(_View view) => {
     for (final entry in view.shown) entry.drama.id,

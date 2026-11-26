@@ -8,28 +8,35 @@ import '../widgets/liquid_glass.dart';
 import '../widgets/status_view.dart';
 import 'file_player_page.dart';
 
-/// WebDAV 文件浏览页：列当前目录，文件夹点一下 push 一层新的本页，
-/// 顶部写当前路径；视频文件点击直接播放（带 Basic Auth 头和续播）。
+/// 文件浏览页：数据源是统一的 [FileSourceClient]（WebDAV / FTP /
+/// 天翼·移动原生都走这个接口，页面不感知差异）。文件夹点一下
+/// push 一层新的本页，顶部写当前路径；视频文件点击播放，同
+/// 文件夹的全部视频组成播放列表传给播放页做上/下一。
 class FileBrowserPage extends StatefulWidget {
   const FileBrowserPage({
     super.key,
     required this.source,
     required this.files,
-    this.href,
+    this.path,
+    this.label,
   });
   final FileSource source;
   final FileSourceStore files;
 
-  /// 当前目录的服务器路径（href）；null 是源根目录。
-  final String? href;
+  /// 当前目录的定位符（WebDAV 路径 / FTP 路径 / 原生文件夹 ID）；
+  /// null 是源根目录。
+  final String? path;
+
+  /// 当前目录的显示名（原生网盘用文件夹名当路径标签）。
+  final String? label;
 
   @override
   State<FileBrowserPage> createState() => _FileBrowserPageState();
 }
 
 class _FileBrowserPageState extends State<FileBrowserPage> {
-  late final WebDavClient _client = WebDavClient(widget.source);
-  List<WebDavEntry>? _entries;
+  late final FileSourceClient _client = createFileSourceClient(widget.source);
+  List<FileEntry>? _entries;
   String? _error;
   bool _loading = true;
 
@@ -45,7 +52,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
       _error = null;
     });
     try {
-      final entries = await _client.list(widget.href);
+      final entries = await _client.list(widget.path);
       if (mounted) {
         setState(() {
           _entries = entries;
@@ -63,23 +70,26 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
   }
 
   String get _pathLabel {
-    final href = widget.href;
-    if (href == null) return '/';
+    final label = widget.label;
+    if (label != null && label.isNotEmpty) return label;
+    final path = widget.path;
+    if (path == null) return '/';
     try {
-      return Uri.decodeComponent(href);
+      return Uri.decodeComponent(path);
     } catch (_) {
-      return href;
+      return path;
     }
   }
 
-  void _openEntry(WebDavEntry entry) {
+  void _openEntry(FileEntry entry) {
     if (entry.isDirectory) {
       openPage<void>(
         context,
         (_) => FileBrowserPage(
           source: widget.source,
           files: widget.files,
-          href: entry.href,
+          path: entry.href,
+          label: widget.source.nativeMode ? entry.name : null,
         ),
       );
       return;
@@ -90,14 +100,21 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
       );
       return;
     }
-    final url = _client.resolve(entry.href).toString();
+    final videos = [
+      for (final candidate in _entries ?? const <FileEntry>[])
+        if (candidate.isVideo) candidate,
+    ];
+    final index = videos.indexOf(entry);
     openPage<void>(
       context,
       (_) => FilePlayerPage(
-        title: entry.name,
-        url: url,
-        headers: widget.source.authHeaders,
+        playlist: [
+          for (final video in videos) _client.playItem(video),
+        ],
+        index: index < 0 ? 0 : index,
         files: widget.files,
+        sourceName: widget.source.name,
+        sourceId: widget.source.id,
       ),
     );
   }
@@ -130,7 +147,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
     );
   }
 
-  Widget _body(List<WebDavEntry>? entries) {
+  Widget _body(List<FileEntry>? entries) {
     if (_loading) return const Center(child: CircularProgressIndicator());
     final error = _error;
     if (error != null) {
@@ -160,9 +177,7 @@ class _FileBrowserPageState extends State<FileBrowserPage> {
           return _EntryTile(
             entry: entry,
             progress: entry.isVideo
-                ? widget.files.progressFor(
-                    _client.resolve(entry.href).toString(),
-                  )
+                ? widget.files.progressFor(_client.progressKey(entry))
                 : null,
             onTap: () => _openEntry(entry),
           );
@@ -178,7 +193,7 @@ class _EntryTile extends StatelessWidget {
     required this.progress,
     required this.onTap,
   });
-  final WebDavEntry entry;
+  final FileEntry entry;
   final FileProgress? progress;
   final VoidCallback onTap;
 

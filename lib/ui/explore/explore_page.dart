@@ -244,7 +244,7 @@ class ExplorePageState extends State<ExplorePage> {
                             : () => pickSource(anchor, widget.store),
                         borderRadius: BorderRadius.circular(8),
                         child: Text(
-                          source?.displayName ?? '发现',
+                          source?.displayName ?? '首页',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: nameStyle,

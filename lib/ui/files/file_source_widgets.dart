@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../file_sources.dart';
@@ -7,6 +8,8 @@ import '../shell/app_shell.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/form_text_field.dart';
 import '../widgets/group_card.dart';
+import '../widgets/liquid_glass.dart';
+import 'cloud_login_page.dart';
 import 'file_browser_page.dart';
 import 'file_player_page.dart';
 
@@ -80,11 +83,31 @@ class FileSourceCard extends StatelessWidget {
                             ),
                           ),
                         ),
+                        if (source.nativeMode)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: colors.tertiaryContainer,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              '原生 · 实验',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: colors.onTertiaryContainer,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
                       ],
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      source.host,
+                      source.nativeMode
+                          ? '原生登录（实验） · ${source.host}'
+                          : source.host,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: meta,
@@ -133,27 +156,36 @@ class FileSourceCard extends StatelessWidget {
   }
 }
 
-/// 打开一个文件源：WebDAV 类进文件浏览页；HTTP 拉取直接播那条直链。
+/// 打开一个文件源：HTTP 拉取直接播那条直链；其余进文件浏览页
+/// （底层走统一的 FileSourceClient，页面不感知协议差异）。
 void openFileSource(
   BuildContext context, {
   required FileSource source,
   required FileSourceStore files,
 }) {
-  if (source.type.isWebDav) {
+  if (source.type == FileSourceType.http) {
     openPage<void>(
       context,
-      (_) => FileBrowserPage(source: source, files: files),
+      (_) => FilePlayerPage(
+        playlist: [
+          FilePlayItem(
+            title: source.name,
+            progressKey: source.url,
+            ref: '',
+            loadTarget: () async => FilePlayTarget(url: source.url),
+          ),
+        ],
+        index: 0,
+        files: files,
+        sourceName: source.name,
+        sourceId: source.id,
+      ),
     );
     return;
   }
   openPage<void>(
     context,
-    (_) => FilePlayerPage(
-      title: source.name,
-      url: source.url,
-      headers: const {},
-      files: files,
-    ),
+    (_) => FileBrowserPage(source: source, files: files),
   );
 }
 
@@ -190,7 +222,7 @@ Future<void> confirmDeleteFileSource(
 }
 
 /// 添加文件源：先选类型（顺序固定：天翼、中国移动、WebDAV、HTTP
-/// 拉取），再进对应表单页，保存后回到列表。
+/// 拉取、FTP），再进对应表单页，保存后回到列表。
 Future<void> addFileSource(
   BuildContext context, {
   required FileSourceStore files,
@@ -209,9 +241,10 @@ Future<void> addFileSource(
               subtitle: Text(
                 switch (type) {
                   FileSourceType.tianyi ||
-                  FileSourceType.mobile => '通过 WebDAV 挂载',
+                  FileSourceType.mobile => '网页登录（实验）/ WebDAV 挂载',
                   FileSourceType.webdav => 'WebDAV 服务器',
                   FileSourceType.http => '单个媒体文件的直链地址',
+                  FileSourceType.ftp => 'FTP 服务器',
                 },
               ),
             ),
@@ -227,7 +260,7 @@ Future<void> addFileSource(
   if (created != null) await files.add(created);
 }
 
-/// 文件源卡片列表（资源页文件源组、发现页文件源模式共用同一份数据）。
+/// 文件源卡片列表（资源页文件源组、首页文件源模式共用同一份数据）。
 class FileSourceCards extends StatelessWidget {
   const FileSourceCards({super.key, required this.files});
   final FileSourceStore files;
@@ -240,7 +273,7 @@ class FileSourceCards extends StatelessWidget {
       if (sources.isEmpty) {
         return const Padding(
           padding: EdgeInsets.symmetric(horizontal: 4),
-          child: Text('还没有文件源。点右上角「+ 添加文件源」，把网盘或 WebDAV 挂进来。'),
+          child: Text('还没有文件源。点右上角「+ 添加文件源」，把网盘或服务器挂进来。'),
         );
       }
       return Column(
@@ -265,9 +298,13 @@ class FileSourceCards extends StatelessWidget {
   );
 }
 
-/// 添加文件源的表单页：WebDAV 类（天翼/中国移动/WebDAV）是名称、
-/// 服务器地址、用户名、密码；天翼和中国移动在顶部多一行小字说明
-/// 走 WebDAV 挂载。HTTP 拉取是名称 + 直链地址。
+/// 添加文件源的表单页：
+/// - 天翼/中国移动：顶部二选一「原生登录（实验）/ WebDAV 挂载」，
+///   默认 WebDAV。原生模式主路径是内嵌官方网页登录（抓 Cookie 存
+///   凭据），粘贴凭据是备用入口；WebDAV 模式是服务器地址表单。
+/// - WebDAV：名称、服务器地址、用户名、密码。
+/// - FTP：名称、主机、端口、用户名、密码、初始目录。
+/// - HTTP 拉取：名称 + 直链地址。
 class FileSourceFormPage extends StatefulWidget {
   const FileSourceFormPage({super.key, required this.type});
   final FileSourceType type;
@@ -282,7 +319,20 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
   final _username = TextEditingController();
   final _password = TextEditingController();
   final _url = TextEditingController();
+  final _cookie = TextEditingController();
+  final _port = TextEditingController(text: '21');
+  final _path = TextEditingController(text: '/');
+  bool _native = false;
+  bool _loggedIn = false;
   String? _error;
+
+  bool get _cloud =>
+      widget.type == FileSourceType.tianyi ||
+      widget.type == FileSourceType.mobile;
+
+  bool get _webViewSupported =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
 
   @override
   void dispose() {
@@ -291,7 +341,23 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
     _username.dispose();
     _password.dispose();
     _url.dispose();
+    _cookie.dispose();
+    _port.dispose();
+    _path.dispose();
     super.dispose();
+  }
+
+  Future<void> _openLogin() async {
+    final result = await openPage<CloudLoginResult>(
+      context,
+      (_) => CloudLoginPage(type: widget.type),
+    );
+    if (result == null || !mounted) return;
+    setState(() {
+      _cookie.text = result.credential;
+      _loggedIn = true;
+      _error = null;
+    });
   }
 
   void _submit() {
@@ -300,10 +366,11 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
       setState(() => _error = '请填写名称');
       return;
     }
-    if (widget.type.isWebDav) {
-      final server = _server.text.trim();
-      if (server.isEmpty) {
-        setState(() => _error = '请填写服务器地址');
+    final type = widget.type;
+    if (_cloud && _native) {
+      final credential = _cookie.text.trim();
+      if (credential.isEmpty) {
+        setState(() => _error = '请先网页登录，或粘贴凭据（备用方式）');
         return;
       }
       Navigator.pop(
@@ -311,17 +378,60 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
         FileSource(
           id: newFileSourceId(),
           name: name,
-          type: widget.type,
-          server: server,
-          username: _username.text.trim(),
-          password: _password.text,
+          type: type,
+          mode: fileSourceModeNative,
+          cookie: credential,
         ),
       );
       return;
     }
-    final url = _url.text.trim();
-    if (url.isEmpty) {
-      setState(() => _error = '请填写媒体文件直链地址');
+    if (type == FileSourceType.ftp) {
+      final host = _server.text.trim();
+      if (host.isEmpty) {
+        setState(() => _error = '请填写 FTP 主机');
+        return;
+      }
+      final port = int.tryParse(_port.text.trim()) ?? 21;
+      if (port < 1 || port > 65535) {
+        setState(() => _error = '端口不合法');
+        return;
+      }
+      Navigator.pop(
+        context,
+        FileSource(
+          id: newFileSourceId(),
+          name: name,
+          type: type,
+          server: host,
+          username: _username.text.trim(),
+          password: _password.text,
+          port: port,
+          path: _path.text.trim().isEmpty ? '/' : _path.text.trim(),
+        ),
+      );
+      return;
+    }
+    if (type == FileSourceType.http) {
+      final url = _url.text.trim();
+      if (url.isEmpty) {
+        setState(() => _error = '请填写媒体文件直链地址');
+        return;
+      }
+      Navigator.pop(
+        context,
+        FileSource(
+          id: newFileSourceId(),
+          name: name,
+          type: type,
+          url: url,
+        ),
+      );
+      return;
+    }
+    // WebDAV 类（含天翼/移动的挂载模式）。
+    final server = _server.text.trim();
+    if (server.isEmpty) {
+      setState(() => _error = '请填写服务器地址');
       return;
     }
     Navigator.pop(
@@ -329,8 +439,10 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
       FileSource(
         id: newFileSourceId(),
         name: name,
-        type: widget.type,
-        url: url,
+        type: type,
+        server: server,
+        username: _username.text.trim(),
+        password: _password.text,
       ),
     );
   }
@@ -339,23 +451,15 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
   Widget build(BuildContext context) {
     final type = widget.type;
     final theme = Theme.of(context);
+    final hintStyle = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
     return Scaffold(
       appBar: AppBar(title: Text('添加${type.label}')),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
           children: [
-            if (type == FileSourceType.tianyi ||
-                type == FileSourceType.mobile)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 16),
-                child: Text(
-                  '通过 WebDAV 挂载（可用 Alist / CloudDrive2 转出地址）',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
             FormTextField(
               controller: _name,
               autofocus: true,
@@ -365,27 +469,27 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
               ),
             ),
             const SizedBox(height: 16),
-            if (type.isWebDav) ...[
-              FormTextField(
-                controller: _server,
-                url: true,
-                decoration: const InputDecoration(
-                  labelText: '服务器地址',
-                  hintText: 'http://192.168.1.5:5244/dav',
+            if (_cloud) ...[
+              GlassSegmentedControl(
+                labels: const ['原生登录（实验）', 'WebDAV 挂载'],
+                selected: _native ? 0 : 1,
+                onSelected: (index) =>
+                    setState(() => _native = index == 0),
+              ),
+              const SizedBox(height: 16),
+              if (_native) ..._nativeFields(hintStyle) else ...[
+                Text(
+                  '通过 WebDAV 挂载（可用 Alist / CloudDrive2 转出地址）',
+                  style: hintStyle,
                 ),
-              ),
-              const SizedBox(height: 16),
-              FormTextField(
-                controller: _username,
-                decoration: const InputDecoration(labelText: '用户名'),
-              ),
-              const SizedBox(height: 16),
-              FormTextField(
-                controller: _password,
-                obscure: true,
-                decoration: const InputDecoration(labelText: '密码'),
-              ),
-            ] else
+                const SizedBox(height: 16),
+                ..._webDavFields(),
+              ],
+            ] else if (type == FileSourceType.webdav)
+              ..._webDavFields()
+            else if (type == FileSourceType.ftp)
+              ..._ftpFields()
+            else
               FormTextField(
                 controller: _url,
                 url: true,
@@ -404,5 +508,96 @@ class _FileSourceFormPageState extends State<FileSourceFormPage> {
         ),
       ),
     );
+  }
+
+  List<Widget> _webDavFields() => [
+    FormTextField(
+      controller: _server,
+      url: true,
+      decoration: const InputDecoration(
+        labelText: '服务器地址',
+        hintText: 'http://192.168.1.5:5244/dav',
+      ),
+    ),
+    const SizedBox(height: 16),
+    FormTextField(
+      controller: _username,
+      decoration: const InputDecoration(labelText: '用户名'),
+    ),
+    const SizedBox(height: 16),
+    FormTextField(
+      controller: _password,
+      obscure: true,
+      decoration: const InputDecoration(labelText: '密码'),
+    ),
+  ];
+
+  List<Widget> _ftpFields() => [
+    FormTextField(
+      controller: _server,
+      url: true,
+      decoration: const InputDecoration(
+        labelText: '主机',
+        hintText: '192.168.1.5 或 ftp.example.com',
+      ),
+    ),
+    const SizedBox(height: 16),
+    FormTextField(
+      controller: _port,
+      decoration: const InputDecoration(labelText: '端口'),
+    ),
+    const SizedBox(height: 16),
+    FormTextField(
+      controller: _username,
+      decoration: const InputDecoration(labelText: '用户名'),
+    ),
+    const SizedBox(height: 16),
+    FormTextField(
+      controller: _password,
+      obscure: true,
+      decoration: const InputDecoration(labelText: '密码'),
+    ),
+    const SizedBox(height: 16),
+    FormTextField(
+      controller: _path,
+      decoration: const InputDecoration(
+        labelText: '初始目录',
+        hintText: '/',
+      ),
+    ),
+  ];
+
+  List<Widget> _nativeFields(TextStyle? hintStyle) {
+    final tianyi = widget.type == FileSourceType.tianyi;
+    return [
+      Text(
+        tianyi
+            ? '实验功能：在官方网页里登录你的天翼云盘，登录成功后自动读取登录状态保存。接口按公开形态实现，未经实测。'
+            : '实验功能：在官方网页里登录你的中国移动云盘，登录成功后自动读取登录状态保存。接口按公开形态实现，未经实测。',
+        style: hintStyle,
+      ),
+      const SizedBox(height: 12),
+      if (_webViewSupported)
+        FilledButton.icon(
+          onPressed: () => unawaited(_openLogin()),
+          icon: Icon(
+            _loggedIn ? Icons.check_circle_rounded : Icons.login_rounded,
+          ),
+          label: Text(_loggedIn ? '已登录，点此重新登录' : '打开官方网页登录'),
+        )
+      else
+        Text('当前平台不支持内置网页登录，请用下方备用粘贴方式。', style: hintStyle),
+      const SizedBox(height: 16),
+      FormTextField(
+        controller: _cookie,
+        maxLines: 4,
+        decoration: InputDecoration(
+          labelText: tianyi ? 'Cookie（备用粘贴）' : 'Authorization / Cookie（备用粘贴）',
+          hintText: tianyi
+              ? '在电脑浏览器登录 cloud.189.cn 网页版，开发者工具 → 网络里复制请求头 Cookie 整段粘贴'
+              : '在电脑浏览器登录 yun.139.com 网页版，开发者工具 → 网络找 hcy/file/list 请求，复制 Authorization 里 Basic 后面的内容',
+        ),
+      ),
+    ];
   }
 }

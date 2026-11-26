@@ -43,6 +43,7 @@ class AdaptiveGlass extends StatelessWidget {
     this.margin,
     this.style = NativeGlassStyle.regular,
     this.showBorder = true,
+    this.specular = false,
   });
 
   final Widget child;
@@ -54,6 +55,11 @@ class AdaptiveGlass extends StatelessWidget {
   final NativeGlassStyle style;
   final bool showBorder;
 
+  /// 边缘高光打磨（见 LiquidGlass.specular）：非 iOS 透传给模拟版；
+  /// iOS 上原生玻璃自带折射边，再叠 Flutter 的高光线 + 色散描边
+  /// （代替原来那圈纯白边）。
+  final bool specular;
+
   @override
   Widget build(BuildContext context) {
     if (defaultTargetPlatform != TargetPlatform.iOS) {
@@ -63,6 +69,7 @@ class AdaptiveGlass extends StatelessWidget {
         tint: tint,
         padding: padding,
         margin: margin,
+        specular: specular,
         child: child,
       );
     }
@@ -92,17 +99,19 @@ class AdaptiveGlass extends StatelessWidget {
             // 为 false 时不补（小圆钮用 .clear + 无边，见上面）。
             if (showBorder)
               Positioned.fill(
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: borderRadius,
-                      border: Border.all(
-                        color: const Color(0x4DFFFFFF),
-                        width: 1,
+                child: specular
+                    ? GlassEdgeOverlay(borderRadius: borderRadius)
+                    : IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: borderRadius,
+                            border: Border.all(
+                              color: const Color(0x4DFFFFFF),
+                              width: 1,
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                ),
               ),
           ],
         ),

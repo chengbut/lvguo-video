@@ -158,7 +158,7 @@ class AppearanceSettings extends StatelessWidget {
               const Divider(indent: 16, endIndent: 16),
               SwitchTile(
                 title: '在主页显示模糊封面按钮',
-                subtitle: '发现页站源按钮左边显示眼睛按钮，点一下模糊封面，再点恢复',
+                subtitle: '首页站源按钮左边显示眼睛按钮，点一下模糊封面，再点恢复',
                 value: store.blurCoversButton,
                 onChanged: (value) => saveSetting(
                   context,
@@ -169,7 +169,7 @@ class AppearanceSettings extends StatelessWidget {
               SwitchTile(
                 title: '模糊所有界面的封面',
                 subtitle: store.blurCoversButton
-                    ? '关闭后只模糊发现页的封面'
+                    ? '关闭后只模糊首页的封面'
                     : '需先打开在主页显示模糊封面按钮',
                 value: store.blurCoversButton && store.blurAllCovers,
                 onChanged: store.blurCoversButton

@@ -28,7 +28,7 @@ import '../widgets/source_bar.dart';
 import '../widgets/liquid_glass.dart';
 
 enum AppTab {
-  explore('发现', Icons.explore_outlined, Icons.explore),
+  explore('首页', Icons.explore_outlined, Icons.explore),
   follow('追剧', Icons.bookmark_border_rounded, Icons.bookmark_rounded),
   history('历史', Icons.history_rounded, Icons.history_rounded),
   modules('资源', Icons.extension_outlined, Icons.extension_rounded),
@@ -386,7 +386,7 @@ class _AppShellState extends State<AppShell> {
     final television = AppScope.of(context).television;
     final tabs = _tabs;
     if (!tabs.contains(_tab)) _tab = AppTab.explore;
-    // 手机底栏是发现、历史、资源、下载、我的；追剧页本身保留，从电视端与侧栏进入。
+    // 手机底栏是首页、历史、资源、下载、我的；追剧页本身保留，从电视端与侧栏进入。
     final phoneTabs = tabs.where((tab) => tab != AppTab.follow).toList();
     if (AppScope.formFactorOf(context) == FormFactor.phone &&
         !phoneTabs.contains(_tab)) {
@@ -654,13 +654,16 @@ class _CapsuleBar extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final selectedIndex = tabs.indexOf(selected).clamp(0, tabs.length - 1);
     // 底栏专用玻璃质感（只调这个胶囊，不动 LiquidGlass 的全局默认）：
-    // 磨砂更重（blur 28）、底色更透（tint 0.85）、顶部多一层高光，
-    // 选中胶囊也带一点透明 + 细白边，整条更像 iOS 液态玻璃。
+    // 向 Muse App / iOS 26 原生底栏靠拢（模拟打磨版）：磨砂更重
+    // （blur 30）、底色更透（tint 0.7）、开 specular 边缘处理（顶部
+    // 高光线 + 柔光带 + 底部暗线 + 极淡色散描边），选中胶囊带顶部
+    // 高光渐变 + 细白边，选中图标轻微放大。
     // iOS 上走原生 UIGlassEffect（AdaptiveGlass），其余平台走模拟。
     return AdaptiveGlass(
       borderRadius: BorderRadius.circular(32),
-      blur: 28,
-      tint: 0.85,
+      blur: 30,
+      tint: 0.7,
+      specular: true,
       child: SizedBox(
         height: 64,
         child: LayoutBuilder(
@@ -692,6 +695,18 @@ class _CapsuleBar extends StatelessWidget {
                           borderRadius: BorderRadius.circular(24),
                           color: colors.secondaryContainer.withValues(
                             alpha: .8,
+                          ),
+                          // 顶部高光渐变：滑动到位时像光扫过选中胶囊。
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.white.withValues(
+                                alpha: dark ? .25 : .5,
+                              ),
+                              Colors.white.withValues(alpha: 0),
+                            ],
+                            stops: const [0, .55],
                           ),
                           border: Border.all(
                             color: Colors.white.withValues(
@@ -785,12 +800,22 @@ class _CapsuleTab extends StatelessWidget {
             children: [
               badged(
                 tab,
-                ToggleIconSwitcher(
-                  child: Icon(
-                    selected ? tab.selectedIcon : tab.icon,
-                    key: ValueKey(selected),
-                    color: color,
-                    size: 24,
+                // 选中图标轻微放大（1.12 倍），和滑动高光一起给选中态
+                // 一点“浮起”的感觉。
+                AnimatedScale(
+                  scale: selected ? 1.12 : 1,
+                  duration: Motion.of(
+                    context,
+                    const Duration(milliseconds: 250),
+                  ),
+                  curve: Motion.enter,
+                  child: ToggleIconSwitcher(
+                    child: Icon(
+                      selected ? tab.selectedIcon : tab.icon,
+                      key: ValueKey(selected),
+                      color: color,
+                      size: 24,
+                    ),
                   ),
                 ),
               ),

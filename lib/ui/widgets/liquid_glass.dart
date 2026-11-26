@@ -17,6 +17,7 @@ class LiquidGlass extends StatelessWidget {
     this.padding,
     this.margin,
     this.tint = 1.0,
+    this.specular = false,
   });
 
   final Widget child;
@@ -24,10 +25,14 @@ class LiquidGlass extends StatelessWidget {
   final double blur;
   final EdgeInsetsGeometry? padding;
   final EdgeInsetsGeometry? margin;
-  final double tint;
-
   /// 玻璃底色的浓度：1 为默认，0 为完全透明（只留实时模糊 + 细边框，
   /// 后面的内容直接透出来）。
+  final double tint;
+
+  /// 向 iOS 26 原生玻璃靠拢的边缘处理（默认关，只给底栏胶囊等
+  /// 标志性表面开）：顶部高光线 + 顶部柔光带 + 底部暗线 + 一圈极淡的
+  /// 色散渐变描边，模拟玻璃边缘的折射感。见 [GlassEdgeOverlay]。
+  final bool specular;
 
   @override
   Widget build(BuildContext context) {
@@ -73,12 +78,114 @@ class LiquidGlass extends StatelessWidget {
                 width: 1,
               ),
             ),
-            child: child,
+            child: specular
+                ? Stack(
+                    children: [
+                      child,
+                      Positioned.fill(
+                        child: GlassEdgeOverlay(borderRadius: borderRadius),
+                      ),
+                    ],
+                  )
+                : child,
           ),
         ),
       ),
     );
   }
+}
+
+/// 玻璃边缘高光层（不拦截手势）：顶部一条亮线（中间亮、两端收）、
+/// 上半部一道柔光带、底部一条暗线，再加一圈极淡的色散渐变描边
+/// （红→橙→绿→蓝→紫，alpha 约 0.18），模拟 iOS 26 原生液态玻璃
+/// 边缘的折射彩边。Flutter 模拟做不出真正的折射，这里只做观感靠拢。
+class GlassEdgeOverlay extends StatelessWidget {
+  const GlassEdgeOverlay({super.key, required this.borderRadius});
+
+  final BorderRadius borderRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return IgnorePointer(
+      child: CustomPaint(
+        painter: _GlassEdgePainter(borderRadius: borderRadius, dark: dark),
+        size: Size.infinite,
+      ),
+    );
+  }
+}
+
+class _GlassEdgePainter extends CustomPainter {
+  const _GlassEdgePainter({required this.borderRadius, required this.dark});
+
+  final BorderRadius borderRadius;
+  final bool dark;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final outer = borderRadius.toRRect(rect);
+    canvas.save();
+    canvas.clipRRect(outer);
+    // 顶部高光线：横向中间最亮、向两端渐隐。
+    final topLine = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          Colors.white.withValues(alpha: 0),
+          Colors.white.withValues(alpha: dark ? .5 : .7),
+          Colors.white.withValues(alpha: 0),
+        ],
+        stops: const [0, .5, 1],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, 2));
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, 1.4), topLine);
+    // 顶部柔光带：上半部由亮渐隐，模拟玻璃上沿的受光面。
+    final sheen = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          Colors.white.withValues(alpha: dark ? .10 : .16),
+          Colors.white.withValues(alpha: 0),
+        ],
+        stops: const [0, 1],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height * .5));
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height * .5), sheen);
+    // 底部暗线：和顶部亮线成对，衬出玻璃厚度。
+    final bottomLine = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          Colors.black.withValues(alpha: 0),
+          Colors.black.withValues(alpha: dark ? .35 : .2),
+          Colors.black.withValues(alpha: 0),
+        ],
+        stops: const [0, .5, 1],
+      ).createShader(Rect.fromLTWH(0, size.height - 2, size.width, 2));
+    canvas.drawRect(
+      Rect.fromLTWH(0, size.height - 1.4, size.width, 1.4),
+      bottomLine,
+    );
+    canvas.restore();
+    // 色散描边：一圈极淡的彩虹渐变，收在圆角内侧 0.5px。
+    final edge = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..shader = const SweepGradient(
+        colors: [
+          Color(0x2EFF8A80),
+          Color(0x2EFFD180),
+          Color(0x2ECCFF90),
+          Color(0x2E80D8FF),
+          Color(0x2EEA80FC),
+          Color(0x2EFF8A80),
+        ],
+      ).createShader(rect);
+    canvas.drawRRect(outer.deflate(.5), edge);
+  }
+
+  @override
+  bool shouldRepaint(covariant _GlassEdgePainter oldDelegate) =>
+      oldDelegate.dark != dark || oldDelegate.borderRadius != borderRadius;
 }
 
 /// 液态玻璃提示条：全 App 的 SnackBar 统一走这里。默认 SnackBar 是
@@ -173,6 +280,20 @@ class GlassSegmentedControl extends StatelessWidget {
                           borderRadius: BorderRadius.circular(18),
                           color: colors.secondaryContainer.withValues(
                             alpha: .85,
+                          ),
+                          // 选中胶囊顶部压一层高光渐变（上亮下无），
+                          // 滑动时像光扫过玻璃面。
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.white.withValues(alpha: .38),
+                              Colors.white.withValues(alpha: 0),
+                            ],
+                            stops: const [0, .55],
+                          ),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: .35),
                           ),
                         ),
                       ),
