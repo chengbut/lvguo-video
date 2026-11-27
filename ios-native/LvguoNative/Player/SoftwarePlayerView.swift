@@ -24,20 +24,31 @@ import UIKit
 /// 把级别提到 .info：软件内核会话期间，av_log 转发
 /// （来源文件固定为 MEPlayerItem.swift）按「FFmpeg：」
 /// 前缀进播放调试日记——warning 及以上全量、info
-/// 每会话前 100 行封顶、verbose 及以下不收、连续
-/// 重复行折叠计数；KSPlayer 自身的 Swift 日志只收
+/// 每会话前 100 行封顶、verbose 及以下不收、同类
+/// 行折叠计数；KSPlayer 自身的 Swift 日志只收
 /// error 及以上（前缀「KSPlayer：」，解码失败多走
 /// 这条）。地址按宿主既有口径脱敏（完整地址替换成
 /// 类型@主机），单行截断 300 字。
+/// 折叠口径（修复轮 9 收紧）：旧版只折叠逐字相同的
+/// 连续行，而 build 8 真机的 NAL 错误每条数字都不同
+/// （「Invalid NAL unit size (1489824395 > 407)」）、
+/// 还两类交替出现，折叠完全失效、把 500 条日记环
+/// 刷爆并挤掉关键行。新版按「数字归一化后的文本」
+/// 认同类：同类只落首条，其余计数，计数在下一条
+/// 不同日志落盘前、会话结束时、以及冲到
+/// 100/1000/10000 时各补一行汇总。
 final class FFmpegDiaryLogHandler: LogHandler {
     static let shared = FFmpegDiaryLogHandler()
 
     private let lock = NSLock()
     private var sessionActive = false
     private var infoForwarded = 0
-    private var lastLine: String?
-    private var lastPrefix = ""
-    private var repeatCount = 0
+    /// 已落盘过的折叠键（前缀 + 数字归一化文本）
+    private var writtenFoldKeys: Set<String> = []
+    /// 折叠键 → 被压住的重复次数
+    private var foldCounts: [String: Int] = [:]
+    /// 折叠键 → 首条的前缀与原文（汇总行引用）
+    private var foldHeads: [String: (prefix: String, sample: String)] = [:]
     private static let infoLimit = 100
 
     private init() {}
@@ -50,20 +61,20 @@ final class FFmpegDiaryLogHandler: LogHandler {
 
     func beginSession() {
         lock.lock()
-        flushRepeatsLocked()
+        flushFoldsLocked()
         sessionActive = true
         infoForwarded = 0
-        lastLine = nil
-        repeatCount = 0
+        writtenFoldKeys.removeAll()
+        foldHeads.removeAll()
         lock.unlock()
     }
 
     func endSession() {
         lock.lock()
-        flushRepeatsLocked()
+        flushFoldsLocked()
         sessionActive = false
-        lastLine = nil
-        repeatCount = 0
+        writtenFoldKeys.removeAll()
+        foldHeads.removeAll()
         lock.unlock()
     }
 
@@ -102,26 +113,60 @@ final class FFmpegDiaryLogHandler: LogHandler {
         if text.count > 300 {
             text = String(text.prefix(300)) + "…"
         }
-        let entry = "\(prefix)：\(text)"
-        if entry == lastLine {
-            repeatCount += 1
+        // 同类折叠（修复轮 9）：数字归一化后同键的行
+        // 只落首条，其余计数——NAL 类错误每条数字都
+        // 不同、逐字折叠对它无效
+        let foldKey = "\(prefix)|\(Self.foldKeyText(text))"
+        if writtenFoldKeys.contains(foldKey) {
+            let count = (foldCounts[foldKey] ?? 0) + 1
+            foldCounts[foldKey] = count
+            if count == 100 || count == 1000 || count == 10000 {
+                writeFoldSummaryLocked(key: foldKey, count: count)
+                foldCounts[foldKey] = 0
+            }
             return
         }
-        flushRepeatsLocked()
-        lastLine = entry
-        lastPrefix = prefix
-        DiaryStore.shared.add(entry)
+        flushFoldsLocked()
+        writtenFoldKeys.insert(foldKey)
+        foldHeads[foldKey] = (prefix, text)
+        DiaryStore.shared.add("\(prefix)：\(text)")
     }
 
-    /// 折叠的重复行补一行计数（须持锁调用）
-    private func flushRepeatsLocked() {
-        guard repeatCount > 0, lastLine != nil else {
-            repeatCount = 0
-            return
+    /// 折叠键文本：连续数字串归一成一个 #，其余原样
+    private static func foldKeyText(_ text: String) -> String {
+        var result = ""
+        var inDigits = false
+        for character in text {
+            if character.isNumber {
+                if !inDigits { result.append("#") }
+                inDigits = true
+            } else {
+                result.append(character)
+                inDigits = false
+            }
         }
-        let count = repeatCount
-        repeatCount = 0
-        DiaryStore.shared.add("\(lastPrefix)：（上一条重复 \(count) 次）")
+        return result
+    }
+
+    /// 一条折叠汇总（须持锁调用）：前缀 + 次数 + 首条原文
+    private func writeFoldSummaryLocked(key: String, count: Int) {
+        guard let head = foldHeads[key] else { return }
+        var sample = head.sample
+        if sample.count > 120 {
+            sample = String(sample.prefix(120)) + "…"
+        }
+        DiaryStore.shared.add(
+            "\(head.prefix)：（同类日志重复 \(count) 次，已折叠，首条：\(sample)）"
+        )
+    }
+
+    /// 把所有待汇总的折叠计数落盘（须持锁调用）
+    private func flushFoldsLocked() {
+        for key in foldCounts.keys.sorted() {
+            guard let count = foldCounts[key], count > 0 else { continue }
+            writeFoldSummaryLocked(key: key, count: count)
+        }
+        foldCounts.removeAll()
     }
 }
 

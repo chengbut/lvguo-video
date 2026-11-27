@@ -1104,17 +1104,17 @@ final class MediaFormatProbe: NSObject, URLSessionDataDelegate {
 
 // MARK: - MP4 结构探针
 
-/// MP4 结构探针（修复轮 6 立项，修复轮 8 改盒子步进）：
+/// MP4 结构探针（修复轮 6 立项，修复轮 8 改盒子步进，
+/// 修复轮 9 改结构化结论）：
 /// 格式探针判定为 MP4 后，解析盒子结构——ftyp 主品牌/
 /// 兼容品牌、moov 位置、各轨道 stsd 首条目的编码
 /// 类型与视频分辨率——解释 AVPlayer 在盒子/编码层
 /// 拒收（-12848）的深层原因、给后续对齐轮留档。
-/// 本轮只记日记，不据此改路由。
 /// 修复轮 8 改步进的理由：旧版头部 64KB + 尾部 128KB
 /// 两窗口都定位不到 moov（build 7 真机：尾部拉取
 /// 206 成功、字节数足，确认 moov 真不在窗口内——
-/// 它在文件中部）。新版从文件头按盒子链步进：读
-/// 盒头（首步 64 字节兼读 ftyp 内容，后续每步
+/// 它在文件中部）。步进法：从文件头按盒子链步进：
+/// 读盒头（首步 64 字节兼读 ftyp 内容，后续每步
 /// 16 字节）→ 按 size 跳下一个，64 位 largesize
 /// 与 size=0（延伸到文件尾）都处理，每步一次小
 /// Range，最多 64 步；找到 moov 后整段拉回（上限
@@ -1123,7 +1123,106 @@ final class MediaFormatProbe: NSObject, URLSessionDataDelegate {
 /// （sinf/schm/tenc、stbl 的 senc）有无。任一步
 /// 失败只记一行结论并写明卡在哪个偏移/哪一步，
 /// 绝不阻断播放。
+/// 修复轮 9：结论改结构化（Findings）——除日记行
+/// 外带每轨的条目类型/加密判定、schm 的方案名
+/// （scheme_type，如 cenc/cbc1）与 tenc 默认 KID
+/// 有无（只记有无，绝不记 KID 值），供变体审计与
+/// 「明文优先」改选在引擎侧消费；探针实例自持
+/// （start 后 retain 自身、结论送达后释放），调用
+/// 方无需再单独持有。
 final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
+    /// 一条轨道的结构结论（stsd 首条目）
+    struct TrackInfo {
+        var handler: String = ""
+        var codec: String = ""
+        var width: Int = 0
+        var height: Int = 0
+        var hasAvcC: Bool = false
+        var hasHvcC: Bool = false
+        /// 视频条目子盒是否真扫过（没扫过不写「无 avcC/hvcC」）
+        var configScanned: Bool = false
+        var hasSinf: Bool = false
+        var hasSchm: Bool = false
+        /// schm 的 scheme_type（如 cenc/cbc1），无 schm 时为空
+        var scheme: String = ""
+        var hasTenc: Bool = false
+        /// tenc 默认 KID 是否存在（16 字节任一非零）；
+        /// 只记有无，KID 值本身从不读取落盘
+        var hasDefaultKID: Bool = false
+        var hasSenc: Bool = false
+
+        /// 加密判定：条目类型本身是 encv/enca，或带
+        /// 加密信息盒（sinf）/样本加密盒（senc）
+        var encrypted: Bool {
+            codec == "encv" || codec == "enca" || hasSinf || hasSenc
+        }
+
+        /// 日记行片段（与旧版逐轨一行的格式一致，
+        /// 修复轮 9 起加密轨补方案名与默认 KID 有无）
+        var line: String {
+            switch handler {
+            case "vide":
+                var text = "视频 \(codec)"
+                if width > 0, height > 0 {
+                    text += " \(width)×\(height)"
+                }
+                var extras: [String] = []
+                if hasAvcC { extras.append("avcC 有") }
+                if hasHvcC { extras.append("hvcC 有") }
+                if configScanned, !hasAvcC, !hasHvcC, codec != "encv" {
+                    extras.append("无 avcC/hvcC")
+                }
+                extras.append(contentsOf: encryptionExtras)
+                if !extras.isEmpty {
+                    text += "（\(extras.joined(separator: " · "))）"
+                }
+                return text
+            case "soun":
+                var text = "音频 \(codec)"
+                let extras = encryptionExtras
+                if !extras.isEmpty {
+                    text += "（\(extras.joined(separator: " · "))）"
+                }
+                return text
+            default:
+                return "轨道(\(handler.isEmpty ? "?" : handler)) \(codec)"
+            }
+        }
+
+        /// sinf/schm/tenc/senc 一组加密标记（视频/音频共用）
+        private var encryptionExtras: [String] {
+            var extras: [String] = []
+            if hasSinf || hasSchm || hasTenc {
+                var enc: [String] = []
+                if hasSinf { enc.append("sinf 有") }
+                if hasSchm { enc.append("schm 有") }
+                if hasTenc { enc.append("tenc 有") }
+                extras.append(enc.joined(separator: "/"))
+            }
+            if hasTenc {
+                if !scheme.isEmpty { extras.append("方案 \(scheme)") }
+                extras.append(hasDefaultKID ? "默认 KID 有" : "默认 KID 无")
+            }
+            if hasSenc { extras.append("senc 有") }
+            return extras
+        }
+    }
+
+    /// 结构化结论：line 是完整日记行（旧口径），其余
+    /// 字段供变体审计/改选消费；moovFound=false 时
+    /// failureNote 给一句简短原因（审计行用）
+    struct Findings {
+        var line: String = ""
+        var moovFound: Bool = false
+        var video: TrackInfo?
+        var audio: TrackInfo?
+        var failureNote: String = ""
+
+        var encrypted: Bool {
+            (video?.encrypted ?? false) || (audio?.encrypted ?? false)
+        }
+    }
+
     private static let maxSteps = 64
     private static let moovFetchCap = 4 * 1024 * 1024
     private static let firstFetchBytes = 64
@@ -1133,10 +1232,11 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
     private var totalLength: Int64 = -1
     private var status = 0
     private var finished = false
+    private var selfRetain: MP4StructureProbe?
     private let url: URL
     private let headers: [String: String]
     private let sourceId: String
-    private let completion: (String) -> Void
+    private let completion: (Findings) -> Void
 
     // 步进状态：mode 0 = 步进盒头，1 = 拉 moov 盒身
     private var mode = 0
@@ -1150,7 +1250,7 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
 
     private init(
         url: URL, headers: [String: String], sourceId: String,
-        completion: @escaping (String) -> Void
+        completion: @escaping (Findings) -> Void
     ) {
         self.url = url
         self.headers = headers
@@ -1160,12 +1260,16 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
 
     static func start(
         url: URL, headers: [String: String], sourceId: String,
-        completion: @escaping (String) -> Void
+        completion: @escaping (Findings) -> Void
     ) -> MP4StructureProbe {
         let probe = MP4StructureProbe(
             url: url, headers: headers, sourceId: sourceId,
             completion: completion
         )
+        // 自持：审计会并发起多个探针且结论异步到达，
+        // 调用方不再逐个持有（引擎原有的 active 引用
+        // 保留也无妨）；结论送达后在 finish 里释放
+        probe.selfRetain = probe
         probe.fetch(range: "bytes=0-\(firstFetchBytes - 1)")
         return probe
     }
@@ -1193,13 +1297,21 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         session.dataTask(with: request).resume()
     }
 
-    private func finish(_ line: String) {
+    private func finish(_ findings: Findings) {
         guard !finished else { return }
         finished = true
         session?.invalidateAndCancel()
         session = nil
         let completion = self.completion
-        DispatchQueue.main.async { completion(line) }
+        DispatchQueue.main.async {
+            completion(findings)
+            self.selfRetain = nil
+        }
+    }
+
+    /// 失败收尾：只有日记行与一句简短原因（审计行用）
+    private func finishFailure(_ line: String, note: String) {
+        finish(Findings(line: line, moovFound: false, failureNote: note))
     }
 
     private var summaryPrefix: String {
@@ -1244,9 +1356,9 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         if let error {
             let nsError = error as NSError
             if mode == 0 {
-                finish("结构探针：步进卡在偏移 \(offset)（第 \(step + 1) 步盒头拉取失败，\(nsError.domain) \(nsError.code)）")
+                finishFailure("结构探针：步进卡在偏移 \(offset)（第 \(step + 1) 步盒头拉取失败，\(nsError.domain) \(nsError.code)）", note: "盒头拉取失败")
             } else {
-                finish("结构探针：moov 在偏移 \(moovStart) 已定位，但盒身拉取失败（\(nsError.domain) \(nsError.code)）")
+                finishFailure("结构探针：moov 在偏移 \(moovStart) 已定位，但盒身拉取失败（\(nsError.domain) \(nsError.code)）", note: "moov 盒身拉取失败")
             }
             return
         }
@@ -1268,16 +1380,16 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
             if step == 0 {
                 analyzeWholeBuffer(bytes)
             } else {
-                finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头拉取未按 Range 返回，状态 200）")
+                finishFailure("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头拉取未按 Range 返回，状态 200）", note: "未按 Range 返回")
             }
             return
         }
         guard status == 206 else {
-            finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头拉取状态 \(status)，\(bytes.count) 字节）")
+            finishFailure("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头拉取状态 \(status)，\(bytes.count) 字节）", note: "盒头拉取状态 \(status)")
             return
         }
         guard bytes.count >= 8 else {
-            finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头只拿到 \(bytes.count) 字节）")
+            finishFailure("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头只拿到 \(bytes.count) 字节）", note: "盒头字节不足")
             return
         }
         var size = Int64(Self.u32(bytes, 0))
@@ -1285,7 +1397,7 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         var header = 8
         if size == 1 {
             guard bytes.count >= 16 else {
-                finish("结构探针：步进卡在偏移 \(at)（\(type) 盒 largesize 头不全，\(bytes.count) 字节）")
+                finishFailure("结构探针：步进卡在偏移 \(at)（\(type) 盒 largesize 头不全，\(bytes.count) 字节）", note: "盒头不全")
                 return
             }
             size = Int64(Self.u64(bytes, 8))
@@ -1299,12 +1411,12 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
                     header: header
                 )
             } else {
-                finish("结构探针：\(summaryPrefix)步进到偏移 \(at) 的 \(type) 盒（大小 0，延伸到文件尾），其后无盒子，未找到 moov（链：\(chainText)）")
+                finishFailure("结构探针：\(summaryPrefix)步进到偏移 \(at) 的 \(type) 盒（大小 0，延伸到文件尾），其后无盒子，未找到 moov（链：\(chainText)）", note: "moov 未定位")
             }
             return
         }
         guard size >= Int64(header), !type.isEmpty else {
-            finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头尺寸异常：\(type) \(size)）")
+            finishFailure("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头尺寸异常：\(type) \(size)）", note: "盒头尺寸异常")
             return
         }
         if step == 0, type == "ftyp" {
@@ -1318,11 +1430,11 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         step += 1
         offset = at + size
         if step >= Self.maxSteps {
-            finish("结构探针：\(summaryPrefix)步进 \(Self.maxSteps) 个盒子仍未找到 moov（链：\(chainText)，停在偏移 \(offset)）")
+            finishFailure("结构探针：\(summaryPrefix)步进 \(Self.maxSteps) 个盒子仍未找到 moov（链：\(chainText)，停在偏移 \(offset)）", note: "moov 未定位")
             return
         }
         if totalLength > 0, offset >= totalLength {
-            finish("结构探针：\(summaryPrefix)步进到文件尾（偏移 \(offset) / 总长 \(totalLength)）未找到 moov（链：\(chainText)）")
+            finishFailure("结构探针：\(summaryPrefix)步进到文件尾（偏移 \(offset) / 总长 \(totalLength)）未找到 moov（链：\(chainText)）", note: "moov 未定位")
             return
         }
         fetch(range: "bytes=\(offset)-\(offset + 15)")
@@ -1345,10 +1457,10 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
     private func handleMoov() {
         let bytes = [UInt8](received)
         guard status == 206 else {
-            finish("结构探针：moov 在偏移 \(moovStart) 已定位，但盒身拉取状态 \(status)（\(bytes.count) 字节）")
+            finishFailure("结构探针：moov 在偏移 \(moovStart) 已定位，但盒身拉取状态 \(status)（\(bytes.count) 字节）", note: "moov 盒身拉取状态 \(status)")
             return
         }
-        let tracks = Self.parseMoov(
+        let tracks = Self.parseTracks(
             bytes, from: moovHeader, to: bytes.count,
             baseOffset: Int(moovStart)
         )
@@ -1359,8 +1471,12 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         }
         line += tracks.isEmpty
             ? " · moov 内未解析出轨道"
-            : " · \(tracks.joined(separator: " · "))"
-        finish(line)
+            : " · \(tracks.map(\.line).joined(separator: " · "))"
+        finish(Findings(
+            line: line, moovFound: true,
+            video: tracks.first(where: { $0.handler == "vide" }),
+            audio: tracks.first(where: { $0.handler == "soun" })
+        ))
     }
 
     /// 服务器回 200 全量时的本地步进（盒子链口径与
@@ -1373,7 +1489,7 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         var names: [String] = []
         for box in boxes {
             if box.type == "moov" {
-                let tracks = box.truncated ? [] : Self.parseMoov(
+                let tracks = box.truncated ? [] : Self.parseTracks(
                     bytes, from: box.start + box.header,
                     to: box.start + box.size, baseOffset: 0
                 )
@@ -1382,13 +1498,17 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
                     + " · moov 在偏移 \(box.start)（大小 \(box.size)，服务器未按 Range 返回、整文件本地解析）"
                 line += tracks.isEmpty
                     ? " · moov 内未解析出轨道"
-                    : " · \(tracks.joined(separator: " · "))"
-                finish(line)
+                    : " · \(tracks.map(\.line).joined(separator: " · "))"
+                finish(Findings(
+                    line: line, moovFound: true,
+                    video: tracks.first(where: { $0.handler == "vide" }),
+                    audio: tracks.first(where: { $0.handler == "soun" })
+                ))
                 return
             }
             names.append(box.type == "mdat" ? "mdat(\(box.size / 1_048_576)MB)" : box.type)
         }
-        finish("结构探针：\(summaryPrefix)整文件本地步进未找到 moov（链：\(names.isEmpty ? "（无）" : names.joined(separator: " → "))）")
+        finishFailure("结构探针：\(summaryPrefix)整文件本地步进未找到 moov（链：\(names.isEmpty ? "（无）" : names.joined(separator: " → "))）", note: "moov 未定位")
     }
 
     // MARK: 盒子解析（纯函数，只读字节）
@@ -1473,13 +1593,16 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         return brands.isEmpty ? "ftyp" : "ftyp \(brands.joined(separator: " · "))"
     }
 
-    /// 解析 moov 内的 trak：hdlr 定轨道类型，stsd 首
-    /// 条目给编码类型，视频条目另带宽高与条目子盒
-    /// （avcC/hvcC、sinf/schm/tenc）及 senc 有无
-    private static func parseMoov(
+    /// 解析 moov 内的 trak（修复轮 9 改结构化）：
+    /// hdlr 定轨道类型，stsd 首条目给编码类型；
+    /// 视频条目另带宽高与条目子盒（avcC/hvcC、
+    /// sinf/schm/tenc），音频条目同样扫 sinf；
+    /// stbl 的 senc 有无两轨都记。日记行由
+    /// TrackInfo.line 按同一份结论拼装。
+    private static func parseTracks(
         _ bytes: [UInt8], from: Int, to: Int, baseOffset: Int
-    ) -> [String] {
-        var lines: [String] = []
+    ) -> [TrackInfo] {
+        var tracks: [TrackInfo] = []
         for trak in scanBoxes(bytes, from: from, to: to, baseOffset: baseOffset)
         where trak.type == "trak" && !trak.truncated {
             let trakStart = trak.start - baseOffset
@@ -1520,75 +1643,114 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
             let entryAt = stsd.start - baseOffset + stsd.header + 8
             guard entryAt + 8 <= bytes.count else { continue }
             let codec = typeName(bytes, entryAt + 4)
+            var info = TrackInfo()
+            info.handler = handler
+            info.codec = codec
+            info.hasSenc = hasSenc
+            let entrySize = u32(bytes, entryAt)
             switch handler {
             case "vide":
                 // 视觉样本条目：宽在条目头 +32、高 +34
-                var line = "视频 \(codec)"
                 if entryAt + 36 <= bytes.count {
-                    let width = u16(bytes, entryAt + 32)
-                    let height = u16(bytes, entryAt + 34)
-                    if width > 0, height > 0 {
-                        line += " \(width)×\(height)"
-                    }
+                    info.width = u16(bytes, entryAt + 32)
+                    info.height = u16(bytes, entryAt + 34)
                 }
-                // 条目子盒（修复轮 8）：视觉条目定长头
-                // 86 字节之后是配置/加密子盒——avcC/
-                // hvcC 决定解码器能否拿到参数集，sinf
-                // （schm/schi→tenc）是加密标记
-                var extras: [String] = []
-                let entrySize = u32(bytes, entryAt)
+                // 条目子盒：视觉条目定长头 86 字节之后
+                // 是配置/加密子盒——avcC/hvcC 决定解码
+                // 器能否拿到参数集，sinf 是加密标记
                 if entrySize > 86, entryAt + 86 < bytes.count {
+                    info.configScanned = true
                     let children = scanBoxes(
                         bytes, from: entryAt + 86,
                         to: min(entryAt + entrySize, bytes.count),
                         baseOffset: baseOffset
                     )
                     let names = children.map(\.type)
-                    if names.contains("avcC") { extras.append("avcC 有") }
-                    if names.contains("hvcC") { extras.append("hvcC 有") }
-                    if !names.contains("avcC"), !names.contains("hvcC"),
-                       codec != "encv" {
-                        extras.append("无 avcC/hvcC")
-                    }
+                    info.hasAvcC = names.contains("avcC")
+                    info.hasHvcC = names.contains("hvcC")
                     if let sinf = children.first(where: { $0.type == "sinf" }) {
-                        var enc = ["sinf 有"]
-                        let sinfStart = sinf.start - baseOffset
-                        let sinfChildren = scanBoxes(
-                            bytes, from: sinfStart + sinf.header,
-                            to: min(sinfStart + sinf.size, bytes.count),
-                            baseOffset: baseOffset
+                        info.hasSinf = true
+                        let parsed = parseSinf(
+                            bytes, sinf: sinf, baseOffset: baseOffset
                         )
-                        if sinfChildren.contains(where: { $0.type == "schm" }) {
-                            enc.append("schm 有")
-                        }
-                        if let schi = sinfChildren.first(
-                            where: { $0.type == "schi" }
-                        ) {
-                            let schiStart = schi.start - baseOffset
-                            let schiChildren = scanBoxes(
-                                bytes, from: schiStart + schi.header,
-                                to: min(schiStart + schi.size, bytes.count),
-                                baseOffset: baseOffset
-                            )
-                            if schiChildren.contains(where: { $0.type == "tenc" }) {
-                                enc.append("tenc 有")
-                            }
-                        }
-                        extras.append(enc.joined(separator: "/"))
+                        info.hasSchm = parsed.hasSchm
+                        info.scheme = parsed.scheme
+                        info.hasTenc = parsed.hasTenc
+                        info.hasDefaultKID = parsed.hasDefaultKID
                     }
                 }
-                if hasSenc { extras.append("senc 有") }
-                if !extras.isEmpty {
-                    line += "（\(extras.joined(separator: " · "))）"
-                }
-                lines.append(line)
             case "soun":
-                lines.append("音频 \(codec)" + (hasSenc ? "（senc 有）" : ""))
+                // 音频样本条目定长头 36 字节（条目头 8
+                // + 样本条目基类 8 + 音频字段 20），其后
+                // 是配置/加密子盒（esds、sinf 等）
+                if entrySize > 36, entryAt + 36 < bytes.count {
+                    let children = scanBoxes(
+                        bytes, from: entryAt + 36,
+                        to: min(entryAt + entrySize, bytes.count),
+                        baseOffset: baseOffset
+                    )
+                    if let sinf = children.first(where: { $0.type == "sinf" }) {
+                        info.hasSinf = true
+                        let parsed = parseSinf(
+                            bytes, sinf: sinf, baseOffset: baseOffset
+                        )
+                        info.hasSchm = parsed.hasSchm
+                        info.scheme = parsed.scheme
+                        info.hasTenc = parsed.hasTenc
+                        info.hasDefaultKID = parsed.hasDefaultKID
+                    }
+                }
             default:
-                lines.append("轨道(\(handler.isEmpty ? "?" : handler)) \(codec)")
+                break
+            }
+            tracks.append(info)
+        }
+        return tracks
+    }
+
+    /// sinf 子树解析：schm 的方案名（scheme_type）
+    /// 与 schi→tenc 的默认 KID 有无。schm 内容 =
+    /// 版本/标志(4) + scheme_type(4)；tenc 内容 =
+    /// 版本/标志(4) +（v1 图案 2 字节 / v0 保留
+    /// 1 字节）+ is_protected(1) + IV 大小(1) +
+    /// 默认 KID(16)——KID 字节只判是否全零，
+    /// 值本身从不取出、从不落盘。
+    private static func parseSinf(
+        _ bytes: [UInt8], sinf: Box, baseOffset: Int
+    ) -> (scheme: String, hasSchm: Bool, hasTenc: Bool, hasDefaultKID: Bool) {
+        var result = (
+            scheme: "", hasSchm: false, hasTenc: false, hasDefaultKID: false
+        )
+        let sinfStart = sinf.start - baseOffset
+        let children = scanBoxes(
+            bytes, from: sinfStart + sinf.header,
+            to: min(sinfStart + sinf.size, bytes.count),
+            baseOffset: baseOffset
+        )
+        if let schm = children.first(where: { $0.type == "schm" }) {
+            result.hasSchm = true
+            let at = schm.start - baseOffset + schm.header + 4
+            result.scheme = typeName(bytes, at)
+        }
+        if let schi = children.first(where: { $0.type == "schi" }) {
+            let schiStart = schi.start - baseOffset
+            let schiChildren = scanBoxes(
+                bytes, from: schiStart + schi.header,
+                to: min(schiStart + schi.size, bytes.count),
+                baseOffset: baseOffset
+            )
+            if let tenc = schiChildren.first(where: { $0.type == "tenc" }) {
+                result.hasTenc = true
+                let content = tenc.start - baseOffset + tenc.header
+                let version = content < bytes.count ? Int(bytes[content]) : 0
+                let kidAt = content + (version == 1 ? 8 : 7)
+                if kidAt + 16 <= bytes.count {
+                    result.hasDefaultKID = bytes[kidAt..<(kidAt + 16)]
+                        .contains { $0 != 0 }
+                }
             }
         }
-        return lines
+        return result
     }
 }
 
@@ -1739,6 +1901,15 @@ final class PlaybackEngine: ObservableObject {
     /// MP4 结构探针（修复轮 6，日志级）：格式探针判定
     /// 为 MP4 时并发跑，结果只进日记、不改路由
     private var activeStructureProbe: MP4StructureProbe?
+    /// 变体审计（修复轮 9）：本次 load 的审计目标是否
+    /// 已覆盖所选地址——覆盖时格式探针完成回调不再
+    /// 单独起结构探针（审计探针的完整结构行会落盘，
+    /// 避免同一地址探两遍）
+    private var auditCoversChosen = false
+    /// 本次 load 经变体审计定性为「全部直链变体均
+    /// 加密」：failNow 用如实文案（通用播放器无密钥
+    /// 不可解），每次 load 开头重置、审计门控命中时置位
+    private var allVariantsEncrypted = false
     private var itemStatusObservation: NSKeyValueObservation?
     private var presentationObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
@@ -1833,7 +2004,17 @@ final class PlaybackEngine: ObservableObject {
         triedDirectFallback = false
         proxyFailureRaw = ""
         currentLoadUsedProxy = false
+        allVariantsEncrypted = false
         DiaryStore.shared.add("播放计划：\(Self.planSummary(request))")
+        // 变体审计目标（修复轮 9）：本地文件不审计；
+        // 其余计划把全部可播变体（含所选地址的隐含
+        // 目标）列出来，所选地址被覆盖时格式探针不
+        // 再单独起结构探针（见下方审计节）
+        let auditTargets = request.isLocal
+            ? [] : Self.variantAuditTargets(for: request)
+        auditCoversChosen = auditTargets.contains {
+            $0.isSelected && $0.url != nil && $0.url == request.url
+        }
         // 直链计划：并发发一次 16 字节格式探针（不阻断
         // 播放），结果进日记；失败定性与失败页摘要用它
         activeProbe = nil
@@ -1849,13 +2030,16 @@ final class PlaybackEngine: ObservableObject {
                     // MP4 结构探针（修复轮 6）：解析 ftyp
                     // 品牌 / moov 位置 / 轨道编码，解释
                     // 系统内核 -12848 拒收的深层原因；
-                    // 只记日记，不据此改路由
-                    if verdict.container == "MP4", let probeURL = request.url {
+                    // 只记日记，不据此改路由。修复轮 9：
+                    // 变体审计已覆盖所选地址时跳过（审计
+                    // 探针会落同一份完整结构行，不重复探）
+                    if verdict.container == "MP4", !self.auditCoversChosen,
+                       let probeURL = request.url {
                         self.activeStructureProbe = MP4StructureProbe.start(
                             url: probeURL, headers: request.headers,
                             sourceId: request.sourceId
-                        ) { line in
-                            DiaryStore.shared.add(line)
+                        ) { findings in
+                            DiaryStore.shared.add(findings.line)
                         }
                     }
                     // 探针晚于最终失败到达时，补进失败页
@@ -1889,10 +2073,42 @@ final class PlaybackEngine: ObservableObject {
             }
         }
 
-        // 双内核路由：有记忆先用记忆的内核；没记忆先走
-        // 系统内核，探针分流与失败换内核在后续环节处理。
-        // 只有播放列表文本、没有地址的计划进不了软件
-        // 内核（KSPlayer 需要真实地址），固定系统内核
+        // 变体审计 + 明文优先（修复轮 9）：审计并发跑、
+        // 逐变体落结论行；有多个不同直链地址时先门控
+        // ——所选变体判定加密才改选明文变体（判定依
+        // 据只有 stsd 条目类型这一通用容器事实，无
+        // 任何来源/模块特判），全加密则如实失败。
+        // 判定未明（探针失败/非 MP4）一律按原计划开，
+        // 行为与旧版一致。
+        if !auditTargets.isEmpty {
+            let httpTargets = auditTargets.filter { Self.isHTTP($0.url) }
+            let distinctURLs = Set(httpTargets.compactMap { $0.url?.absoluteString })
+            let gateSelected = httpTargets.first(where: { $0.isSelected })
+            if request.url != nil, distinctURLs.count >= 2, let gateSelected {
+                loadingMessage = "正在检查可用变体"
+                runVariantGate(
+                    targets: auditTargets, selected: gateSelected,
+                    request: request, generation: generation
+                )
+                return
+            }
+            probeAllVariants(
+                targets: auditTargets, sourceId: request.sourceId,
+                generation: generation, completion: nil
+            )
+        }
+        openWithRouting(request, generation: generation)
+    }
+
+    /// 双内核路由：有记忆先用记忆的内核；没记忆先走
+    /// 系统内核，探针分流与失败换内核在后续环节处理。
+    /// 只有播放列表文本、没有地址的计划进不了软件
+    /// 内核（KSPlayer 需要真实地址），固定系统内核。
+    /// 变体改选后以最终打开的请求记账（currentRequest
+    /// 在此统一落定，内核记忆按它所属来源记，与改
+    /// 选前同一口径）。
+    private func openWithRouting(_ request: PlaybackRequest, generation: Int) {
+        currentRequest = request
         let memoryKernel = KernelMemoryStore.shared.kernel(for: request)
         if let memoryKernel {
             DiaryStore.shared.add(
@@ -1904,6 +2120,260 @@ final class PlaybackEngine: ObservableObject {
             return
         }
         installAVPlayer(request, generation: generation)
+    }
+
+    // MARK: 变体审计与明文优先（修复轮 9）
+
+    /// 一个审计目标：计划里的一个可播变体（或所选
+    /// 地址不在变体表时的隐含目标）。number 是审计
+    /// 行与改选行共用的序号（1 起，按计划顺序）。
+    private struct VariantAuditTarget {
+        var number: Int
+        var label: String
+        var url: URL?
+        var playlistText: String?
+        var headers: [String: String]
+        var isSelected: Bool
+        /// 改选时 withVariant 的原材料；隐含目标为 nil
+        var variant: PlaybackVariant?
+    }
+
+    /// 单个变体的加密定性：只来自结构探针的 stsd
+    /// 条目类型（encv/enca 或加密盒）这一通用容器
+    /// 事实；探不到、非 MP4、未解析出轨道一律
+    /// unknown——unknown 永不当明文用，也不据此失败
+    private enum VariantVerdict {
+        case encrypted(scheme: String, hasDefaultKID: Bool)
+        case plaintext
+        case unknown(String)
+    }
+
+    private static func isHTTP(_ url: URL?) -> Bool {
+        guard let scheme = url?.scheme else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    /// 计划 → 审计目标：变体表按原顺序编号；所选
+    /// 地址不在表中（外层字段直给）时补一个隐含
+    /// 目标占首位，保证所选变体永远有审计结论
+    private static func variantAuditTargets(
+        for request: PlaybackRequest
+    ) -> [VariantAuditTarget] {
+        var targets: [VariantAuditTarget] = []
+        var represented = false
+        for variant in request.variants where variant.isPlayable {
+            let selected = request.url != nil && variant.url == request.url
+            if selected { represented = true }
+            targets.append(VariantAuditTarget(
+                number: targets.count + 1,
+                label: variant.label,
+                url: variant.url,
+                playlistText: variant.playlistText,
+                headers: variant.headers,
+                isSelected: selected,
+                variant: variant
+            ))
+        }
+        if let url = request.url, !represented {
+            targets.insert(VariantAuditTarget(
+                number: 0,
+                label: request.quality > 0 ? "\(request.quality)P" : "默认",
+                url: url,
+                playlistText: nil,
+                headers: request.headers,
+                isSelected: true,
+                variant: nil
+            ), at: 0)
+            for index in targets.indices {
+                targets[index].number = index + 1
+            }
+        }
+        return targets
+    }
+
+    /// 结构探针结论 → 变体定性
+    private static func verdict(
+        from findings: MP4StructureProbe.Findings?
+    ) -> VariantVerdict {
+        guard let findings else { return .unknown("探针失败") }
+        guard findings.moovFound else {
+            return .unknown(
+                findings.failureNote.isEmpty ? "moov 未定位" : findings.failureNote
+            )
+        }
+        if findings.encrypted {
+            let scheme = findings.video?.scheme.isEmpty == false
+                ? findings.video!.scheme
+                : (findings.audio?.scheme ?? "")
+            let kid = (findings.video?.hasDefaultKID ?? false)
+                || (findings.audio?.hasDefaultKID ?? false)
+            return .encrypted(scheme: scheme, hasDefaultKID: kid)
+        }
+        guard findings.video != nil || findings.audio != nil else {
+            return .unknown("未解析出轨道")
+        }
+        return .plaintext
+    }
+
+    /// 审计结论一行：序号、标注、主机 → 加密/明文/未判定
+    private static func variantAuditLine(
+        target: VariantAuditTarget, verdict: VariantVerdict,
+        findings: MP4StructureProbe.Findings?
+    ) -> String {
+        var head = "变体审计：#\(target.number) \(target.label)"
+        if target.isSelected { head += "（当前所选）" }
+        if let host = target.url?.host { head += " @\(host)" }
+        var tracks: [String] = []
+        if let video = findings?.video { tracks.append("视频 \(video.codec)") }
+        if let audio = findings?.audio { tracks.append("音频 \(audio.codec)") }
+        switch verdict {
+        case .encrypted(let scheme, let hasDefaultKID):
+            if !scheme.isEmpty { tracks.append("方案 \(scheme)") }
+            tracks.append(hasDefaultKID ? "默认 KID 有" : "默认 KID 无")
+            return "\(head) → 加密（\(tracks.joined(separator: " · "))）"
+        case .plaintext:
+            return "\(head) → 明文（\(tracks.joined(separator: " · "))）"
+        case .unknown(let note):
+            return "\(head) → 未判定（\(note)）"
+        }
+    }
+
+    /// 探全部审计目标（同地址去重、并发），每个目标
+    /// 一行审计日记；所选目标额外落完整结构行（与
+    /// 旧版单探针同样的细节量）。completion 在全部
+    /// 直链目标有结论时回调（序号 → 定性）；探针
+    /// 结论都经主队列送达，计数无竞态。
+    private func probeAllVariants(
+        targets: [VariantAuditTarget], sourceId: String, generation: Int,
+        completion: (([Int: VariantVerdict]) -> Void)?
+    ) {
+        for target in targets where target.url == nil {
+            DiaryStore.shared.add(
+                "变体审计：#\(target.number) \(target.label)"
+                + (target.isSelected ? "（当前所选）" : "")
+                + " → 播放列表文本（不做盒子探针）"
+            )
+        }
+        let urlTargets = targets.filter { Self.isHTTP($0.url) }
+        for target in targets where target.url != nil && !Self.isHTTP(target.url) {
+            DiaryStore.shared.add(
+                "变体审计：#\(target.number) \(target.label)"
+                + (target.isSelected ? "（当前所选）" : "")
+                + " → 未判定（地址非 http(s)）"
+            )
+        }
+        guard !urlTargets.isEmpty else {
+            completion?([:])
+            return
+        }
+        var byURL: [String: [VariantAuditTarget]] = [:]
+        for target in urlTargets {
+            byURL[target.url!.absoluteString, default: []].append(target)
+        }
+        var verdicts: [Int: VariantVerdict] = [:]
+        var remaining = byURL.count
+        for group in byURL.values {
+            guard let first = group.first, let url = first.url else { continue }
+            let probe = MP4StructureProbe.start(
+                url: url, headers: first.headers, sourceId: sourceId
+            ) { [weak self] findings in
+                guard let self else { return }
+                let verdict = Self.verdict(from: findings)
+                for target in group {
+                    verdicts[target.number] = verdict
+                }
+                if generation == self.loadGeneration {
+                    for target in group {
+                        DiaryStore.shared.add(Self.variantAuditLine(
+                            target: target, verdict: verdict, findings: findings
+                        ))
+                    }
+                    if group.contains(where: { $0.isSelected }) {
+                        DiaryStore.shared.add(findings.line)
+                    }
+                }
+                remaining -= 1
+                if remaining == 0 {
+                    completion?(verdicts)
+                }
+            }
+            _ = probe // 探针自持至结论送达（见 MP4StructureProbe.start）
+        }
+    }
+
+    /// 明文优先门控：先探全部变体（并发），再决策——
+    /// 所选变体明文/未判定 → 按原计划打开；所选加密
+    /// 且有明文变体 → 改选序号最靠前的明文变体；
+    /// 全部直链变体均加密且无播放列表变体兜底 →
+    /// 如实失败（不进恢复阶梯：重取地址只会再拿到
+    /// 同一批加密变体）。整体 12 秒未出结论按原
+    /// 计划打开，迟到的结论只落审计行、不再改选。
+    private func runVariantGate(
+        targets: [VariantAuditTarget], selected: VariantAuditTarget,
+        request: PlaybackRequest, generation: Int
+    ) {
+        var decided = false
+        let decide: (PlaybackRequest?, Bool) -> Void = { [weak self] finalRequest, allEncrypted in
+            guard let self, !decided,
+                  generation == self.loadGeneration else { return }
+            decided = true
+            if allEncrypted {
+                self.allVariantsEncrypted = true
+                let count = targets.filter { Self.isHTTP($0.url) }.count
+                DiaryStore.shared.add(
+                    "变体审计：全部 \(count) 个直链变体均为加密流（encv/enca），通用播放器无密钥不可解"
+                )
+                self.failNow(reason: "open_exception", raw: "")
+                return
+            }
+            self.openWithRouting(finalRequest ?? request, generation: generation)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+            guard let self, generation == self.loadGeneration,
+                  !decided else { return }
+            DiaryStore.shared.add("变体审计：检查超时，按原计划打开")
+            decide(nil, false)
+        }
+        probeAllVariants(
+            targets: targets, sourceId: request.sourceId,
+            generation: generation
+        ) { [weak self] verdicts in
+            guard let self, !decided else { return }
+            guard case .encrypted = verdicts[selected.number] ?? .unknown("") else {
+                decide(nil, false)
+                return
+            }
+            let urlTargets = targets.filter { Self.isHTTP($0.url) }
+            let plaintext = urlTargets
+                .sorted(by: { $0.number < $1.number })
+                .first { target in
+                    if case .plaintext = verdicts[target.number] ?? .unknown("") {
+                        return true
+                    }
+                    return false
+                }
+            if let plaintext, let variant = plaintext.variant {
+                DiaryStore.shared.add(
+                    "变体 #\(selected.number) \(selected.label) 为加密流，改选明文变体 #\(plaintext.number) \(plaintext.label)"
+                )
+                var switched = request.withVariant(variant)
+                if self.currentTime > 1 {
+                    switched.startPosition = self.currentTime
+                }
+                decide(switched, false)
+                return
+            }
+            let hasPlaylistFallback = targets.contains {
+                $0.url == nil && $0.playlistText != nil
+            }
+            let allEncrypted = urlTargets.allSatisfy { target in
+                if case .encrypted = verdicts[target.number] ?? .unknown("") {
+                    return true
+                }
+                return false
+            }
+            decide(nil, allEncrypted && !hasPlaylistFallback)
+        }
     }
 
     /// 系统内核打开：组装 AVURLAsset（带头走资源代理）
@@ -2751,7 +3221,13 @@ final class PlaybackEngine: ObservableObject {
         }
         let isLocal = currentRequest?.isLocal ?? false
         var text: String
-        if let verdict = probeVerdict, verdict.support == .unsupported, !isLocal {
+        if allVariantsEncrypted, !isLocal {
+            // 变体审计定性（修复轮 9）：该集全部直链
+            // 变体都是 CENC 加密流（encv/enca），没有
+            // 密钥的通用播放器解不开——如实写明，不用
+            // 笼统的「打开失败」掩盖定性
+            text = "该集所有变体均为加密流（encv/enca），通用播放器无密钥不可解。"
+        } else if let verdict = probeVerdict, verdict.support == .unsupported, !isLocal {
             // 容器已定性为系统播放器不支持：直接写明
             // 格式，不再用笼统的「视频打开失败」掩盖定性
             text = "该视频是 \(verdict.container) 格式，系统播放器不支持此格式。"
