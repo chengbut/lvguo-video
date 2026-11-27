@@ -5,6 +5,8 @@
 # iterated through the contents API — workflow files cannot.
 set -o pipefail
 cd "$(dirname "$0")"
+# Binary assets (AppIcon PNGs) travel as .b64 text in git; decode first.
+python3 scripts/decode_assets.py
 # No -destination: with -sdk iphoneos, xcodebuild builds for the SDK's
 # default device destination. Passing 'generic/platform=iOS' alongside
 # -sdk made xcodebuild exit 70 ("Unable to find a destination") on the

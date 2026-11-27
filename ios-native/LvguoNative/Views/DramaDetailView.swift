@@ -22,8 +22,21 @@ struct DramaDetailView: View {
     @State private var playSession: PlaybackSession?
     @State private var showPlayer = false
     @State private var downloadMode = false
+    @State private var selectedGroup = 0
 
-    private var displayDrama: DramaItem { drama ?? item }
+    /// 头部展示的剧目：detail() 的结果优先，但封面/标题/总集数/
+    /// 简介在 detail 里为空时回落到列表页传进来的 item——
+    /// Flutter 版头部一直用传入的剧目、只从 detail 取选集；
+    /// 旧版整体替换会把已有的封面弄丢（真机首测实证）。
+    private var displayDrama: DramaItem {
+        guard var merged = drama else { return item }
+        if merged.coverURL.isEmpty { merged.coverURL = item.coverURL }
+        if merged.title.isEmpty { merged.title = item.title }
+        if merged.totalEpisodes <= 0 { merged.totalEpisodes = item.totalEpisodes }
+        if merged.desc.isEmpty { merged.desc = item.desc }
+        if merged.sourceId.isEmpty { merged.sourceId = item.sourceId }
+        return merged
+    }
 
     private var historyEntry: StationHistoryEntry? {
         historyStore.entry(forDramaId: displayDrama.id)
@@ -33,9 +46,6 @@ struct DramaDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-                if let entry = historyEntry, !entry.finished, entry.position > 5 {
-                    resumeButton(entry)
-                }
                 if let errorText {
                     notice(errorText, isError: true)
                 }
@@ -54,17 +64,9 @@ struct DramaDetailView: View {
         }
         .navigationTitle(displayDrama.title)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    downloadMode.toggle()
-                    message = downloadMode ? "下载模式：点一集就下载这一集" : nil
-                } label: {
-                    Label(
-                        downloadMode ? "完成" : "下载",
-                        systemImage: downloadMode ? "checkmark" : "arrow.down.circle"
-                    )
-                }
+        .safeAreaInset(edge: .bottom) {
+            if !chapters.isEmpty {
+                bottomCapsule
             }
         }
         .task { await loadDetail() }
@@ -105,7 +107,7 @@ struct DramaDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 96, height: 128)
+            .frame(width: 100, height: 150)
             .clipShape(RoundedRectangle(cornerRadius: 14))
 
             VStack(alignment: .leading, spacing: 6) {
@@ -129,34 +131,126 @@ struct DramaDetailView: View {
         .glassEffect(.regular.tint(.green.opacity(0.08)), in: RoundedRectangle(cornerRadius: 20))
     }
 
-    private func resumeButton(_ entry: StationHistoryEntry) -> some View {
-        Button {
-            let index = min(entry.episodeIndex, max(0, chapters.count - 1))
-            guard chapters.indices.contains(index) else { return }
-            Task { await play(chapter: chapters[index], index: index, startPosition: entry.position) }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "play.fill")
-                Text("继续播放 第 \(entry.episodeLabel) 集 · \(clockText(entry.position))")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
+    /// 续播目标集下标：按历史里的集号在最新选集里匹配
+    /// （HistoryResume，与 Flutter resumeEpisodeIndex 一致）；
+    /// 没有历史时从第一集开始。
+    private var resumeIndex: Int? {
+        guard !chapters.isEmpty else { return nil }
+        guard let entry = historyEntry else { return 0 }
+        let episodeNumber = Int(entry.episodeLabel) ?? entry.episodeIndex + 1
+        return HistoryResume.chapterIndex(
+            chapters: chapters, episodeNumber: episodeNumber, finished: entry.finished
+        )
+    }
+
+    /// 底部悬浮胶囊，照搬 Flutter 详情页：左「下载选集」开关，
+    /// 右主按钮（继续播放 / 重播 / 播放 · 第 N 集）。
+    private var bottomCapsule: some View {
+        HStack(spacing: 10) {
+            Button {
+                downloadMode.toggle()
+                message = downloadMode ? "下载模式：点一集就下载这一集" : nil
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: downloadMode ? "checkmark" : "arrow.down.circle")
+                    Text(downloadMode ? "完成" : "下载选集")
+                        .font(.subheadline.weight(.medium))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .buttonStyle(.plain)
+            .glassEffect(.regular, in: Capsule())
+
+            Button {
+                guard let index = resumeIndex else { return }
+                Task { await play(chapter: chapters[index], index: index) }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                    Text(mainPlayTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+            }
+            .buttonStyle(.plain)
+            .glassEffect(.regular.tint(.green.opacity(0.30)), in: Capsule())
+            .disabled(resolvingIndex != nil)
         }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.tint(.green.opacity(0.25)), in: Capsule())
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private var mainPlayTitle: String {
+        guard let index = resumeIndex else { return "播放" }
+        let label = chapters[index].episodeLabel
+        guard let entry = historyEntry else {
+            return "播放 · 第 \(label) 集"
+        }
+        if entry.finished {
+            return "重播 · 第 \(label) 集"
+        }
+        return "继续播放 · 第 \(label) 集"
+    }
+
+    /// 每组集数（对齐 Flutter episodeGroupSize = 30）
+    private static let groupSize = 30
+
+    private var groupCount: Int {
+        (chapters.count + Self.groupSize - 1) / Self.groupSize
+    }
+
+    private func groupLabel(_ group: Int) -> String {
+        let start = group * Self.groupSize
+        let end = min(chapters.count, start + Self.groupSize) - 1
+        guard chapters.indices.contains(start), chapters.indices.contains(end) else {
+            return ""
+        }
+        let first = chapters[start].episodeLabel
+        let last = chapters[end].episodeLabel
+        return first == last ? first : "\(first)-\(last)"
     }
 
     private var episodeList: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(downloadMode ? "点选要下载的集数（\(chapters.count)）" : "选集（\(chapters.count)）")
                 .font(.subheadline.weight(.semibold))
+            if groupCount > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(0..<groupCount, id: \.self) { group in
+                            Button {
+                                selectedGroup = group
+                            } label: {
+                                Text(groupLabel(group))
+                                    .font(.footnote.weight(
+                                        selectedGroup == group ? .semibold : .regular
+                                    ))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                            }
+                            .buttonStyle(.plain)
+                            .glassEffect(
+                                selectedGroup == group
+                                    ? .regular.tint(.green.opacity(0.35))
+                                    : .regular,
+                                in: Capsule()
+                            )
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            let start = min(selectedGroup, max(0, groupCount - 1)) * Self.groupSize
+            let end = min(chapters.count, start + Self.groupSize)
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 76), spacing: 10)],
                 spacing: 10
             ) {
-                ForEach(Array(chapters.enumerated()), id: \.offset) { index, chapter in
+                ForEach(Array(chapters[start..<end].enumerated()), id: \.offset) { offset, chapter in
+                    let index = start + offset
                     Button {
                         if downloadMode {
                             Task { await enqueueDownload(chapter: chapter, index: index) }
@@ -202,6 +296,10 @@ struct DramaDetailView: View {
             let result = try await provider.detail(sourceId: item.sourceId)
             drama = result.drama
             chapters = result.chapters
+            // 默认停在续播集所在的那一组（Flutter 同）
+            if let index = resumeIndex {
+                selectedGroup = index / Self.groupSize
+            }
         } catch {
             errorText = error.localizedDescription
         }
@@ -290,11 +388,14 @@ struct DramaDetailView: View {
                 total: chapters.count
             )
             if !plan.url.isEmpty, let url = URL(string: plan.url) {
-                // 续播点：显式传入优先，否则查历史里同一集的进度
+                // 续播点（对齐 Flutter _startAt）：显式传入优先；
+                // 否则只有「正是历史里那一集（按集号比对）且没看完」
+                // 才带进度，其余从头播
                 var start = startPosition ?? 0
                 if startPosition == nil,
-                   let entry = historyEntry,
-                   entry.episodeIndex == index, !entry.finished {
+                   let entry = historyEntry, !entry.finished,
+                   Int(chapter.episodeLabel) != nil,
+                   Int(chapter.episodeLabel) == Int(entry.episodeLabel) {
                     start = entry.position
                 }
                 playSession = makeSession(startIndex: index)

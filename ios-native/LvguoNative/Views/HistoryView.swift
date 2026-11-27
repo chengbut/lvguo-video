@@ -1,8 +1,13 @@
 import SwiftUI
 
-/// 历史页：站源/文件源分段切换（对齐 Flutter 版信息架构）。
-/// 站源历史按 今天 / 昨天 / 更早 分组（WatchPeriod 的口径），
-/// 点一条直接取详情+取址续播；文件记录点回按定位符重新取址续播。
+/// 历史页：站源/文件源分段切换（v2.0.0 定版的信息架构）。
+/// 站源侧照搬 Flutter history_page.dart：搜索 + 来源筛选片 +
+/// 今天/昨天/更早 分段的海报网格（封面 2:3、集数进度条、
+/// 「看到第 X 集 / 共 Y 集」文案、来源标签），点条目进详情页，
+/// 由详情页的「继续播放」按集号定位续播集——Flutter 就是这个
+/// 流程。旧版在这里拿迁移来的数组下标直接定位并直接取址播放，
+/// 集号与下标对不上时误报「这一集已经不存在了」，已废除。
+/// 文件侧保持记录列表 + 按定位符重新取址续播。
 struct HistoryView: View {
     @EnvironmentObject private var moduleStore: ModuleStore
     @EnvironmentObject private var historyStore: HistoryStore
@@ -15,6 +20,8 @@ struct HistoryView: View {
     @State private var playRequest: PlaybackRequest?
     @State private var playSession: PlaybackSession?
     @State private var showPlayer = false
+    @State private var query = ""
+    @State private var sourceFilter = ""
 
     var body: some View {
         NavigationStack {
@@ -29,7 +36,7 @@ struct HistoryView: View {
                         .padding(.horizontal)
                 }
                 if sourceKind == .station {
-                    stationList
+                    stationContent
                 } else {
                     fileList
                 }
@@ -77,183 +84,157 @@ struct HistoryView: View {
         return .earlier
     }
 
+    private var sourceOptions: [String] {
+        var seen: [String] = []
+        for entry in historyStore.entries where !seen.contains(entry.source) {
+            seen.append(entry.source)
+        }
+        return seen
+    }
+
+    private func sourceName(_ sourceId: String) -> String {
+        moduleStore.modules.first { $0.id == sourceId }?.name ?? sourceId
+    }
+
+    private func matches(_ entry: StationHistoryEntry) -> Bool {
+        if !sourceFilter.isEmpty, entry.source != sourceFilter {
+            return false
+        }
+        let keyword = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if keyword.isEmpty { return true }
+        return entry.title.lowercased().contains(keyword)
+            || sourceName(entry.source).lowercased().contains(keyword)
+    }
+
     @ViewBuilder
-    private var stationList: some View {
+    private var stationContent: some View {
+        VStack(spacing: 12) {
+            searchField
+            if sourceOptions.count > 1 {
+                sourceChips
+            }
+            stationGrid
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("搜片名、来源", text: $query)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal)
+    }
+
+    private var sourceChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                sourceChip(title: "全部来源", value: "")
+                ForEach(sourceOptions, id: \.self) { sourceId in
+                    sourceChip(title: sourceName(sourceId), value: sourceId)
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+
+    private func sourceChip(title: String, value: String) -> some View {
+        let selected = sourceFilter == value
+        return Button {
+            sourceFilter = value
+        } label: {
+            Text(title)
+                .font(.subheadline.weight(selected ? .semibold : .regular))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(
+            selected ? .regular.tint(.green.opacity(0.35)) : .regular,
+            in: Capsule()
+        )
+    }
+
+    @ViewBuilder
+    private var stationGrid: some View {
+        let visible = historyStore.entries.filter(matches)
         if historyStore.entries.isEmpty {
             ContentUnavailableView(
-                "暂无站源历史",
-                systemImage: "clock",
-                description: Text("看过的剧会记在这里，点开就能接着播。")
+                "暂无观看记录",
+                systemImage: "clock.arrow.circlepath",
+                description: Text("从站源看过的剧会出现在这里。")
+            )
+        } else if visible.isEmpty {
+            ContentUnavailableView(
+                "没有匹配的观看记录",
+                systemImage: "magnifyingglass",
+                description: Text("换个关键词或来源试试。")
             )
         } else {
-            List {
-                ForEach(Period.allCases, id: \.rawValue) { period in
-                    let rows = historyStore.entries.filter { self.period(of: $0.updatedAt) == period }
-                    if !rows.isEmpty {
-                        Section(period.rawValue) {
-                            ForEach(rows) { entry in
-                                stationRow(entry)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(Period.allCases, id: \.rawValue) { period in
+                        let rows = visible.filter { self.period(of: $0.updatedAt) == period }
+                        if !rows.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(period.rawValue)
+                                    .font(.headline)
+                                LazyVGrid(
+                                    columns: [GridItem(.adaptive(minimum: 104), spacing: 12)],
+                                    spacing: 14
+                                ) {
+                                    ForEach(rows) { entry in
+                                        NavigationLink {
+                                            stationDestination(entry)
+                                        } label: {
+                                            HistoryPosterCell(
+                                                entry: entry,
+                                                sourceName: sourceName(entry.source)
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                        .contextMenu {
+                                            Button("删除记录", role: .destructive) {
+                                                historyStore.remove(dramaId: entry.dramaId)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
-            .listStyle(.plain)
-        }
-    }
-
-    private func stationRow(_ entry: StationHistoryEntry) -> some View {
-        Button {
-            Task { await resumeStation(entry) }
-        } label: {
-            HStack(spacing: 12) {
-                coverView(entry.coverURL)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(entry.title)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
-                    Text("第 \(entry.episodeLabel) 集 · \(progressText(entry.position, entry.duration))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if entry.duration > 0 {
-                        ProgressView(value: min(1, entry.position / entry.duration))
-                            .tint(.green)
-                    }
-                }
-                Spacer()
-                if resumingId == entry.dramaId {
-                    ProgressView()
-                } else {
-                    Image(systemName: "play.circle")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .swipeActions(edge: .trailing) {
-            Button("删除", role: .destructive) {
-                historyStore.remove(dramaId: entry.dramaId)
+                .padding(.horizontal)
+                .padding(.bottom, 16)
             }
         }
     }
 
-    private func coverView(_ coverURL: String) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.quaternary)
-            if !coverURL.isEmpty, let url = URL(string: coverURL) {
-                AsyncImage(url: url) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFill()
-                    } else {
-                        Image(systemName: "photo")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } else {
-                Image(systemName: "play.rectangle.on.rectangle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(width: 44, height: 58)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func progressText(_ position: Double, _ duration: Double) -> String {
-        if duration > 1, position >= duration - 1 {
-            return "已看完"
-        }
-        if position > 0 {
-            return "看到 \(clockText(position))"
-        }
-        return "未开始"
-    }
-
-    private func resumeStation(_ entry: StationHistoryEntry) async {
-        notice = nil
-        guard let provider = moduleStore.provider(for: entry.source) else {
-            notice = "源模块「\(entry.source)」未安装或已停用，无法续播"
-            return
-        }
-        resumingId = entry.dramaId
-        defer { resumingId = nil }
-        do {
-            let detail = try await provider.detail(sourceId: entry.sourceId)
-            let chapters = detail.chapters
-            guard chapters.indices.contains(entry.episodeIndex) else {
-                notice = "这一集已经不存在了"
-                return
-            }
-            let drama = detail.drama
-            let session = PlaybackSession()
-            session.index = entry.episodeIndex
-            session.canPrevious = entry.episodeIndex > 0
-            session.canNext = entry.episodeIndex < chapters.count - 1
-            session.onProgress = { [historyStore, settings] session, position, duration in
-                guard settings.recordHistory else { return }
-                var record = StationHistoryEntry()
-                record.dramaId = drama.id
-                record.source = drama.source.isEmpty ? provider.manifest.id : drama.source
-                record.sourceId = drama.sourceId
-                record.title = drama.title
-                record.coverURL = drama.coverURL
-                record.totalEpisodes = drama.totalEpisodes
-                record.episodeIndex = session.index
-                record.episodeLabel = chapters.indices.contains(session.index)
-                    ? chapters[session.index].episodeLabel : "\(session.index + 1)"
-                record.position = position
-                record.duration = duration
-                record.updatedAt = Date()
-                historyStore.record(record)
-            }
-            func request(for index: Int, start: Double) async -> PlaybackRequest? {
-                guard chapters.indices.contains(index) else { return nil }
-                do {
-                    let plan = try await provider.resolveMedia(
-                        drama: drama, chapter: chapters[index],
-                        index: index, total: chapters.count
-                    )
-                    guard !plan.url.isEmpty, let url = URL(string: plan.url) else { return nil }
-                    return PlaybackRequest(
-                        url: url, headers: plan.headers,
-                        title: "\(drama.title) · \(chapters[index].episodeLabel)",
-                        startPosition: start
-                    )
-                } catch {
-                    return nil
-                }
-            }
-            session.onNext = { session in
-                let next = session.index + 1
-                guard chapters.indices.contains(next) else { return nil }
-                session.index = next
-                session.canPrevious = true
-                session.canNext = next < chapters.count - 1
-                return await request(for: next, start: 0)
-            }
-            session.onPrevious = { session in
-                let previous = session.index - 1
-                guard chapters.indices.contains(previous) else { return nil }
-                session.index = previous
-                session.canPrevious = previous > 0
-                session.canNext = true
-                return await request(for: previous, start: 0)
-            }
-            guard let request = await request(
-                for: entry.episodeIndex,
-                start: entry.finished ? 0 : entry.position
-            ) else {
-                notice = "模块没有返回可播放地址"
-                return
-            }
-            playSession = session
-            playRequest = request
-            showPlayer = true
-        } catch {
-            notice = error.localizedDescription
+    @ViewBuilder
+    private func stationDestination(_ entry: StationHistoryEntry) -> some View {
+        if let provider = moduleStore.provider(for: entry.source) {
+            DramaDetailView(provider: provider, item: entry.dramaItem)
+        } else {
+            ContentUnavailableView(
+                "源模块未安装或已停用",
+                systemImage: "puzzlepiece.extension",
+                description: Text("「\(sourceName(entry.source))」不在了，装回来才能接着看。")
+            )
+            .navigationTitle(entry.title)
         }
     }
 
@@ -318,6 +299,16 @@ struct HistoryView: View {
         }
     }
 
+    private func progressText(_ position: Double, _ duration: Double) -> String {
+        if duration > 1, position >= duration - 1 {
+            return "已看完"
+        }
+        if position > 0 {
+            return "看到 \(clockText(position))"
+        }
+        return "未开始"
+    }
+
     private func resumeFile(_ record: FileHistoryRecord) async {
         notice = nil
         let progress = record.progress
@@ -372,6 +363,84 @@ struct HistoryView: View {
             showPlayer = true
         } catch {
             notice = error.localizedDescription
+        }
+    }
+}
+
+/// 历史海报格，对齐 Flutter _HistoryPoster：封面 2:3、
+/// 底部集数进度条、标题、进度文案、来源标签。
+private struct HistoryPosterCell: View {
+    let entry: StationHistoryEntry
+    let sourceName: String
+
+    private var progress: Double {
+        guard entry.totalEpisodes > 0 else { return 0 }
+        let episodeNumber = Int(entry.episodeLabel) ?? entry.episodeIndex + 1
+        return min(1, Double(episodeNumber) / Double(entry.totalEpisodes))
+    }
+
+    private var caption: String {
+        let episodeNumber = Int(entry.episodeLabel) ?? entry.episodeIndex + 1
+        if entry.finished,
+           entry.totalEpisodes <= 0 || episodeNumber >= entry.totalEpisodes {
+            return "已看完"
+        }
+        if entry.totalEpisodes > 0 {
+            return "看到第 \(episodeNumber) 集 / 共 \(entry.totalEpisodes) 集"
+        }
+        return "看到第 \(episodeNumber) 集"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack(alignment: .bottom) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.quaternary)
+                    if !entry.coverURL.isEmpty, let url = URL(string: entry.coverURL) {
+                        AsyncImage(url: url) { phase in
+                            if case .success(let image) = phase {
+                                image.resizable().scaledToFill()
+                            } else {
+                                Image(systemName: "photo")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    } else {
+                        Image(systemName: "play.rectangle.on.rectangle")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if entry.totalEpisodes > 0 {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.35))
+                            Rectangle()
+                                .fill(Color.green)
+                                .frame(width: proxy.size.width * progress)
+                        }
+                    }
+                    .frame(height: 3)
+                }
+            }
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            Text(entry.title)
+                .font(.subheadline.weight(.medium))
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(sourceName)
+                .font(.caption2.weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.12), in: Capsule())
+                .foregroundStyle(.green)
+                .lineLimit(1)
         }
     }
 }

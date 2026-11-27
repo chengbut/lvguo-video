@@ -1,7 +1,7 @@
 import Foundation
 import JavaScriptCore
 
-enum ModuleError: Error, CustomStringConvertible {
+enum ModuleError: Error, CustomStringConvertible, LocalizedError {
     case js(message: String, loginRequired: Bool)
     case bridge(String)
 
@@ -11,6 +11,11 @@ enum ModuleError: Error, CustomStringConvertible {
         case .bridge(let message): return message
         }
     }
+
+    /// 必须实现 LocalizedError：否则 localizedDescription 只剩
+    /// 「The operation couldn't be completed. (…ModuleError error 0.)」，
+    /// JS 异常原文到不了 UI（真机首测实证）。
+    var errorDescription: String? { description }
 
     var loginRequired: Bool {
         if case .js(_, let required) = self { return required }
@@ -69,10 +74,63 @@ final class ModuleHostBridge {
         case failure(String)
     }
 
-    private func perform(_ request: URLRequest, timeout: TimeInterval) -> FetchOutcome {
+    /// 重定向闸门，对齐 Go Fetch 的策略：
+    /// - followRedirects=true：跟随全部跳转（URLSession 默认行为）；
+    /// - false（模块没声明时的 Go 默认）：只跟同源跳转，跨源跳转
+    ///   把 3xx 响应本身交回模块（Go 是直接报「重定向地址异常」，
+    ///   这里交回响应让模块能读 Location 自己处理，是更宽容的近似）。
+    private final class RedirectGate: NSObject, URLSessionTaskDelegate {
+        let sameOriginOnly: Bool
+
+        init(sameOriginOnly: Bool) {
+            self.sameOriginOnly = sameOriginOnly
+        }
+
+        func urlSession(
+            _ session: URLSession, task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            guard sameOriginOnly,
+                  let from = task.originalRequest?.url,
+                  let to = request.url,
+                  !Self.sameOrigin(from, to) else {
+                completionHandler(request)
+                return
+            }
+            completionHandler(nil)
+        }
+
+        static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
+            func port(_ url: URL) -> Int {
+                if let port = url.port { return port }
+                return url.scheme == "https" ? 443 : 80
+            }
+            return a.scheme == b.scheme
+                && a.host == b.host
+                && port(a) == port(b)
+        }
+    }
+
+    private lazy var followSession = URLSession(
+        configuration: .default,
+        delegate: RedirectGate(sameOriginOnly: false),
+        delegateQueue: nil
+    )
+    private lazy var sameOriginSession = URLSession(
+        configuration: .default,
+        delegate: RedirectGate(sameOriginOnly: true),
+        delegateQueue: nil
+    )
+
+    private func perform(
+        _ request: URLRequest, timeout: TimeInterval, followRedirects: Bool = true
+    ) -> FetchOutcome {
         let semaphore = DispatchSemaphore(value: 0)
         var outcome: FetchOutcome = .failure("请求未完成")
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        let session = followRedirects ? followSession : sameOriginSession
+        let task = session.dataTask(with: request) { data, response, error in
             if let error {
                 outcome = .failure(error.localizedDescription)
             } else if let http = response as? HTTPURLResponse {
@@ -117,35 +175,45 @@ final class ModuleHostBridge {
                   let body = Data(base64Encoded: bodyB64) {
             request.httpBody = body
         }
+        // 带 ticket 的请求先消费名额（Go takeReservation：一次性，
+        // 不存在直接报「站源请求名额已失效」）
+        let ticket = JSON.dictInt(payload["ticket"])
+        if ticket > 0, issuedTickets.remove(ticket) == nil {
+            return envelope(["error": "站源请求名额已失效"])
+        }
         let timeoutMs = JSON.dictInt(payload["timeoutMs"])
         request.timeoutInterval = timeoutMs > 0 ? Double(timeoutMs) / 1000.0 : 30
         let limitValue = JSON.dictInt(payload["limit"])
         let limit = limitValue > 0 ? limitValue : 4 << 20
         let binary = JSON.dictBool(payload["binary"])
         let anyStatus = JSON.dictBool(payload["anyStatus"])
+        let followRedirects = JSON.dictBool(payload["followRedirects"])
         let acceptStatus = (payload["acceptStatus"] as? [Any] ?? [])
             .map { JSON.dictInt($0) }
 
-        switch perform(request, timeout: request.timeoutInterval) {
+        switch perform(
+            request, timeout: request.timeoutInterval, followRedirects: followRedirects
+        ) {
         case .failure(let message):
-            return envelope(["error": message])
+            return envelope(["error": "\(manifest.name)连接失败：\(message)"])
         case .success(let data, let response):
             let status = response.statusCode
             var headers: [String: [String]] = [:]
             for (key, value) in response.allHeaderFields {
                 headers[String(describing: key)] = ["\(value)"]
             }
+            // Go：超限只回 Oversized 标记与错误，不带正文与状态码
             if data.count > limit {
                 return envelope([
-                    "error": "响应内容过大",
-                    "status": status,
-                    "bodyText": String(decoding: data.prefix(limit), as: UTF8.self),
+                    "error": "\(manifest.name)返回的数据过大或读取失败",
                     "oversized": true,
                 ])
             }
-            let acceptable = anyStatus
-                || acceptStatus.contains(status)
-                || (200...399).contains(status)
+            // Go 的可接受判定：2xx，或 anyStatus，或 acceptStatus 命中
+            // 且响应体是合法 JSON（AcceptJSONStatus 的语义）
+            let acceptedByList = acceptStatus.contains(status)
+                && (try? JSONSerialization.jsonObject(with: data)) != nil
+            let acceptable = anyStatus || acceptedByList || (200...299).contains(status)
             guard acceptable else {
                 return envelope([
                     "error": "HTTP \(status)",
@@ -161,6 +229,30 @@ final class ModuleHostBridge {
             }
             return envelope(result)
         }
+    }
+
+    // MARK: - host.reserve（请求名额：Go 侧是限流票据，原生无限制器，
+    // 只做地址校验 + 发号，fetch 时一次性消费，语义对模块等价）
+
+    private var ticketCounter = 0
+    private var issuedTickets = Set<Int>()
+
+    func reserveEnvelope(_ json: String) -> String {
+        guard let payload = parsePayload(json) else {
+            return envelope(["error": "请求参数无效"])
+        }
+        let urlString = JSON.dictString(payload["url"])
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme, scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else {
+            return envelope(["error": "请求地址无效"])
+        }
+        guard manifest.allowsHost(host) else {
+            return envelope(["error": "模块清单未声明访问 \(host)"])
+        }
+        ticketCounter += 1
+        issuedTickets.insert(ticketCounter)
+        return envelope(["ticket": ticketCounter])
     }
 
     // MARK: - host.fetchText
@@ -271,6 +363,101 @@ final class ModuleHostBridge {
         }
     }
 
+    // MARK: - host.prepareWebMedia / finishMedia
+
+    /// 拉播放列表原文（带凭据头），失败返回错误文本。
+    /// Go 侧 fetchMediaPlaylist 还有多候选地址重试，原生只拉主地址。
+    private func fetchPlaylistRaw(
+        urlString: String, referer: String, credentials: MediaCredentials?
+    ) -> (playlist: String, finalURL: String)? {
+        guard let url = URL(string: urlString) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        var effectiveReferer = referer
+        if let credentials {
+            if !credentials.cookie.isEmpty {
+                request.setValue(credentials.cookie, forHTTPHeaderField: "Cookie")
+            }
+            if !credentials.userAgent.isEmpty {
+                request.setValue(credentials.userAgent, forHTTPHeaderField: "User-Agent")
+            }
+            if !credentials.origin.isEmpty {
+                request.setValue(credentials.origin, forHTTPHeaderField: "Origin")
+            }
+            if effectiveReferer.isEmpty {
+                effectiveReferer = credentials.referer
+            }
+        }
+        if !effectiveReferer.isEmpty {
+            request.setValue(effectiveReferer, forHTTPHeaderField: "Referer")
+        }
+        switch perform(request, timeout: 30) {
+        case .failure:
+            return nil
+        case .success(let data, let response):
+            guard (200...299).contains(response.statusCode) else { return nil }
+            return (
+                playlist: String(decoding: data, as: UTF8.self),
+                finalURL: response.url?.absoluteString ?? urlString
+            )
+        }
+    }
+
+    /// 对齐 Go prepareWebProviderMedia / finishProviderMedia：
+    /// 地址必须是 http(s) 且无 userinfo；.m3u8 时拉列表回填
+    /// playlist/url/durationMs 并校验 #EXTM3U。两者的报错文案
+    /// 在 Go 里不同（连空格/标点都不一样），按 finish 标志分别用。
+    func webMediaEnvelope(_ json: String, sourceName: String, finish: Bool) -> String {
+        guard var media = parsePayload(json) else {
+            return envelope(["error": "播放信息无效"])
+        }
+        let urlString = JSON.dictString(media["url"])
+        let parsed = URL(string: urlString)
+        let isMediaURL = parsed != nil
+            && (parsed!.scheme == "http" || parsed!.scheme == "https")
+            && !(parsed!.host ?? "").isEmpty
+            && parsed!.user == nil && parsed!.password == nil
+        guard isMediaURL, let url = parsed else {
+            return envelope(["error": finish
+                ? "\(sourceName) 未返回有效播放地址，请刷新章节或确认站点访问权限"
+                : "\(sourceName)未返回有效播放地址，请刷新详情后重试"])
+        }
+        if url.path.lowercased().hasSuffix(".m3u8") {
+            let credentials = MediaCredentials.parse(media["credentials"])
+            guard let fetched = fetchPlaylistRaw(
+                urlString: urlString,
+                referer: JSON.dictString(media["referer"]),
+                credentials: credentials
+            ) else {
+                return envelope(["error": finish
+                    ? "获取播放列表失败: 拉取播放列表失败"
+                    : "获取\(sourceName)播放列表失败：拉取播放列表失败"])
+            }
+            let trimmed = fetched.playlist
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}"))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("#EXTM3U") else {
+                return envelope(["error": finish
+                    ? "站点未返回有效 M3U8，可能需要登录或链接已失效"
+                    : "\(sourceName)播放列表无效，请重新解析播放"])
+            }
+            media["playlist"] = fetched.playlist
+            media["url"] = fetched.finalURL
+            var seconds = 0.0
+            for line in fetched.playlist.split(separator: "\n") {
+                if line.hasPrefix("#EXTINF:") {
+                    let raw = line.dropFirst("#EXTINF:".count)
+                        .split(separator: ",").first ?? ""
+                    seconds += Double(raw) ?? 0
+                }
+            }
+            if seconds > 0 {
+                media["durationMs"] = Int(seconds * 1000)
+            }
+        }
+        return envelope(["media": media])
+    }
+
     // MARK: - host.parseUrl / resolveUrl
 
     func parseUrlEnvelope(_ raw: String) -> String {
@@ -310,15 +497,22 @@ final class ModuleHostBridge {
     }
 
     func loadStateEnvelope(_ name: String) -> String {
+        // 对齐 Go LoadState：状态文件不存在返回空串、不报错
+        //（模块首次运行先读后写是常态，报错会把整条链路打断）
         let file = stateFileURL(name)
         guard let data = try? Data(contentsOf: file) else {
-            return envelope(["error": "状态不存在"])
+            return envelope(["value": ""])
         }
         return envelope(["value": String(decoding: data, as: UTF8.self)])
     }
 
     /// 返回空串表示成功，否则是错误信息（shim 负责抛错）
     func saveState(_ name: String, _ value: String) -> String {
+        // 对齐 Go SaveState：空值 = 删除状态文件
+        if value.isEmpty {
+            try? FileManager.default.removeItem(at: stateFileURL(name))
+            return ""
+        }
         do {
             try Data(value.utf8).write(to: stateFileURL(name))
             return ""
@@ -352,7 +546,7 @@ final class ModuleHostBridge {
 
     // MARK: - host 加密/摘要（入参出参均为 base64）
 
-    func cryptoEnvelope(_ op: String, _ a: String, _ b: String, _ c: String) -> String {
+    func cryptoEnvelope(_ op: String, _ a: String, _ b: String, _ c: String, _ d: String) -> String {
         func bytes(_ text: String) -> Data? {
             if text.isEmpty { return Data() }
             if let data = Data(base64Encoded: text) { return data }
@@ -379,10 +573,44 @@ final class ModuleHostBridge {
                 result = try CryptoUtils.aesCbc(
                     key: key, iv: iv, data: data, encrypt: op == "aesCbcEncrypt"
                 )
+            case "aesGcmSeal", "aesGcmOpen":
+                guard let key = bytes(a), let nonce = bytes(b),
+                      let data = bytes(c), let extra = bytes(d) else {
+                    throw CryptoUtils.CryptoError.message("Base64 内容无效")
+                }
+                result = op == "aesGcmSeal"
+                    ? try CryptoUtils.aesGcmSeal(key: key, nonce: nonce, plain: data, extra: extra)
+                    : try CryptoUtils.aesGcmOpen(key: key, nonce: nonce, sealed: data, extra: extra)
+            case "ecdhP256":
+                guard let privateKey = bytes(a), let publicKey = bytes(b) else {
+                    throw CryptoUtils.CryptoError.message("Base64 内容无效")
+                }
+                result = try CryptoUtils.ecdhP256(privateKey: privateKey, publicKey: publicKey)
+            case "hkdfSha256":
+                // d 是十进制长度字符串（不是 base64），与 Go 的 length 参数对应
+                guard let secret = bytes(a), let salt = bytes(b), let info = bytes(c),
+                      let length = Int(d) else {
+                    throw CryptoUtils.CryptoError.message("Base64 内容无效")
+                }
+                result = try CryptoUtils.hkdfSha256(
+                    secret: secret, salt: salt, info: info, length: length
+                )
             default:
                 throw CryptoUtils.CryptoError.message("未知的加密操作 \(op)")
             }
             return envelope(["result": result.base64EncodedString()])
+        } catch {
+            return envelope(["error": "\(error)"])
+        }
+    }
+
+    func ecdhKeyPairEnvelope() -> String {
+        do {
+            let pair = try CryptoUtils.ecdhP256KeyPair()
+            return envelope([
+                "privateKey": pair.privateKey.base64EncodedString(),
+                "publicKey": pair.publicKey.base64EncodedString(),
+            ])
         } catch {
             return envelope(["error": "\(error)"])
         }
@@ -512,8 +740,8 @@ function __hexDecode(text) {
   }
   return out;
 }
-function __crypto(op, a, b, c) {
-  var env = JSON.parse(__host_crypto(op, a || '', b || '', c || ''));
+function __crypto(op, a, b, c, d) {
+  var env = JSON.parse(__host_crypto(op, a || '', b || '', c || '', d || ''));
   if (env.error) throw new Error(env.error);
   return __b64decode(env.result || '');
 }
@@ -568,6 +796,486 @@ function __preserveIntegers(text) {
   return out;
 }
 
+var __crcTable = null;
+function __crc32(data) {
+  if (!__crcTable) {
+    __crcTable = [];
+    for (var n = 0; n < 256; n++) {
+      var c = n;
+      for (var k = 0; k < 8; k++) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      __crcTable[n] = c >>> 0;
+    }
+  }
+  var crc = 0xFFFFFFFF;
+  for (var i = 0; i < data.length; i++) {
+    crc = __crcTable[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function __gzipBytes(data) {
+  // stored（不压缩）deflate 块包 gzip 格式：输出是合法 gzip，
+  // 只是体积不减小；对应 Go gzip 的语义（内容一致）足够模块用。
+  var out = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+  var offset = 0;
+  do {
+    var chunk = Math.min(65535, data.length - offset);
+    var last = offset + chunk >= data.length;
+    out.push(last ? 1 : 0, chunk & 0xff, (chunk >> 8) & 0xff,
+      (~chunk) & 0xff, ((~chunk) >> 8) & 0xff);
+    for (var i = 0; i < chunk; i++) out.push(data[offset + i]);
+    offset += chunk;
+  } while (offset < data.length);
+  var crc = __crc32(data);
+  out.push(crc & 0xff, (crc >> 8) & 0xff, (crc >> 16) & 0xff, (crc >> 24) & 0xff);
+  var size = data.length >>> 0;
+  out.push(size & 0xff, (size >> 8) & 0xff, (size >> 16) & 0xff, (size >> 24) & 0xff);
+  return new Uint8Array(out);
+}
+var __INFLATE_LIMIT = 20 * 1024 * 1024;
+function __inflateTo(data, out) {
+  var pos = 0;
+  var bitBuffer = 0;
+  var bitCount = 0;
+  function readBit() {
+    if (bitCount === 0) {
+      if (pos >= data.length) throw new Error('gzip 内容无效');
+      bitBuffer = data[pos++];
+      bitCount = 8;
+    }
+    var bit = bitBuffer & 1;
+    bitBuffer >>= 1;
+    bitCount--;
+    return bit;
+  }
+  function readBits(count) {
+    var value = 0;
+    for (var i = 0; i < count; i++) value |= readBit() << i;
+    return value;
+  }
+  function buildHuffman(lengths) {
+    var maxBits = 0;
+    var i;
+    for (i = 0; i < lengths.length; i++) {
+      if (lengths[i] > maxBits) maxBits = lengths[i];
+    }
+    var counts = [];
+    for (i = 0; i <= maxBits; i++) counts.push(0);
+    for (i = 0; i < lengths.length; i++) {
+      if (lengths[i]) counts[lengths[i]]++;
+    }
+    var offsets = [0, 0];
+    for (i = 1; i <= maxBits; i++) offsets[i + 1] = offsets[i] + counts[i];
+    var symbols = new Array(lengths.length);
+    var next = offsets.slice();
+    for (i = 0; i < lengths.length; i++) {
+      if (lengths[i]) symbols[next[lengths[i]]++] = i;
+    }
+    return { counts: counts, symbols: symbols, maxBits: maxBits };
+  }
+  function decodeSymbol(huffman) {
+    var code = 0;
+    var first = 0;
+    var index = 0;
+    for (var len = 1; len <= huffman.maxBits; len++) {
+      code |= readBit();
+      var count = huffman.counts[len] || 0;
+      if (code - first < count) return huffman.symbols[index + (code - first)];
+      index += count;
+      first = (first + count) << 1;
+      code <<= 1;
+    }
+    throw new Error('gzip 内容无效');
+  }
+  var lengthBase = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  var lengthExtra = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  var distBase = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289,
+    16385, 24577];
+  var distExtra = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  function inflateBlock(litHuffman, distHuffman) {
+    for (;;) {
+      var symbol = decodeSymbol(litHuffman);
+      if (symbol < 256) {
+        out.push(symbol);
+      } else if (symbol === 256) {
+        return;
+      } else {
+        var idx = symbol - 257;
+        if (idx >= 29) throw new Error('gzip 内容无效');
+        var length = lengthBase[idx] + readBits(lengthExtra[idx]);
+        var distSymbol = decodeSymbol(distHuffman);
+        if (distSymbol >= 30) throw new Error('gzip 内容无效');
+        var dist = distBase[distSymbol] + readBits(distExtra[distSymbol]);
+        if (dist > out.length) throw new Error('gzip 内容无效');
+        var start = out.length - dist;
+        for (var i = 0; i < length; i++) out.push(out[start + i]);
+      }
+      if (out.length > __INFLATE_LIMIT) throw new Error('解压后内容过大');
+    }
+  }
+  for (;;) {
+    var bfinal = readBits(1);
+    var btype = readBits(2);
+    if (btype === 0) {
+      bitCount = 0;
+      if (pos + 4 > data.length) throw new Error('gzip 内容无效');
+      var len = data[pos] | (data[pos + 1] << 8);
+      pos += 4;
+      if (pos + len > data.length) throw new Error('gzip 内容无效');
+      for (var i = 0; i < len; i++) out.push(data[pos + i]);
+      pos += len;
+      if (out.length > __INFLATE_LIMIT) throw new Error('解压后内容过大');
+    } else if (btype === 1 || btype === 2) {
+      var litHuffman;
+      var distHuffman;
+      if (btype === 1) {
+        var fixedLit = [];
+        var s;
+        for (s = 0; s < 288; s++) {
+          fixedLit.push(s < 144 ? 8 : s < 256 ? 9 : s < 280 ? 7 : 8);
+        }
+        var fixedDist = [];
+        for (s = 0; s < 32; s++) fixedDist.push(5);
+        litHuffman = buildHuffman(fixedLit);
+        distHuffman = buildHuffman(fixedDist);
+      } else {
+        var hlit = readBits(5) + 257;
+        var hdist = readBits(5) + 1;
+        var hclen = readBits(4) + 4;
+        var order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+        var codeLengths = [];
+        var ci;
+        for (ci = 0; ci < 19; ci++) codeLengths.push(0);
+        for (ci = 0; ci < hclen; ci++) codeLengths[order[ci]] = readBits(3);
+        var codeHuffman = buildHuffman(codeLengths);
+        var lengths = [];
+        while (lengths.length < hlit + hdist) {
+          var sym = decodeSymbol(codeHuffman);
+          if (sym < 16) {
+            lengths.push(sym);
+          } else if (sym === 16) {
+            if (lengths.length === 0) throw new Error('gzip 内容无效');
+            var prev = lengths[lengths.length - 1];
+            var repeat = 3 + readBits(2);
+            for (var r = 0; r < repeat; r++) lengths.push(prev);
+          } else if (sym === 17) {
+            var zeros = 3 + readBits(3);
+            for (var z = 0; z < zeros; z++) lengths.push(0);
+          } else {
+            var zeros2 = 11 + readBits(7);
+            for (var z2 = 0; z2 < zeros2; z2++) lengths.push(0);
+          }
+        }
+        if (lengths.length !== hlit + hdist) throw new Error('gzip 内容无效');
+        litHuffman = buildHuffman(lengths.slice(0, hlit));
+        distHuffman = buildHuffman(lengths.slice(hlit));
+      }
+      inflateBlock(litHuffman, distHuffman);
+    } else {
+      throw new Error('gzip 内容无效');
+    }
+    if (bfinal) break;
+  }
+  return pos;
+}
+function __gunzipBytes(data) {
+  var out = [];
+  var p = 0;
+  var members = 0;
+  while (p < data.length) {
+    if (p + 18 > data.length || data[p] !== 0x1f || data[p + 1] !== 0x8b
+        || data[p + 2] !== 8) {
+      throw new Error('gzip 内容无效');
+    }
+    var flags = data[p + 3];
+    p += 10;
+    if (flags & 4) {
+      if (p + 2 > data.length) throw new Error('gzip 内容无效');
+      p += 2 + (data[p] | (data[p + 1] << 8));
+    }
+    if (flags & 8) {
+      while (p < data.length && data[p] !== 0) p++;
+      p++;
+    }
+    if (flags & 16) {
+      while (p < data.length && data[p] !== 0) p++;
+      p++;
+    }
+    if (flags & 2) p += 2;
+    if (p > data.length) throw new Error('gzip 内容无效');
+    p += __inflateTo(data.subarray(p), out);
+    p += 8;
+    if (p > data.length) throw new Error('gzip 内容无效');
+    members++;
+  }
+  if (members === 0) throw new Error('gzip 内容无效');
+  return new Uint8Array(out);
+}
+var __HTML_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  copy: '©', reg: '®', trade: '™', hellip: '…', mdash: '—', ndash: '–',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', laquo: '«', raquo: '»',
+  times: '×', divide: '÷', plusmn: '±', deg: '°', micro: 'µ', para: '¶',
+  middot: '·', bull: '•', dagger: '†', permil: '‰', prime: '′', Prime: '″',
+  euro: '€', pound: '£', yen: '¥', cent: '¢', curren: '¤', sect: '§',
+  uml: '¨', ordf: 'ª', ordm: 'º', iexcl: '¡', iquest: '¿', szlig: 'ß',
+  agrave: 'à', aacute: 'á', acirc: 'â', atilde: 'ã', auml: 'ä', aring: 'å',
+  aelig: 'æ', ccedil: 'ç', egrave: 'è', eacute: 'é', ecirc: 'ê', euml: 'ë',
+  igrave: 'ì', iacute: 'í', icirc: 'î', iuml: 'ï', ntilde: 'ñ', ograve: 'ò',
+  oacute: 'ó', ocirc: 'ô', otilde: 'õ', ouml: 'ö', oslash: 'ø', ugrave: 'ù',
+  uacute: 'ú', ucirc: 'û', uuml: 'ü', yacute: 'ý', yuml: 'ÿ'
+};
+function __decodeEntities(text) {
+  return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);/g, function (match, body) {
+    if (body.charAt(0) === '#') {
+      var code;
+      if (body.charAt(1) === 'x' || body.charAt(1) === 'X') {
+        code = parseInt(body.substring(2), 16);
+      } else {
+        code = parseInt(body.substring(1), 10);
+      }
+      if (isNaN(code) || code <= 0 || code > 0x10FFFF) return match;
+      if (code > 0xFFFF) {
+        code -= 0x10000;
+        return String.fromCharCode(0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF));
+      }
+      return String.fromCharCode(code);
+    }
+    var named = __HTML_ENTITIES[body] || __HTML_ENTITIES[body.toLowerCase()];
+    return named === undefined ? match : named;
+  });
+}
+function __parseHtml(text) {
+  // 对齐 Go host.parseHtml：返回 golang.org/x/net/html 的树形状
+  // {tag?, attrs?, text?, children?}，根是文档节点（只有 children）。
+  // 树构建是 HTML5 算法的子集：处理常见标签、自动闭合与
+  // html/head/body 合成，极端畸形页面与 Go 结果可能有出入。
+  if (text.length > 8 * 1024 * 1024) throw new Error('网页内容过大');
+  var voidTags = { area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1,
+    input: 1, link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1 };
+  var rawTags = { script: 1, style: 1 };
+  var rcdataTags = { title: 1, textarea: 1 };
+  var headTags = { base: 1, link: 1, meta: 1, noscript: 1, script: 1,
+    style: 1, template: 1, title: 1 };
+  var pClosers = { address: 1, article: 1, aside: 1, blockquote: 1, div: 1,
+    dl: 1, fieldset: 1, footer: 1, form: 1, h1: 1, h2: 1, h3: 1, h4: 1,
+    h5: 1, h6: 1, header: 1, hr: 1, main: 1, nav: 1, ol: 1, p: 1, pre: 1,
+    section: 1, table: 1, ul: 1 };
+  function makeElement(tag, attrs) {
+    return { tag: tag, attrs: attrs || {}, children: [], text: null };
+  }
+  function makeText(value) {
+    return { tag: null, attrs: null, children: null, text: value };
+  }
+  var forest = [];
+  var stack = [];
+  function currentChildren() {
+    return stack.length ? stack[stack.length - 1].children : forest;
+  }
+  function appendText(value) {
+    if (!value) return;
+    var children = currentChildren();
+    var last = children[children.length - 1];
+    if (last && last.text !== null) {
+      last.text += value;
+    } else {
+      children.push(makeText(value));
+    }
+  }
+  function closeOpenTag(tag) {
+    for (var i = stack.length - 1; i >= 0; i--) {
+      if (stack[i].tag === tag) {
+        stack.length = i;
+        return true;
+      }
+    }
+    return false;
+  }
+  var i = 0;
+  var length = text.length;
+  while (i < length) {
+    var lt = text.indexOf('<', i);
+    if (lt === -1) {
+      appendText(__decodeEntities(text.substring(i)));
+      break;
+    }
+    if (lt > i) appendText(__decodeEntities(text.substring(i, lt)));
+    if (text.startsWith('<!--', lt)) {
+      var commentEnd = text.indexOf('-->', lt + 4);
+      i = commentEnd === -1 ? length : commentEnd + 3;
+      continue;
+    }
+    var marker = text.charAt(lt + 1);
+    if (marker === '!' || marker === '?') {
+      var declEnd = text.indexOf('>', lt + 2);
+      i = declEnd === -1 ? length : declEnd + 1;
+      continue;
+    }
+    if (marker === '/') {
+      var closeEnd = text.indexOf('>', lt + 2);
+      if (closeEnd === -1) break;
+      var closeName = text.substring(lt + 2, closeEnd)
+        .trim().split(/\s+/)[0].toLowerCase();
+      if (closeName && !voidTags[closeName]) closeOpenTag(closeName);
+      i = closeEnd + 1;
+      continue;
+    }
+    if (!/[a-zA-Z]/.test(marker)) {
+      appendText('<');
+      i = lt + 1;
+      continue;
+    }
+    var j = lt + 1;
+    var tagName = '';
+    while (j < length && !/[\s/>]/.test(text.charAt(j))) {
+      tagName += text.charAt(j).toLowerCase();
+      j++;
+    }
+    var attrs = {};
+    var selfClosing = false;
+    while (j < length) {
+      while (j < length && /\s/.test(text.charAt(j))) j++;
+      if (j >= length) break;
+      var ch = text.charAt(j);
+      if (ch === '>') { j++; break; }
+      if (ch === '/') {
+        if (text.charAt(j + 1) === '>') {
+          selfClosing = true;
+          j += 2;
+          break;
+        }
+        j++;
+        continue;
+      }
+      var attrName = '';
+      while (j < length && !/[\s=/>]/.test(text.charAt(j))) {
+        attrName += text.charAt(j).toLowerCase();
+        j++;
+      }
+      while (j < length && /\s/.test(text.charAt(j))) j++;
+      var attrValue = '';
+      if (text.charAt(j) === '=') {
+        j++;
+        while (j < length && /\s/.test(text.charAt(j))) j++;
+        var quote = text.charAt(j);
+        if (quote === '"' || quote === "'") {
+          var quoteEnd = text.indexOf(quote, j + 1);
+          if (quoteEnd === -1) {
+            attrValue = text.substring(j + 1);
+            j = length;
+          } else {
+            attrValue = text.substring(j + 1, quoteEnd);
+            j = quoteEnd + 1;
+          }
+        } else {
+          var valueStart = j;
+          while (j < length && !/[\s>]/.test(text.charAt(j))) j++;
+          attrValue = text.substring(valueStart, j);
+        }
+      }
+      if (attrName && !(attrName in attrs)) {
+        attrs[attrName] = __decodeEntities(attrValue);
+      }
+    }
+    i = j;
+    // 常见自动闭合规则的子集
+    var top = stack[stack.length - 1];
+    if (top && top.tag === 'p' && pClosers[tagName]) stack.pop();
+    if (tagName === 'li') {
+      if (top && top.tag === 'li') stack.pop();
+    } else if (tagName === 'dt' || tagName === 'dd') {
+      if (top && (top.tag === 'dt' || top.tag === 'dd')) stack.pop();
+    } else if (tagName === 'td' || tagName === 'th') {
+      if (top && (top.tag === 'td' || top.tag === 'th')) stack.pop();
+    } else if (tagName === 'tr') {
+      while (stack.length && (stack[stack.length - 1].tag === 'td'
+          || stack[stack.length - 1].tag === 'th')) stack.pop();
+      if (stack.length && stack[stack.length - 1].tag === 'tr') stack.pop();
+    } else if (tagName === 'option') {
+      if (top && top.tag === 'option') stack.pop();
+    }
+    var element = makeElement(tagName, attrs);
+    currentChildren().push(element);
+    if (voidTags[tagName] || selfClosing) continue;
+    if (rawTags[tagName] || rcdataTags[tagName]) {
+      var closePattern = '</' + tagName;
+      var closeAt = text.toLowerCase().indexOf(closePattern, i);
+      var rawText = closeAt === -1 ? text.substring(i) : text.substring(i, closeAt);
+      if (rawText) {
+        element.children.push(makeText(
+          rcdataTags[tagName] ? __decodeEntities(rawText) : rawText));
+      }
+      if (closeAt === -1) {
+        i = length;
+      } else {
+        var rawCloseEnd = text.indexOf('>', closeAt + closePattern.length);
+        i = rawCloseEnd === -1 ? length : rawCloseEnd + 1;
+      }
+      continue;
+    }
+    stack.push(element);
+  }
+  // 合成 html/head/body（Go 的解析器总是产出这三层）
+  var htmlElement = null;
+  for (var f = 0; f < forest.length; f++) {
+    if (forest[f].tag === 'html') { htmlElement = forest[f]; break; }
+  }
+  if (!htmlElement) {
+    htmlElement = makeElement('html', {});
+    var headElement = makeElement('head', {});
+    var bodyElement = makeElement('body', {});
+    var inHead = true;
+    for (var m = 0; m < forest.length; m++) {
+      var node = forest[m];
+      if (inHead && node.tag && headTags[node.tag]) {
+        headElement.children.push(node);
+      } else if (node.tag === 'head') {
+        for (var h = 0; h < node.children.length; h++) {
+          headElement.children.push(node.children[h]);
+        }
+      } else if (node.tag === 'body') {
+        inHead = false;
+        for (var b = 0; b < node.children.length; b++) {
+          bodyElement.children.push(node.children[b]);
+        }
+      } else {
+        if (node.text !== null && node.text.trim() === '') continue;
+        inHead = false;
+        bodyElement.children.push(node);
+      }
+    }
+    htmlElement.children = [headElement, bodyElement];
+  } else {
+    var hasHead = false;
+    var hasBody = false;
+    for (var k = 0; k < htmlElement.children.length; k++) {
+      if (htmlElement.children[k].tag === 'head') hasHead = true;
+      if (htmlElement.children[k].tag === 'body') hasBody = true;
+    }
+    if (!hasHead) htmlElement.children.unshift(makeElement('head', {}));
+    if (!hasBody) htmlElement.children.push(makeElement('body', {}));
+  }
+  function convert(node) {
+    if (node.text !== null) return { text: node.text };
+    var out = {};
+    if (node.tag) out.tag = node.tag;
+    if (node.attrs) {
+      var keys = Object.keys(node.attrs);
+      if (keys.length) out.attrs = node.attrs;
+    }
+    if (node.children && node.children.length) {
+      out.children = node.children.map(convert);
+    }
+    return out;
+  }
+  return { children: [convert(htmlElement)] };
+}
+
 var __hostObject = {
   source: '',
   dramaId: function (sourceId) {
@@ -586,7 +1294,11 @@ var __hostObject = {
       limit: request.limit || 0,
       binary: !!request.binary,
       anyStatus: !!request.anyStatus,
-      acceptStatus: request.acceptStatus || []
+      acceptStatus: request.acceptStatus || [],
+      followRedirects: !!request.followRedirects,
+      ticket: request.ticket || 0,
+      background: !!request.background,
+      direct: !!request.direct
     };
     if (request.body !== undefined && request.body !== null) {
       if (typeof request.body === 'string') { payload.bodyText = request.body; }
@@ -642,9 +1354,28 @@ var __hostObject = {
   },
   preferredSite: function () { return ''; },
   exclusive: function (fn) { return fn(); },
-  prepareWebMedia: function (media) { return media; },
-  finishMedia: function (media) { return media; },
-  reserve: function () { throw new Error('reserve 桥暂未实现'); },
+  prepareWebMedia: function (media, sourceName) {
+    var env = JSON.parse(__host_webMedia(
+      JSON.stringify(media || {}), String(sourceName || ''), 'prepare'));
+    if (env.error) { throw new Error(env.error); }
+    return env.media;
+  },
+  finishMedia: function (media) {
+    var env = JSON.parse(__host_webMedia(
+      JSON.stringify(media || {}), __hostObject.source, 'finish'));
+    if (env.error) { throw new Error(env.error); }
+    return env.media;
+  },
+  reserve: function (request) {
+    request = request || {};
+    var env = JSON.parse(__host_reserve(JSON.stringify({
+      url: String(request.url || ''),
+      lane: request.lane || '',
+      background: !!request.background
+    })));
+    if (env.error) { throw new Error(env.error); }
+    return env.ticket;
+  },
   loadState: function (name) {
     var env = JSON.parse(__host_loadState(String(name)));
     if (env.error) { throw new Error(env.error); }
@@ -694,6 +1425,38 @@ var __hostObject = {
     return __crypto('aesCbcDecrypt',
       __b64encode(__toBytes(key)), __b64encode(__toBytes(iv)), __b64encode(__toBytes(data)));
   },
+  aesGcmSeal: function (key, nonce, plain, extra) {
+    return __crypto('aesGcmSeal',
+      __b64encode(__toBytes(key)), __b64encode(__toBytes(nonce)),
+      __b64encode(__toBytes(plain)),
+      __b64encode(extra === null || extra === undefined ? new Uint8Array(0) : __toBytes(extra)));
+  },
+  aesGcmOpen: function (key, nonce, sealed, extra) {
+    return __crypto('aesGcmOpen',
+      __b64encode(__toBytes(key)), __b64encode(__toBytes(nonce)),
+      __b64encode(__toBytes(sealed)),
+      __b64encode(extra === null || extra === undefined ? new Uint8Array(0) : __toBytes(extra)));
+  },
+  ecdhP256KeyPair: function () {
+    var env = JSON.parse(__host_ecdhKeyPair());
+    if (env.error) { throw new Error(env.error); }
+    return {
+      privateKey: __b64decode(env.privateKey || ''),
+      publicKey: __b64decode(env.publicKey || '')
+    };
+  },
+  ecdhP256: function (privateKey, publicKey) {
+    return __crypto('ecdhP256',
+      __b64encode(__toBytes(privateKey)), __b64encode(__toBytes(publicKey)));
+  },
+  hkdfSha256: function (secret, salt, info, length) {
+    return __crypto('hkdfSha256',
+      __b64encode(__toBytes(secret)), __b64encode(__toBytes(salt)),
+      __b64encode(__toBytes(info)), String(length));
+  },
+  gzip: function (data) { return __gzipBytes(__toBytes(data)); },
+  gunzip: function (data) { return __gunzipBytes(__toBytes(data)); },
+  parseHtml: function (text) { return __parseHtml(String(text)); },
   sleep: function (milliseconds) { __host_sleep(milliseconds || 0); }
 };
 """#
@@ -789,10 +1552,22 @@ final class ModuleRuntime {
             Thread.sleep(forTimeInterval: clamped / 1000.0)
         }
         context.setObject(sleepBlock, forKeyedSubscript: "__host_sleep" as NSString)
-        let cryptoBlock: @convention(block) (String, String, String, String) -> String = { op, a, b, c in
-            bridge.cryptoEnvelope(op, a, b, c)
+        let cryptoBlock: @convention(block) (String, String, String, String, String) -> String = { op, a, b, c, d in
+            bridge.cryptoEnvelope(op, a, b, c, d)
         }
         context.setObject(cryptoBlock, forKeyedSubscript: "__host_crypto" as NSString)
+        let ecdhKeyPairBlock: @convention(block) () -> String = {
+            bridge.ecdhKeyPairEnvelope()
+        }
+        context.setObject(ecdhKeyPairBlock, forKeyedSubscript: "__host_ecdhKeyPair" as NSString)
+        let reserveBlock: @convention(block) (String) -> String = { json in
+            bridge.reserveEnvelope(json)
+        }
+        context.setObject(reserveBlock, forKeyedSubscript: "__host_reserve" as NSString)
+        let webMediaBlock: @convention(block) (String, String, String) -> String = { json, sourceName, kind in
+            bridge.webMediaEnvelope(json, sourceName: sourceName, finish: kind == "finish")
+        }
+        context.setObject(webMediaBlock, forKeyedSubscript: "__host_webMedia" as NSString)
         let randomBlock: @convention(block) (Double) -> String = { count in
             bridge.randomBytesEnvelope(Int(count))
         }

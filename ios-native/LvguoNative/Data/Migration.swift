@@ -40,18 +40,28 @@ enum Migration {
         var historyEntries = 0
         var fileSources = 0
         var fileProgress = 0
+        /// 在旧版 UserDefaults 里实际读到的文件源/进度条数
+        /// （不管有没有搬成功）——0 就是旧版根本没存过，
+        /// 与「搬运失败」能一眼区分（真机首测判读用）
+        var fileSourcesFound = 0
+        var fileProgressFound = 0
         var settingsFilled = 0
         var errors: [String] = []
 
         var summary: String {
-            if alreadyDone { return "已迁移" }
-            let parts = [
-                modules > 0 ? "模块 \(modules)" : nil,
-                historyEntries > 0 ? "历史 \(historyEntries)" : nil,
-                fileSources > 0 ? "文件源 \(fileSources)" : nil,
-                fileProgress > 0 ? "文件进度 \(fileProgress)" : nil,
-            ].compactMap { $0 }
-            return parts.isEmpty ? "无旧数据" : parts.joined(separator: " · ")
+            // 计数常显（含 0）：截图上就能判读每类数据到底有没有
+            var parts = [
+                "模块 \(modules)",
+                "历史 \(historyEntries)",
+                "文件源 \(fileSources)",
+            ]
+            if fileSourcesFound != fileSources {
+                parts.append("旧版存有 \(fileSourcesFound)")
+            }
+            if fileProgress > 0 {
+                parts.append("文件进度 \(fileProgress)")
+            }
+            return parts.joined(separator: " · ")
         }
     }
 
@@ -71,6 +81,16 @@ enum Migration {
         let marker = markerURL(dataDirectory)
         if FileManager.default.fileExists(atPath: marker.path) {
             report.alreadyDone = true
+            // 把标记里的计数读回来，重启后「我的」页仍能判读
+            if let saved = AppData.readJSONDictionary(marker) {
+                report.modules = JSON.dictInt(saved["modules"])
+                report.moduleStates = JSON.dictInt(saved["moduleStates"])
+                report.historyEntries = JSON.dictInt(saved["history"])
+                report.fileSources = JSON.dictInt(saved["fileSources"])
+                report.fileProgress = JSON.dictInt(saved["fileProgress"])
+                report.fileSourcesFound = JSON.dictInt(saved["fileSourcesFound"])
+                report.fileProgressFound = JSON.dictInt(saved["fileProgressFound"])
+            }
             cachedReport = report
             return report
         }
@@ -88,6 +108,8 @@ enum Migration {
             let outcome = try migrateFileSources(dataDirectory: dataDirectory)
             report.fileSources = outcome.sources
             report.fileProgress = outcome.progress
+            report.fileSourcesFound = outcome.sourcesFound
+            report.fileProgressFound = outcome.progressFound
         } catch { report.errors.append("文件源：\(error.localizedDescription)") }
 
         if report.errors.isEmpty {
@@ -99,6 +121,8 @@ enum Migration {
                 "history": report.historyEntries,
                 "fileSources": report.fileSources,
                 "fileProgress": report.fileProgress,
+                "fileSourcesFound": report.fileSourcesFound,
+                "fileProgressFound": report.fileProgressFound,
             ], to: marker)
         }
         cachedReport = report
@@ -313,15 +337,18 @@ enum Migration {
 
     private static func migrateFileSources(
         dataDirectory: URL
-    ) throws -> (sources: Int, progress: Int) {
+    ) throws -> (sources: Int, progress: Int, sourcesFound: Int, progressFound: Int) {
         let defaults = UserDefaults.standard
         var sourceCount = 0
         var progressCount = 0
+        var sourcesFound = 0
+        var progressFound = 0
 
         // fileSources.v1：原生侧没有文件源时才整体搬入
         if let raw = defaults.string(forKey: "flutter.fileSources.v1"),
            let data = raw.data(using: .utf8),
            let rows = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+            sourcesFound = rows.count
             let file = dataDirectory.appendingPathComponent("file-sources.json")
             let existing = (AppData.readJSON(file) as? [Any]) ?? []
             if existing.isEmpty {
@@ -332,6 +359,8 @@ enum Migration {
                     AppData.writeJSON(valid, to: file)
                     sourceCount = valid.count
                 }
+            } else {
+                sourceCount = existing.count
             }
         }
 
@@ -339,6 +368,7 @@ enum Migration {
         if let raw = defaults.string(forKey: "flutter.fileProgress.v1"),
            let data = raw.data(using: .utf8),
            let rows = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            progressFound = rows.count
             let file = dataDirectory.appendingPathComponent("file-progress.json")
             var merged = (AppData.readJSON(file) as? [String: Any]) ?? [:]
             for (key, value) in rows {
@@ -357,6 +387,6 @@ enum Migration {
                 AppData.writeJSON(merged, to: file)
             }
         }
-        return (sourceCount, progressCount)
+        return (sourceCount, progressCount, sourcesFound, progressFound)
     }
 }

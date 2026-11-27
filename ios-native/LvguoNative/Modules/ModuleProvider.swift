@@ -65,8 +65,7 @@ struct ModuleProvider {
             "index": index,
             "total": total,
             "outPath": "",
-            "releaseStatus": "",
-            "downloadQuality": ""
+            "releaseStatus": ""
         ]
         let result = try await runtime.call("resolveMedia", arguments: [task])
         guard let media = result as? [String: Any] else {

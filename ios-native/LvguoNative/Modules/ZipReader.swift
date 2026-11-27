@@ -13,13 +13,14 @@ struct ZipArchive {
         var encrypted: Bool
     }
 
-    enum ZipError: Error, CustomStringConvertible {
+    enum ZipError: Error, CustomStringConvertible, LocalizedError {
         case message(String)
         var description: String {
             switch self {
             case .message(let text): return text
             }
         }
+        var errorDescription: String? { description }
     }
 
     private let bytes: [UInt8]

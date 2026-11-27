@@ -217,7 +217,7 @@ private struct SearchDramaCell: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .aspectRatio(3.0 / 4.0, contentMode: .fit)
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 14))
             Text(item.title)
                 .font(.footnote.weight(.medium))

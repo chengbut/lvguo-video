@@ -59,16 +59,31 @@ LvguoNative/
 
 - 实例数：Go 最多 4 个模块实例并行，原生版每模块 1 个串行运行时；
   模块函数内的并发调用会被串行化（语义不变，极端场景下更慢）。
-- `fetch` 的 `ticket`（reserve 预留）与限流/重试体系未实现：reserve 直接
-  抛错；`background` / `direct` 字段接受但忽略；重定向用 URLSession 默认策略。
-- 未实现：`parseHtml`、`gzip/gunzip`、`aesGcmSeal/Open`、`ecdhP256*`、
-  `hkdfSha256`、`prepareWebMedia`（原样返回）、`preferredSite`（返回空）、
-  `catalogContext`（返回 `{more:false, background:false}`）、`isKnown`（false）。
-  用到这些的模块会在对应调用处抛错或走降级路径，错误会透出到 UI。
+- 2026-11-27 真机首测修复轮已对齐：`parseHtml`（shim 内纯 JS 实现，
+  HTML5 树构建的子集，极端畸形页面与 Go 的 x/net/html 可能有出入）、
+  `gzip/gunzip`（shim 内实现：gzip 输出 stored 块、合法但不压缩；
+  gunzip 是完整 inflate，输出上限 20MB 与 Go 一致）、
+  `aesGcmSeal/Open`、`ecdhP256*`、`hkdfSha256`（CryptoKit，字节
+  布局与 Go 一致）、`reserve`（桥发号、fetch 一次性消费，语义等价；
+  Go 的限流/退避体系未移植）、`prepareWebMedia`/`finishMedia`
+  （地址校验 + m3u8 拉取回填 + 报错文案与 Go 一致；多候选地址
+  重试未移植）、`loadState` 缺文件返回空串不报错（与 Go 一致）。
+- `fetch` 已对齐 Go 的可接受状态判定（2xx，或 acceptStatus 命中
+  且响应是合法 JSON，或 anyStatus）与超限语义（只回 oversized
+  标记）；重定向：followRedirects=false（Go 默认）时只跟同源
+  跳转、跨源把 3xx 交回模块；`background`/`direct` 字段接受但
+  忽略；`blocked`（响应拦截判定）未实现、恒 false。
+- 仍为占位：`preferredSite`（返回空，与新装 Go 一致）、
+  `catalogContext`（返回 `{more:false, background:false}`，
+  UI 发起的调用与 Go 一致）、`isKnown`（false，同上）。
 - `resolveMedia` 返回纯 m3u8 文本（playlist）时，Go 版经本地代理生成 URL，
   原生版暂不能直接播放，详情页会明确提示（已知限制）。
 - AVURLAsset 的 headers 只作用于首个请求；HLS 分片不继承（沿用一期结论，
   后续可用 AVAssetResourceLoaderDelegate 处理带头分片）。
+- 「我的」页只落地 Flutter 设置分组里的「播放」一组；外观/弹幕/
+  下载/存储/代理/诊断分组原生尚无对应系统，未摆假入口。
+- 下载页只有「下载中/已下载」两页签；Flutter 的「合并」页签
+  原生没有合并功能，未移植。
 
 ## 二期 B 段：文件源 / 历史 / 设置 / 下载 / 数据迁移（已完成）
 
@@ -91,8 +106,10 @@ LvguoNative/
   calSign 与 Dart 逐项对齐）。天翼/移动原生登录走 WKWebView 登录页抓
   cookie/storage 令牌，抓后立即用列表接口验活才算登录成功（与 Flutter
   版 2.0.2 的判定一致）。
-- 历史页：站源按今天/昨天/更早分组（WatchPeriod 同规则）、文件源
-  单列，点开按保存进度续播；设置页项与 Flutter「我的」页一致。
+- 历史页：站源/文件源分段；站源侧照搬 Flutter（搜索 + 来源筛选 +
+  今天/昨天/更早分段的海报网格），点条目进详情页、由详情页按
+  集号定位续播（HistoryResume 与 Flutter resumeEpisodeIndex 一致）；
+  文件侧点开按定位符重新取址续播。设置走「我的 → 播放」子页。
 - 下载：站源集数走 resolveMedia 取址后下载（带 credentials 头），
   文件源文件按定位符取址下载（FTP 走 RETR）；HLS 保存分片 + 改写后的
   `playlist.m3u8`，本地播放走 127.0.0.1 环回 HTTP 服务（AVPlayer 不能

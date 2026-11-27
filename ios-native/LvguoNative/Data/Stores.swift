@@ -115,6 +115,41 @@ final class SettingsStore: ObservableObject {
     }
 }
 
+/// 续播集匹配，逐行对齐 Flutter follow_state.dart 的 resumeEpisodeIndex：
+/// 按「集号」在最新选集里找位置——先精确匹配集号；没有精确的，
+/// 取第一个集号更大的；再没有（看到的是旧的当前集）取它本身；
+/// 都没有则最后一集。绝不能用迁移来的数组下标直接定位：
+/// 集号与数组位置并不总是一一对应，下标越界正是真机首测
+/// 「这一集已经不存在了」的根因。
+enum HistoryResume {
+    /// 返回目标集在 chapters 中的下标；chapters 为空返回 nil。
+    /// 集号取 ChapterItem.episodeLabel 的整数值（对应 Go 的
+    /// Chapter.currentEpisode / Flutter 的 episode.number），
+    /// 非数字标签（如「番外」）不参与匹配，与 Flutter 一致。
+    static func chapterIndex(
+        chapters: [ChapterItem], episodeNumber: Int, finished: Bool
+    ) -> Int? {
+        guard !chapters.isEmpty else { return nil }
+        var foundCurrent: Int?
+        for (index, chapter) in chapters.enumerated() {
+            let label = chapter.episodeLabel.trimmingCharacters(in: .whitespaces)
+            guard let number = Int(label) else { continue }
+            if number == episodeNumber {
+                if !finished {
+                    return index
+                }
+                foundCurrent = index
+            } else if number > episodeNumber, foundCurrent == nil {
+                return index
+            }
+        }
+        if let foundCurrent {
+            return foundCurrent
+        }
+        return chapters.count - 1
+    }
+}
+
 // MARK: - 站源观看历史
 
 /// 站源历史一条：字段语义对齐 Flutter 版 WatchEntry

@@ -1,25 +1,18 @@
 import SwiftUI
 
-/// 资源页：站源组 = 模块管理（安装 / 启用停用 / 设为当前 / 删除），
+/// 资源页：站源组 = 模块管理（安装 / 启用停用 / 设为当前 / 卸载），
 /// 文件源组 = 文件源管理（添加 / 打开 / 删除，与首页文件模式
-/// 同一份数据）；播放测试保留一期公开测试流。
+/// 同一份数据）。文案对齐 Flutter modules_page.dart
+/// （动作叫「卸载」不叫「删除」，空状态文案同 Flutter）。
 struct ResourcesView: View {
     @EnvironmentObject private var store: ModuleStore
     @EnvironmentObject private var fileStore: FileSourceStore
-    @State private var showPlayer = false
     @State private var installURL = ""
     @State private var installing = false
     @State private var message: String?
     @State private var pendingDelete: InstalledModule?
     @State private var showAddFileSource = false
     @State private var pendingDeleteFileSource: FileSource?
-
-    /// 公开测试流（Mux 官方测试 HLS），带一个示例头以证明 headers 注入路径
-    private let testStream = PlaybackRequest(
-        url: URL(string: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8")!,
-        headers: ["User-Agent": "LvguoNative/0.1 (iOS)"],
-        title: "公开测试流"
-    )
 
     var body: some View {
         NavigationStack {
@@ -65,7 +58,7 @@ struct ResourcesView: View {
 
                 Section("文件源") {
                     if fileStore.sources.isEmpty {
-                        Text("还没有文件源")
+                        Text("还没有文件源。点「添加文件源」，把网盘或服务器挂进来。")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(fileStore.sources) { source in
@@ -86,18 +79,8 @@ struct ResourcesView: View {
                         Label("添加文件源", systemImage: "plus.circle")
                     }
                 }
-                Section("播放测试") {
-                    Button {
-                        showPlayer = true
-                    } label: {
-                        Label("测试播放（公开测试流）", systemImage: "play.circle")
-                    }
-                }
             }
             .navigationTitle("资源")
-            .fullScreenCover(isPresented: $showPlayer) {
-                PlayerPage(request: testStream)
-            }
             .sheet(isPresented: $showAddFileSource) {
                 FileSourceTypePickerView()
             }
@@ -120,20 +103,22 @@ struct ResourcesView: View {
                 Text("只删这个文件源的连接信息，网盘和服务器上的文件不受影响。")
             }
             .confirmationDialog(
-                "删除模块「\(pendingDelete?.name ?? "")」？",
+                "卸载站源「\(pendingDelete?.name ?? "")」？",
                 isPresented: Binding(
                     get: { pendingDelete != nil },
                     set: { if !$0 { pendingDelete = nil } }
                 ),
                 titleVisibility: .visible
             ) {
-                Button("删除", role: .destructive) {
+                Button("卸载", role: .destructive) {
                     if let target = pendingDelete {
                         store.uninstall(target.id)
                     }
                     pendingDelete = nil
                 }
                 Button("取消", role: .cancel) { pendingDelete = nil }
+            } message: {
+                Text("该站源的追剧、观看记录和已下载视频会保留，但在重新安装前不再显示，正在下载的集会暂停。")
             }
         }
     }
@@ -175,7 +160,7 @@ struct ResourcesView: View {
             Menu {
                 Button("设为当前") { store.setCurrent(module.id) }
                     .disabled(isCurrent || !module.isUsable)
-                Button("删除", role: .destructive) { pendingDelete = module }
+                Button("卸载", role: .destructive) { pendingDelete = module }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)

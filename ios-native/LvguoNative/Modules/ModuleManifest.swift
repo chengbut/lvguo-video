@@ -126,7 +126,8 @@ struct ModuleManifest: Equatable {
     }
 }
 
-struct ModuleValidationError: Error, CustomStringConvertible {
+struct ModuleValidationError: Error, CustomStringConvertible, LocalizedError {
     var message: String
     var description: String { message }
+    var errorDescription: String? { message }
 }

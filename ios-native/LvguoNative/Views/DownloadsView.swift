@@ -11,16 +11,36 @@ struct DownloadsView: View {
     @State private var showPlayer = false
     @State private var notice: String?
     @State private var pendingDelete: DownloadJob?
+    @State private var tab = 0
+
+    /// 页签对齐 Flutter downloads_page.dart：「下载中 N」「已下载 N」
+    /// （Flutter 还有「合并 N」，原生没有合并功能，不摆假页签）
+    private var activeJobs: [DownloadJob] {
+        downloads.jobs.filter { $0.state != "completed" }
+    }
+
+    private var completedJobs: [DownloadJob] {
+        downloads.jobs.filter { $0.state == "completed" }
+    }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if downloads.jobs.isEmpty {
+            VStack(spacing: 0) {
+                Picker("下载分类", selection: $tab) {
+                    Text("下载中 \(activeJobs.count)").tag(0)
+                    Text("已下载 \(completedJobs.count)").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                let visible = tab == 0 ? activeJobs : completedJobs
+                if visible.isEmpty {
                     ContentUnavailableView(
-                        "暂无下载",
+                        tab == 0 ? "暂无下载中的任务" : "暂无已下载",
                         systemImage: "arrow.down.circle",
-                        description: Text("在详情页开「下载」模式点集数，或在文件浏览页点下载按钮。")
+                        description: Text("在详情页点「下载选集」选集数，或在文件浏览页点下载按钮。")
                     )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List {
                         if let notice {
@@ -28,7 +48,7 @@ struct DownloadsView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
-                        ForEach(downloads.jobs) { job in
+                        ForEach(visible) { job in
                             jobRow(job)
                         }
                     }
