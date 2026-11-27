@@ -600,6 +600,17 @@ input into NAL units」正是把加密样本当明文
 
 待真机验清单：① 播一集带弹幕的剧，竖屏看弹幕只在画面内飘；② 竖屏上下滑切集（多集剧）；③ 播放中点开倍速/清晰度菜单选一项，控件应在约 3 秒后才隐藏、暂停时不隐藏；④ 加密流（软件内核）点小窗按钮进小窗、恢复全屏、及小窗中退页后续播/关闭行为，日记查「软件内核小窗已开始/已关闭/启动失败」；⑤ 移动云盘点开一个视频文件应直接播放；⑥ 资源页卡片上直接点「设为当前」/「卸载」，「添加模块」里分别用本地文件与 URL 各装一次；⑦ 存储页选自定义文件夹后下载一集，文件应落在所选文件夹；⑧ 下载文件名应为「剧名-第X集」形态；⑨ 添加夸克网盘源，网页登录后能列目录、点视频播放。
 
+## 修复轮 12（2026-11-28）：1.5 真机四缺陷修复 + 两项用户拍板（1.6 build 1）
+
+版本口径：本轮起版本号迭代为 **1.6**、build 重置为 **1**。来源：用户 2026-11-28 实测 1.5 后报四缺陷；两项数值/缺省（第 2 项时长、第 3 项默认开）为用户 2026-11-28 01:01 亲口拍板。逐项状态如下（「已修」只代表代码侧改完，真机结论以用户复测为准）：
+
+1. **软件内核小窗不行**（已修，待真机验）：根因在 KSPlayer 2.3.4——KSMEPlayer 的 PiP 控制器懒建，且会在格式落定/切集/码率变化时被整只换新（`DisplayLayerDelegate.change(displayLayer:)` 换掉控制器）；原生 `SoftwarePiPBridge` 只在 attach 与 readyToPlay 抓一次且 weak 持有，旧控制器被替换后桥的弱引用变 nil，新控制器没人接 delegate、没人观察 isPictureInPicturePossible、自动启动标志也留在旧控制器上，表现为按钮不出现或点了没反应。改：桥新增 `controllerProvider` 现取现用 + `refreshController()` 身份核对 + `liveController()`，coordinator 注入 provider 并在每次内核状态回调与进度回调里调 `refreshController()` 重新接管（delegate + KVO + 自动标志），接管时记日记「软件内核小窗桥已接管控制器（possible=…）」供真机定位。系统内核接法复查无确定性断点（`PlaybackEngine.configureAudioSession()` 为 .playback/.moviePlayback + setActive、Info.plist `UIBackgroundModes = audio`、`engine.player` 单一稳定实例均在），其自动小窗问题归第 3 项。
+2. **控件消失得太快**（已修）：时长原为对齐 Flutter 横屏页 `_scheduleHide` 的 3 秒，与老版一致；真机仍嫌快的剩余来源是老版有、原生漏掉的两条行为——① Flutter 的 `_pinned` 含 `_dragging`（拖进度条/手势拖动中不隐藏），原生旧守门无 scrub 项，慢拖滑杆超过 3 秒控件会在手下消失；② Flutter 控件区任意 pointer down 都重置计时，原生只在「动作完成」后重置，点开倍速/清晰度菜单慢慢挑时计时照走。改：隐藏守门补 `scrubValue == nil && dragKind == .none`（不过时顺延重试）；chrome 控件层加 `.simultaneousGesture(TapGesture)`，任意点按即 `showControls()` 重新计时。另按用户拍板，隐藏时长 3 秒 → **5 秒**（`scheduleControlsHide`）。剩余差距：系统 Menu 打开后无状态可读，浏览菜单超过 5 秒仍可能隐藏（Flutter 自绘面板有守门，原生系统菜单无此信号）。
+3. **划到后台不自动变小窗**（已修，待真机验）：三处断点——① 系统内核控制器从未设置 `canStartPictureInPictureAutomaticallyFromInline`，旧版只靠 scenePhase 到 `.background` 后手动 start，App 已挂起、调用常落空（本轮保留作兜底并注明主次）；② 软件内核该标志由 KSPlayerLayer 在它自己的 readyToPlay 里按 KSOptions 默认值（true）设置，不受本 App「自动画中画」设置管辖（关了也可能自动进），且设在可能已被替换的旧控制器上；③ 整条链依赖第 1 项的 isPossible 先成立。改：双桥统一新增 `autoStartEnabled`，由播放页按 `settings.autoPictureInPicture` 同步（进入播放页时 + 设置变化时），系统桥在 attach 与 didSet 时落到控制器，软件桥在每次重新接管时落，coordinator 状态回调里 `refreshAutoStart()` 把 KSPlayer 刚按其默认值动过的标志以本 App 设置为准覆盖回去。PiP 不可用时不进小窗、靠音频后台模式续声，降级安全（KSPlayer 切后台的 `enterBackground()` 本就是 no-op，不存在被内核暂停的断点）。另按用户拍板：**「自动画中画」默认改开**——`Stores.swift` 缺省由 `dictBool`（缺失=false）改为键缺失时取 true，已存过设置的用户不受影响。此前默认关与 Flutter 一致（老版 `playback_preferences.dart` 同为默认 false），从没开过的用户切后台不进小窗本是设置使然；本轮起新装/未存设置者默认开。
+4. **切换横屏后控件消失**（已修）：播放页原本没有任何尺寸/方向变化处理——隐藏计时从最后一次点按起算、旋转不重置也不显形，竖屏点亮控件后转横屏（约 1 秒），计时在横屏落位后随即到期，控件刚到横屏就消失；chrome 布局本身按 GeometryReader 尺寸算，无 frame/safe area 异常。改：播放页 ZStack 加一层尺寸观察（GeometryReader + `onChange(of: proxy.size)`），尺寸一变即 `showControls()` 显形并重新计时，该层 `allowsHitTesting(false)` 不吃手势。
+
+待真机验清单：① 加密流（软件内核）点小窗按钮进小窗、恢复全屏，日记应出现「软件内核小窗桥已接管控制器」；切集/切码率后小窗仍可用；② 双内核切后台自动进小窗（新装默认已开；老用户先确认「我的」页自动画中画开关状态）；③ 慢拖进度条超过 5 秒控件不消失、点开菜单慢挑不消失、无操作约 5 秒后才隐藏；④ 竖屏点亮控件后转横屏，控件应在场并重新计时；⑤ 非加密流（系统内核）小窗单独验一次（本轮系统内核只补自动标志，其手动小窗为真机首验）。
+
 ## 全量对齐表（2026-11-27 修复轮 5 结束时状态）
 
 状态含义：**已对齐** = 与 Flutter 版行为一致；**本轮补齐** = 本轮
@@ -612,7 +623,7 @@ input into NAL units」正是把加密样本当明文
 | 控件层 | 本轮补齐 | 旧版 AVPlayerViewController 自带控件与自绘顶栏叠加（左上角控键重叠的元凶）已废弃；改为 AVPlayerLayer + 单一自绘控件层 |
 | 顶部栏 | 本轮补齐 | 返回玻璃圆钮 + 剧名（17pt semibold，不带集号）+ 画中画钮 + 设置齿轮；无标题玻璃胶囊；修复轮 3：整层改按真实安全区落位（top = 安全区顶，元素间距 8），旧版 ignoresSafeArea + 写死 10pt 边距会撞灵动岛 |
 | 状态行（网速/时钟） | 本轮补齐 | 全屏控件可见时按偏好显示：网速取 accessLog 观测码率（KB/s、MB/s），时钟为 HH:mm 墙钟 |
-| 点按显隐 | 本轮补齐 | 单击 300ms 延迟切换（等双击判定），播放中 3 秒自动隐藏，暂停/卡顿/未就绪常显 |
+| 点按显隐 | 本轮补齐 | 单击 300ms 延迟切换（等双击判定），播放中自动隐藏（原 3 秒对齐 Flutter，修复轮 12 用户拍板改 5 秒；轮 12 另补拖进度条守门与控件区任意点按重置计时、旋转尺寸变化重显并重新计时），暂停/卡顿/未就绪常显 |
 | 双击快进/快退 | 本轮补齐 | 左右四分之一区 ±10 秒连击累积（700ms 提交窗口），徽标「快进/快退 N 秒」；中区双击切播放；受 doubleTapSeek 偏好开关 |
 | 长按倍速 | 本轮补齐 | 长按以 boostSpeed（默认 2.0x）播放，徽标「倍速播放中」，松手恢复 |
 | 横滑进度 | 本轮补齐 | 全宽跨度 min(时长,120s)，徽标「目标 / 时长」，松手 seek |
@@ -627,7 +638,7 @@ input into NAL units」正是把加密样本当明文
 | 失败状态 | 本轮补齐 | 90% 黑遮罩 + 标题「暂时无法播放」+ 症状文案与原始错误 + 「重试」（本地为「重试本地播放」）/「从头播放」（进度 > 0 时）/「改为在线播放」（本地失败且有在线回退时），与 Flutter 一致 |
 | 加载超时 | 本轮补齐 | 30 秒未就绪且无进度 → 超时失败进错误状态，不再无限「加载中」 |
 | 错误原文透出 | 本轮补齐 | AVPlayerItem 的系统错误原文（含错误日志 errorComment）进失败文案；切集取址失败的模块原始错误以 toast 透出（旧版 resolveRequest 静默吞错已修） |
-| 画中画 | 已对齐 | AVPictureInPictureController（系统托管）；自动画中画偏好（回后台自动进 PiP）；PiP 中退出页面由 PlaybackKeepAlive 托管引擎续播，对齐 Flutter 页面 pop 后 PlaybackHost 接管。**软件内核下不可用**（双内核，见修复轮 5 续）：PiP 入口只在系统内核下出现 |
+| 画中画 | 已修（修复轮 11/12），待真机验 | 系统内核 AVPictureInPictureController（系统托管）；软件内核修复轮 11 起经 SoftwarePiPBridge 接管 KSMEPlayer 的 KSPictureInPictureController，轮 12 改桥为现取现用 + 状态/进度回调重接管（根因：KSPlayer 会在切集/码率/格式落定时整只替换控制器，桥弱持旧控制器失效）；双桥自动小窗标志统一跟随 App「自动画中画」设置（系统内核轮 12 补设 canStartPictureInPictureAutomaticallyFromInline），该设置轮 12 起默认开（用户拍板，原与 Flutter 同为默认关）；PiP 中退出页面由 PlaybackKeepAlive 托管引擎续播 |
 | 全屏按钮 | 已对齐（结构等效） | 原生播放页本身即全屏呈现，Flutter 的「进全屏」动作在此结构下恒成立，未摆按钮 |
 | 竖屏样式页 | 仍缺（结构差异） | Flutter 竖屏页是纵滑切集 PageView + 下半部剧目信息区，原生播放页是单一全屏页；修复轮 3 已把竖屏 chrome 的位置/安全区逐项对位（顶栏、玻璃控制块 + 集数条、中央暂停钮、右上锁钮、徽章位置），纵滑切集与竖屏页下方的剧目信息区未移植 |
 | 弹幕 | 已对齐（同为不支持） | Flutter 的 danmakuSupported 只认内置 SourceSite 注册表，JS 模块源恒为 false；原生只有 JS 模块源，同样无弹幕入口（不摆假开关） |
@@ -706,7 +717,7 @@ input into NAL units」正是把加密样本当明文
 | 条目 | 状态 | 说明 |
 |---|---|---|
 | 「自动连播」开关 | 本轮撤除 | Flutter 设置页无此条目（只有 PlaybackPreferences.autoAdvance 字段与播放逻辑）：已撤掉我的页里的开关与入口副标题，字段、默认值（开）与连播行为保持 Flutter 原样 |
-| 播放设置组 | 本轮补齐 | 在原有（默认倍速/默认静音/跳过片头片尾/保持常亮/记录历史）基础上补：双击快进快退、滑动调节亮度音量、滑动切换集数、显示时钟、显示网速、自动画中画、长按倍速、默认画面比例——键名与默认值与 PlaybackPreferences 一致 |
+| 播放设置组 | 本轮补齐 | 在原有（默认倍速/默认静音/跳过片头片尾/保持常亮/记录历史）基础上补：双击快进快退、滑动调节亮度音量、滑动切换集数、显示时钟、显示网速、自动画中画、长按倍速、默认画面比例——键名与默认值与 PlaybackPreferences 一致（唯一例外：自动画中画默认值，修复轮 12 用户拍板改开，Flutter 为关） |
 | 外观/弹幕/下载/存储/代理/诊断分组 | 本轮补齐（1.3） | 六组子页全部落地，逐项见下表；「我的」页改为与原版同序的玻璃入口卡列。弹幕事实先说清：Flutter 版弹幕只对内置站源可用（danmakuSupported 查内置 SourceSite 注册表），JS 模块源在 Flutter 版同样没有弹幕数据；原生按同一协议备好设置与渲染管线，模块在 manifest 声明 danmaku 能力且返回数据时才渲染 |
 
 #### 六组逐项对照（1.3）

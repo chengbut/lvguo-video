@@ -115,7 +115,8 @@ final class SettingsStore: ObservableObject {
         swipeEpisodes = JSON.dictBool(dict["swipeEpisodes"])
         showClock = dict["showClock"] == nil ? true : JSON.dictBool(dict["showClock"])
         showNetworkSpeed = dict["showNetworkSpeed"] == nil ? true : JSON.dictBool(dict["showNetworkSpeed"])
-        autoPictureInPicture = JSON.dictBool(dict["autoPictureInPicture"])
+        // 修复轮 12 用户拍板：自动画中画默认开（仅键缺失时生效，已存设置不受影响）
+        autoPictureInPicture = dict["autoPictureInPicture"] == nil ? true : JSON.dictBool(dict["autoPictureInPicture"])
         let storedBoost = (dict["boostSpeed"] as? NSNumber)?.doubleValue ?? 2.0
         boostSpeed = storedBoost > 0 ? storedBoost : 2.0
         let storedFit = JSON.dictString(dict["videoFit"])

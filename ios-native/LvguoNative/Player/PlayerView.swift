@@ -14,6 +14,19 @@ final class PiPBridge: NSObject, ObservableObject, AVPictureInPictureControllerD
     @Published var isActive = false
     var onStopped: (() -> Void)?
     private var possibleObservation: NSKeyValueObservation?
+    /// 切后台自动进小窗（修复轮 12）：由播放页按「自动
+    /// 画中画」设置同步。标准链路是控制器上的
+    /// canStartPictureInPictureAutomaticallyFromInline——
+    /// 系统在退后台的转场中替我们启动；旧版只有
+    /// scenePhase 到 .background 后手动 start 一条路，
+    /// 那时 App 已挂起、调用常落空（真机反馈「划到
+    /// 后台不自动变小窗」）。手动路保留作兜底。
+    var autoStartEnabled = false {
+        didSet {
+            controller?.canStartPictureInPictureAutomaticallyFromInline
+                = autoStartEnabled
+        }
+    }
 
     func attach(to layer: AVPlayerLayer) {
         if controller?.playerLayer === layer { return }
@@ -21,6 +34,8 @@ final class PiPBridge: NSObject, ObservableObject, AVPictureInPictureControllerD
             return
         }
         created.delegate = self
+        created.canStartPictureInPictureAutomaticallyFromInline
+            = autoStartEnabled
         controller = created
         possibleObservation = created.observe(
             \AVPictureInPictureController.isPictureInPicturePossible, options: [.new]
@@ -400,6 +415,21 @@ struct PlayerPage: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            // 尺寸变化（旋转）时重显控件（修复轮 12，
+            // 缺陷「切换横屏后控件消失」）：旧版没有任何
+            // 尺寸/方向处理——隐藏计时从最后一次点按起
+            // 算、旋转不重置，竖屏点亮控件再转横屏，
+            // 计时器在横屏落位后随即到期，主观就是一
+            // 横屏控件就没了。尺寸一变就 showControls
+            // （显形 + 重新计时），与点按显形同路
+            GeometryReader { proxy in
+                Color.clear
+                    .onChange(of: proxy.size) { _, _ in
+                        showControls()
+                    }
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
             if engine.activeKernel == .software,
                let softwareRequest = engine.softwareRequest {
                 // 软件内核表面：只出画面，控件仍走本页
@@ -533,11 +563,24 @@ struct PlayerPage: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            // 切后台自动小窗（修复轮 12）：主链路是两个
+            // 桥上按设置同步的 canStartPictureInPicture
+            // AutomaticallyFromInline（系统在转场中启动，
+            // 时机可靠）；这里的手动 start 只作兜底——
+            // 自动链路没接管时（如标志刚同步）在
+            // .background 时点再试一次，已在小窗中时
+            // 重复 start 是无操作。PiP 不可用/未开启时
+            // 什么都不做：播放不暂停，后台靠音频模式
+            // 续声（与旧版降级一致）
             if phase == .background,
                settings.autoPictureInPicture,
                !engine.isPaused, pipPossibleNow {
                 startPiP()
             }
+        }
+        .onChange(of: settings.autoPictureInPicture) { _, enabled in
+            pipBridge.autoStartEnabled = enabled
+            softwarePipBridge.autoStartEnabled = enabled
         }
         .onChange(of: showSettings) { _, presented in
             // 面板关掉后重新计控件隐藏（修复轮 11 第 3 项）
@@ -559,6 +602,11 @@ struct PlayerPage: View {
 
     private func start() {
         PlaybackEngine.configureAudioSession()
+        // 自动小窗标志以本 App 设置为准同步到两个桥
+        // （修复轮 12）：系统内核靠它走标准自动链路；
+        // 软件内核侧桥会在每次重新接管时补上
+        pipBridge.autoStartEnabled = settings.autoPictureInPicture
+        softwarePipBridge.autoStartEnabled = settings.autoPictureInPicture
         softwarePipBridge.onFailed = { _ in
             showToast("小窗启动失败，请重试")
         }
@@ -716,25 +764,34 @@ struct PlayerPage: View {
         scheduleControlsHide()
     }
 
-    /// 控件自动隐藏（修复轮 11 第 3 项）：时长对齐
-    /// Flutter 横屏页 _scheduleHide 的 3 秒；到点时的
+    /// 控件自动隐藏（修复轮 11 第 3 项）：时长原对齐
+    /// Flutter 横屏页 _scheduleHide 的 3 秒，修复轮 12
+    /// 用户拍板延长为 5 秒；到点时的
     /// 守门对齐 Flutter player_surface——暂停、缓冲中、
     /// 未就绪都不隐藏，面板（设置/选集）开着也不隐藏
     /// （旧版不看面板：菜单里选完一项控件立刻消失，
     /// 正是真机反馈的「隐藏太快」）。守门不过时顺延
     /// 一个周期重试，而不是直接放弃计时
+    /// 修复轮 12 补两条老版有、原生漏掉的守门（真机
+    /// 再报「消失得太快」的剩余来源；时长数值本轮按
+    /// 用户拍板由 3 秒改 5 秒）：① Flutter 的 _pinned
+    /// 含 _dragging——拖进度条/手势拖动中不隐藏，原生
+    /// 旧版无此守门，慢拖滑杆超过隐藏时长控件会在手下
+    /// 消失，现补 scrubValue 与 dragKind 两项；② 见
+    /// chrome 上的点按重置
     private func scheduleControlsHide() {
         hideWork?.cancel()
         let work = DispatchWorkItem { [self] in
             if !engine.isPaused, engine.phase == .ready,
-               !engine.isStalled, !showSettings, !showEpisodes {
+               !engine.isStalled, !showSettings, !showEpisodes,
+               scrubValue == nil, dragKind == .none {
                 controlsVisible = false
             } else if controlsVisible {
                 scheduleControlsHide()
             }
         }
         hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
 
     private func showHint(_ text: String) {
@@ -1181,6 +1238,19 @@ struct PlayerPage: View {
             }
         }
         .ignoresSafeArea()
+        // 控件层任意点按都重置隐藏计时（修复轮 12，
+        // 对齐 Flutter：控件区 onPointerDown 一律
+        // _scheduleHide 重排）：旧版只在「动作完成」
+        // 后重置——点开倍速/清晰度菜单慢慢挑时计时
+        // 照走，菜单还没选完控件先没了。锁定态除外：
+        // 锁钮点按要走 setLocked 的隐藏路径，两边
+        // 谁先谁后结果都一致（先点锁则此处跳过，
+        // 先此处则锁钮随后把控件收掉）
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                if !locked { showControls() }
+            }
+        )
     }
 
     private var topBar: some View {
