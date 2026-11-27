@@ -1892,6 +1892,12 @@ final class PlaybackEngine: ObservableObject {
     private var recoveryAttempts = 0
     private var recoveryRefreshes = 0
     private var recovering = false
+    /// 恢复/重试取址任务句柄（修复轮 14，H6）：旧版两个
+    /// Task 不捕获代次、不可取消，醒来无条件 load 旧集
+    /// ——用户切集后被顶回去（串集）。现在句柄存下来，
+    /// load() 开头统一 cancel，任务内部再校验代次
+    private var recoveryTask: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
     private var lastFailureReason = "open_exception"
     private var lastRawError = ""
 
@@ -2032,6 +2038,15 @@ final class PlaybackEngine: ObservableObject {
             probe.cancel()
         }
         auditProbes.removeAll()
+        // 上一轮的恢复/重试取址任务一并作废（修复轮 14，
+        // H6）：它们醒来会无条件 load 旧集，用户切集后
+        // 被顶回去（串集）；recovering 同时复位，否则
+        // 新集失败会被 handleFailure 的守门挡住无反应
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        retryTask?.cancel()
+        retryTask = nil
+        recovering = false
         intentToPlay = autoplay
         currentRequest = request
         pendingStartPosition = request.startPosition
@@ -2721,6 +2736,10 @@ final class PlaybackEngine: ObservableObject {
         softwareNotPresentedLogged = false
         softwareLastHeartbeatAt = Date.distantPast
         softwareBufferedLogged = false
+        // 卡死判定基线从本次打开起算（修复轮 14，H7）：
+        // 不刷新会把上一次播放的停滞时间算进新一轮，
+        // 看门狗可能一就绪就误杀
+        lastProgressAt = Date()
         // FFmpeg 日志桥（修复轮 8）：把 FFmpeg 的
         // av_log 接进播放调试日记（会话随软件内核
         // 开/关，见 SoftwarePlayerView 的日志桥）
@@ -2777,6 +2796,10 @@ final class PlaybackEngine: ObservableObject {
                   self.phase == .loading else { return }
             self.softwareKernelFailed("软件内核加载超时（30 秒没有开始播放）")
         }
+        // ready 之后的独立看门狗（修复轮 14，H7）：
+        // 上面这只只管 loading 阶段；就绪后内核挂死、
+        // 进度回调停摆由这只兜底
+        armSoftwareStallWatchdog(generation: generation)
     }
 
     /// 注销本次软件内核的回环代理注册：延迟 5 秒执行，
@@ -3226,6 +3249,31 @@ final class PlaybackEngine: ObservableObject {
         return result
     }
 
+    /// 软件内核独立看门狗（修复轮 14，H7）：每 5 秒
+    /// 自查一轮，不依赖任何进度回调——旧版 20 秒卡死
+    /// 判定写在 noteSoftwareProgress 内部，内核挂死、
+    /// 回调一停就永远触发不了，ready 后挂死就是永久
+    /// 黑屏。这里与回调无关：意图播放、已就绪、位置
+    /// 20 秒没推进 → 走既有软件内核失败路径。用户
+    /// 主动暂停（intentToPlay = false）不触发；代次
+    /// 变化（切集/重开）或切走软件内核时自停
+    private func armSoftwareStallWatchdog(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self,
+                  generation == self.loadGeneration,
+                  self.activeKernel == .software else { return }
+            self.armSoftwareStallWatchdog(generation: generation)
+            guard self.intentToPlay, self.phase == .ready,
+                  Date().timeIntervalSince(self.lastProgressAt) > 20
+            else { return }
+            // 先刷新计时防连环触发：失败处理会进恢复
+            // 链或换内核，代次/内核随之变化，看门狗
+            // 自然停摆
+            self.lastProgressAt = Date()
+            self.softwareKernelFailed("软件内核画面长时间没有进度")
+        }
+    }
+
     /// 加载看门狗：30 秒没就绪且毫无进度 → 超时失败，不许无限转圈
     private func scheduleLoadTimeout(generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
@@ -3245,6 +3293,10 @@ final class PlaybackEngine: ObservableObject {
 
     func play() {
         intentToPlay = true
+        // 恢复播放刷新卡死判定基线（修复轮 14，H7）：
+        // 暂停期间位置本就不动，那段时间不算停滞，
+        // 否则长暂停后一恢复就被看门狗误判卡死
+        lastProgressAt = Date()
         if activeKernel == .software {
             softwareControl?.kernelPlay()
             softwareControl?.kernelSetRate(playbackRate)
@@ -3368,14 +3420,21 @@ final class PlaybackEngine: ObservableObject {
     /// 时普通失败继续阶梯、格式类直接报错。
     private func scheduleRecovery(reason: String, raw: String, attempt: Int) {
         recovering = true
+        // 代次校验（修复轮 14，H6）：任务捕获当前
+        // loadGeneration，退避醒来与取址回来后各校验
+        // 一次——代次已变（用户切了集、新 load 已复位
+        // recovering 并 cancel 本任务）就直接收手，
+        // 不许把用户已切走的新集顶掉
+        let generation = loadGeneration
         let backoff: [Double] = [0.8, 1.5, 2.5, 4.0, 6.0, 6.0]
         let delay = backoff[min(attempt - 1, backoff.count - 1)]
         let keepPosition = currentTime
-        Task { [weak self] in
+        recoveryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard let self else { return }
+            guard let self, generation == self.loadGeneration else { return }
             let recover = self.onRecover
             let fresh = await recover?(reason, attempt)
+            guard generation == self.loadGeneration else { return }
             self.recovering = false
             if var fresh {
                 if keepPosition > 1 {
@@ -3470,9 +3529,13 @@ final class PlaybackEngine: ObservableObject {
             recovering = true
             loadingMessage = "正在重新获取播放地址"
             phase = .loading
-            Task { [weak self] in
+            // 代次校验（修复轮 14，H6）：句柄存下供
+            // load() cancel；取址期间用户切集，旧重试
+            // 结果回来发现代次已变就收手，不顶掉新集
+            let generation = loadGeneration
+            retryTask = Task { [weak self] in
                 let fresh = await onRecover("manual_retry", 0)
-                guard let self else { return }
+                guard let self, generation == self.loadGeneration else { return }
                 self.recovering = false
                 if var fresh {
                     fresh.startPosition = position

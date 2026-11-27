@@ -61,6 +61,12 @@ enum Migration {
             if fileProgress > 0 {
                 parts.append("文件进度 \(fileProgress)")
             }
+            // 错误必须有展示出口（修复轮 14，M27）：此前
+            // errors 只进内存、summary 不带，诊断页/「我的」
+            // 页/启动日记都看不到，静默丢数据无从察觉
+            if !errors.isEmpty {
+                parts.append("错误 \(errors.count) 条：\(errors[0])")
+            }
             return parts.joined(separator: " · ")
         }
     }
@@ -95,15 +101,20 @@ enum Migration {
             return report
         }
         let support = AppData.legacySupportDirectory
-        do { report.modules = try migrateModules(support: support, dataDirectory: dataDirectory) }
-        catch { report.errors.append("模块：\(error.localizedDescription)") }
-        do { report.moduleStates = try migrateModuleStates(support: support, dataDirectory: dataDirectory) }
-        catch { report.errors.append("模块状态：\(error.localizedDescription)") }
-        do {
-            let outcome = try migrateStoreFiles(support: support, dataDirectory: dataDirectory)
-            report.historyEntries = outcome.history
-            report.settingsFilled = outcome.settings
-        } catch { report.errors.append("历史/设置：\(error.localizedDescription)") }
+        // 各迁移步骤内部逐项记错续搬（修复轮 14，M27），
+        // 错误统一汇进 report.errors：既进 summary 展示，
+        // 也让下面的标记落盘条件能感知——有未处理错误
+        // 就不写标记，下次启动重试
+        let moduleOutcome = migrateModules(support: support, dataDirectory: dataDirectory)
+        report.modules = moduleOutcome.count
+        report.errors.append(contentsOf: moduleOutcome.errors)
+        let stateOutcome = migrateModuleStates(support: support, dataDirectory: dataDirectory)
+        report.moduleStates = stateOutcome.count
+        report.errors.append(contentsOf: stateOutcome.errors)
+        let storeOutcome = migrateStoreFiles(support: support, dataDirectory: dataDirectory)
+        report.historyEntries = storeOutcome.history
+        report.settingsFilled = storeOutcome.settings
+        report.errors.append(contentsOf: storeOutcome.errors)
         do {
             let outcome = try migrateFileSources(dataDirectory: dataDirectory)
             report.fileSources = outcome.sources
@@ -112,6 +123,11 @@ enum Migration {
             report.fileProgressFound = outcome.progressFound
         } catch { report.errors.append("文件源：\(error.localizedDescription)") }
 
+        // 标记落盘条件：无未处理错误（修复轮 14，M32）。
+        // 此前条件本身没错，坏在模块逐个拷贝、文件损坏
+        // 这两类失败根本没记进 errors，标记照常落盘、
+        // 静默结案；现在两类错误都会汇进来，坏数据会
+        // 在下次启动重试（已搬成功的部分幂等跳过）
         if report.errors.isEmpty {
             AppData.writeJSON([
                 "version": 1,
@@ -131,13 +147,16 @@ enum Migration {
 
     // MARK: - 模块与模块状态
 
-    private static func migrateModules(support: URL, dataDirectory: URL) throws -> Int {
+    private static func migrateModules(
+        support: URL, dataDirectory: URL
+    ) -> (count: Int, errors: [String]) {
         let legacyRoot = support.appendingPathComponent("modules")
         let newRoot = dataDirectory.appendingPathComponent("modules")
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: legacyRoot, includingPropertiesForKeys: [.isDirectoryKey]
-        ) else { return 0 }
+        ) else { return (0, []) }
         var copied = 0
+        var errors: [String] = []
         for entry in entries {
             let isDirectory = (try? entry.resourceValues(
                 forKeys: [.isDirectoryKey]
@@ -149,21 +168,34 @@ enum Migration {
                   FileManager.default.fileExists(atPath: main.path) else { continue }
             let destination = newRoot.appendingPathComponent(entry.lastPathComponent)
             if FileManager.default.fileExists(atPath: destination.path) { continue }
-            try FileManager.default.createDirectory(
-                at: newRoot, withIntermediateDirectories: true
-            )
-            try FileManager.default.copyItem(at: entry, to: destination)
-            copied += 1
+            // 逐个记错续搬（修复轮 14，M27）：旧版任一
+            // copyItem 抛错就整轮中断，它后面的模块永远
+            // 搬不过来，且标记不落盘导致每启动都在同一
+            // 颗坏模块上重撞
+            do {
+                try FileManager.default.createDirectory(
+                    at: newRoot, withIntermediateDirectories: true
+                )
+                try FileManager.default.copyItem(at: entry, to: destination)
+                copied += 1
+            } catch {
+                errors.append(
+                    "模块 \(entry.lastPathComponent)：\(error.localizedDescription)"
+                )
+            }
         }
-        return copied
+        return (copied, errors)
     }
 
-    private static func migrateModuleStates(support: URL, dataDirectory: URL) throws -> Int {
+    private static func migrateModuleStates(
+        support: URL, dataDirectory: URL
+    ) -> (count: Int, errors: [String]) {
         let stateDirectory = dataDirectory.appendingPathComponent("module-state")
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: support, includingPropertiesForKeys: [.isRegularFileKey]
-        ) else { return 0 }
+        ) else { return (0, []) }
         var copied = 0
+        var errors: [String] = []
         for entry in entries where entry.lastPathComponent.hasPrefix("module-") {
             let isFile = (try? entry.resourceValues(
                 forKeys: [.isRegularFileKey]
@@ -171,13 +203,20 @@ enum Migration {
             guard isFile else { continue }
             let destination = stateDirectory.appendingPathComponent(entry.lastPathComponent)
             if FileManager.default.fileExists(atPath: destination.path) { continue }
-            try FileManager.default.createDirectory(
-                at: stateDirectory, withIntermediateDirectories: true
-            )
-            try FileManager.default.copyItem(at: entry, to: destination)
-            copied += 1
+            // 与 migrateModules 同口径逐个记错续搬（M27）
+            do {
+                try FileManager.default.createDirectory(
+                    at: stateDirectory, withIntermediateDirectories: true
+                )
+                try FileManager.default.copyItem(at: entry, to: destination)
+                copied += 1
+            } catch {
+                errors.append(
+                    "模块状态 \(entry.lastPathComponent)：\(error.localizedDescription)"
+                )
+            }
         }
-        return copied
+        return (copied, errors)
     }
 
     // MARK: - LocalStore 文件库（历史 / 设置 / 当前源）
@@ -188,17 +227,36 @@ enum Migration {
         return AppData.readJSON(URL(fileURLWithPath: url.path + ".bak"))
     }
 
+    /// 带损坏感知的读法（修复轮 14，M32）：主文件与 .bak
+    /// 都读不出时——文件不存在 = 旧版没这份数据，正常
+    /// 跳过；文件存在却解析失败 = 数据损坏，记错。
+    /// 调用方据此不写迁移标记、下次启动重试，而不是
+    /// 把「读不出」当「没有」静默结案
+    private static func readStoreFileChecked(
+        _ url: URL, label: String, errors: inout [String]
+    ) -> Any? {
+        if let value = readStoreFile(url) { return value }
+        if FileManager.default.fileExists(atPath: url.path)
+            || FileManager.default.fileExists(atPath: url.path + ".bak") {
+            errors.append("\(label)：旧版文件存在但解析失败")
+        }
+        return nil
+    }
+
     private static func migrateStoreFiles(
         support: URL, dataDirectory: URL
-    ) throws -> (history: Int, settings: Int) {
+    ) -> (history: Int, settings: Int, errors: [String]) {
         let storeRoot = support.appendingPathComponent("store")
         var historyCount = 0
         var settingsCount = 0
+        var errors: [String] = []
 
         // 当前用户 id（users.json 的 active）
         var activeId = "default"
-        if let users = readStoreFile(storeRoot.appendingPathComponent("users.json"))
-            as? [String: Any],
+        if let users = readStoreFileChecked(
+            storeRoot.appendingPathComponent("users.json"),
+            label: "当前用户", errors: &errors
+        ) as? [String: Any],
            let active = users["active"] as? String, !active.isEmpty {
             activeId = active
         }
@@ -207,16 +265,20 @@ enum Migration {
             .appendingPathComponent(activeId)
 
         // 历史：users/<id>/history.json 的 [WatchEntry]
-        if let rows = readStoreFile(userDirectory.appendingPathComponent("history.json"))
-            as? [Any] {
+        if let rows = readStoreFileChecked(
+            userDirectory.appendingPathComponent("history.json"),
+            label: "历史", errors: &errors
+        ) as? [Any] {
             historyCount = mergeHistory(rows: rows, dataDirectory: dataDirectory)
         }
 
         // 用户设置：当前源 + playback 子对象 + 最近搜索
         var currentSource = ""
         var playback: [String: Any] = [:]
-        if let settings = readStoreFile(userDirectory.appendingPathComponent("settings.json"))
-            as? [String: Any] {
+        if let settings = readStoreFileChecked(
+            userDirectory.appendingPathComponent("settings.json"),
+            label: "用户设置", errors: &errors
+        ) as? [String: Any] {
             currentSource = JSON.dictString(settings["source"])
             playback = settings["playback"] as? [String: Any] ?? [:]
             if let searches = settings["recentSearches"] as? [Any] {
@@ -232,13 +294,15 @@ enum Migration {
         // 全局设置：sourceSwitches → library.json 的 disabled；
         // 当前源 → library.json 的 current（仅补空缺，不覆盖）
         var disabled: [String] = []
-        if let global = readStoreFile(storeRoot.appendingPathComponent("settings.json"))
-            as? [String: Any],
+        if let global = readStoreFileChecked(
+            storeRoot.appendingPathComponent("settings.json"),
+            label: "全局设置", errors: &errors
+        ) as? [String: Any],
            let switches = global["sourceSwitches"] as? [String: Any] {
             disabled = switches.filter { ($0.value as? Bool) == false }.map { $0.key }
         }
         fillLibrary(current: currentSource, disabled: disabled, dataDirectory: dataDirectory)
-        return (historyCount, settingsCount)
+        return (historyCount, settingsCount, errors)
     }
 
     private static func mergeHistory(rows: [Any], dataDirectory: URL) -> Int {

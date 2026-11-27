@@ -386,16 +386,19 @@ final class DownloadManager: ObservableObject {
         // 全都更高时取最低）；0 = 自动，用模块的默认计划
         var chosenURL = plan.url
         var chosenHeaders = plan.headers
+        var chosenKeyHex = plan.decryptionKeyHex
         if let wanted = downloadPreferences?.quality, wanted != 0 {
             let usable = plan.variants.filter { !$0.url.isEmpty }
             if let exact = usable.first(where: { $0.quality == wanted }) {
                 chosenURL = exact.url
                 chosenHeaders = exact.headers
+                chosenKeyHex = exact.decryptionKeyHex
             } else if !usable.isEmpty {
                 let sorted = usable.sorted { $0.quality < $1.quality }
                 let pick = sorted.last { $0.quality <= wanted } ?? sorted[0]
                 chosenURL = pick.url
                 chosenHeaders = pick.headers
+                chosenKeyHex = pick.decryptionKeyHex
             }
         }
         guard !chosenURL.isEmpty, URL(string: chosenURL) != nil else {
@@ -404,6 +407,13 @@ final class DownloadManager: ObservableObject {
                     ? "模块没有返回可下载地址"
                     : "模块只返回了播放列表文本，暂不支持下载"
             )
+        }
+        // 下载侧不做 CENC 解密（修复轮 14）：所选变体带
+        // decryptionKeyHex 就是加密流，下下来也是播不了
+        // 的加密文件——入队时直接拒绝并提示，不再静默
+        // 产出坏文件。不带密钥的变体照常入队
+        guard chosenKeyHex.isEmpty else {
+            throw FileSourceFailure("加密内容暂不支持下载")
         }
         var job = DownloadJob(id: Self.newId())
         job.kind = "station"

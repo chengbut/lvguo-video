@@ -531,7 +531,12 @@ enum StorageService {
         }
     }
 
-    /// 删除全部数据：清空数据目录与下载目录内容（目录本身保留）
+    /// 删除全部数据：清空数据目录与下载目录内容（目录本身保留）。
+    /// 契约（修复轮 14，H1）：downloadsBase 的**内容**会被逐项
+    /// 删除，调用方必须保证它是 App 专属目录——内置位置传
+    /// downloads 的父目录（App 专属），自定义位置必须传
+    /// downloads 子目录本身；其父目录是用户自选文件夹，
+    /// 拿父目录当删除根会连用户自己的文件一起删光
     static func deleteAllData(dataDirectory: URL, downloadsBase: URL) {
         let fileManager = FileManager.default
         var roots = [dataDirectory]
@@ -705,10 +710,21 @@ struct StorageSettingsView: View {
         .alert("删除全部数据？", isPresented: $confirmDeleteAll) {
             Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
+                // 删除范围（修复轮 14，H1）：内置位置时
+                // downloads 的父目录是 App 专属目录
+                // （support = 数据目录本身、documents =
+                // Documents/LvguoNative），保持原口径；
+                // 自定义位置时 downloadsDirectory =
+                // <用户文件夹>/downloads，父目录就是
+                // 用户文件夹本身，绝不能当删除根——
+                // 只清 downloads 子目录自身的内容
+                let downloadsBase = resourceSettings.downloadsLocation == "custom"
+                    ? downloadManager.downloadsDirectory
+                    : downloadManager.downloadsDirectory
+                        .deletingLastPathComponent()
                 StorageService.deleteAllData(
                     dataDirectory: dataDirectory,
-                    downloadsBase: downloadManager.downloadsDirectory
-                        .deletingLastPathComponent()
+                    downloadsBase: downloadsBase
                 )
                 notice = "数据已删除，请从后台划掉应用后重新打开。"
                 Task { await measure() }

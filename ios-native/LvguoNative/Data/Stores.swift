@@ -19,7 +19,17 @@ enum AppData {
     }
 
     static func readJSON(_ url: URL) -> Any? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let data = try? Data(contentsOf: url),
+           let value = try? JSONSerialization.jsonObject(with: data) {
+            return value
+        }
+        // 主文件缺失/损坏时回落 <name>.bak（修复轮 14，
+        // M26）：与旧 Flutter 版 LocalFiles 的读法一致。
+        // 没有这层兜底时，主文件一坏，Store 就按空数据
+        // 初始化，下次任意保存再用空内容原子覆盖坏
+        // 文件，还能救的数据整表静默归零
+        let backup = URL(fileURLWithPath: url.path + ".bak")
+        guard let data = try? Data(contentsOf: backup) else { return nil }
         return try? JSONSerialization.jsonObject(with: data)
     }
 
@@ -31,9 +41,26 @@ enum AppData {
         guard let data = try? JSONSerialization.data(
             withJSONObject: object, options: [.sortedKeys]
         ) else { return }
-        try? FileManager.default.createDirectory(
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
+        // 覆盖前把现有文件留一份 <name>.bak（修复轮 14，
+        // M26）：主文件损坏时 readJSON 靠它回落。.bak
+        // 写失败不阻断主流程，只记一条日记
+        if fileManager.fileExists(atPath: url.path) {
+            let backup = URL(fileURLWithPath: url.path + ".bak")
+            do {
+                if fileManager.fileExists(atPath: backup.path) {
+                    try fileManager.removeItem(at: backup)
+                }
+                try fileManager.copyItem(at: url, to: backup)
+            } catch {
+                DiaryStore.shared.add(
+                    "数据文件备份失败（\(url.lastPathComponent)）：\(error.localizedDescription)"
+                )
+            }
+        }
         try? data.write(to: url, options: [.atomic])
     }
 

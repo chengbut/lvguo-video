@@ -148,6 +148,16 @@ private final class FtpLineChannel {
     private var failure: Error?
     private var closed = false
     private var startResumed = false
+    /// 建连看门狗时限（修复轮 14，H8）：NWConnection 卡在
+    /// .waiting（主机不可达、防火墙丢包）时 stateUpdateHandler
+    /// 永远不再回调，start() 必须自己兜底超时
+    private static let connectTimeout: TimeInterval = 20
+    /// 数据连接空闲时限（修复轮 14，H9）：与控制通道
+    /// nextLine 的 25 秒同口径，按「无新数据到达」计
+    private static let dataIdleTimeout: TimeInterval = 25
+    /// 数据空闲看门狗的代次令牌：每次有新数据到达就
+    /// 递增续期，旧看门狗醒来发现令牌已变就自行作废
+    private var dataActivityToken = 0
 
     init(connection: NWConnection) {
         self.connection = connection
@@ -183,6 +193,16 @@ private final class FtpLineChannel {
                 }
             }
             connection.start(queue: queue)
+            // .waiting 兜底（修复轮 14，H8）：超时未就绪
+            // 就取消连接并报错，不许无限转圈
+            queue.asyncAfter(deadline: .now() + Self.connectTimeout) { [weak self] in
+                guard let self, !self.startResumed else { return }
+                self.startResumed = true
+                self.connection.cancel()
+                continuation.resume(
+                    throwing: FileSourceFailure("连接 FTP 服务器超时，请检查主机和网络")
+                )
+            }
         }
     }
 
@@ -204,10 +224,12 @@ private final class FtpLineChannel {
     private func ingest(_ data: Data) {
         if streamWaiter != nil {
             streamHandler?(data)
+            armDataIdleWatchdog()
             return
         }
         if dataWaiter != nil {
             dataChunks.append(data)
+            armDataIdleWatchdog()
             return
         }
         buffer.append(data)
@@ -286,6 +308,23 @@ private final class FtpLineChannel {
         }
     }
 
+    /// 数据读取空闲看门狗（修复轮 14，H9）：登记数据
+    /// 等待方与每次有新数据到达时各续期一次；超过
+    /// dataIdleTimeout 无新数据，判定连接半开/挂死
+    /// （服务器半开、NAT 映射过期）——整连接作废，
+    /// 等待方收到超时错误，不再永久挂起
+    private func armDataIdleWatchdog() {
+        dataActivityToken += 1
+        let token = dataActivityToken
+        queue.asyncAfter(deadline: .now() + Self.dataIdleTimeout) { [weak self] in
+            guard let self, self.dataActivityToken == token,
+                  self.dataWaiter != nil || self.streamWaiter != nil
+            else { return }
+            self.fail(FileSourceFailure("FTP 数据传输超时"))
+            self.connection.cancel()
+        }
+    }
+
     /// 数据连接：收全部字节直到对端关闭
     func readAllData() async throws -> Data {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
@@ -300,6 +339,7 @@ private final class FtpLineChannel {
                 }
                 self.dataChunks = []
                 self.dataWaiter = continuation
+                self.armDataIdleWatchdog()
             }
         }
     }
@@ -318,6 +358,7 @@ private final class FtpLineChannel {
                 }
                 self.streamHandler = onChunk
                 self.streamWaiter = continuation
+                self.armDataIdleWatchdog()
             }
         }
     }
