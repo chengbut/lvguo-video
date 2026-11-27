@@ -2,15 +2,15 @@ import Foundation
 
 /// 模块导出函数的类型化封装（对应 Go provider 的 App 侧入口）：
 /// categories / catalogPage / search / detail / resolveMedia / account。
-/// 每个方法都走 ModuleRuntime.call（JSON 约定），结果按 Go models 的宽容解析。
+/// 每个方法都走运行时池的 call（JSON 约定），结果按 Go models 的宽容解析。
 struct ModuleProvider {
-    let runtime: ModuleRuntime
+    let pool: ModuleRuntimePool
 
-    var manifest: ModuleManifest { runtime.manifest }
+    var manifest: ModuleManifest { pool.manifest }
 
     /// categories(force) → 分类数组或 {items, incomplete}（Go parseModuleCategories）
     func categories(force: Bool = false) async throws -> [CatalogCategory] {
-        let result = try await runtime.call("categories", arguments: [force])
+        let result = try await pool.call("categories", arguments: [force])
         return CatalogCategory.parseList(result)
             .filter { !$0.id.isEmpty }
             .map { category in
@@ -23,7 +23,7 @@ struct ModuleProvider {
 
     /// catalogPage(page, category) → {items, hasMore, warning}（Go moduleCatalogPage）
     func catalogPage(page: Int, category: String) async throws -> DramaPage {
-        let result = try await runtime.call(
+        let result = try await pool.call(
             "catalogPage", arguments: [page, category]
         )
         return DramaPage.parse(result, fallbackSource: manifest.id)
@@ -31,13 +31,13 @@ struct ModuleProvider {
 
     /// search(page, query) → 同 catalogPage 的分页结构
     func search(page: Int, query: String) async throws -> DramaPage {
-        let result = try await runtime.call("search", arguments: [page, query])
+        let result = try await pool.call("search", arguments: [page, query])
         return DramaPage.parse(result, fallbackSource: manifest.id)
     }
 
     /// detail(sourceId) → {drama, chapters}（Go moduleDetail）
     func detail(sourceId: String) async throws -> (drama: DramaItem, chapters: [ChapterItem]) {
-        let result = try await runtime.call("detail", arguments: [sourceId])
+        let result = try await pool.call("detail", arguments: [sourceId])
         guard let object = result as? [String: Any] else {
             throw ModuleError.bridge("模块详情格式无效")
         }
@@ -67,7 +67,7 @@ struct ModuleProvider {
             "outPath": "",
             "releaseStatus": ""
         ]
-        let result = try await runtime.call("resolveMedia", arguments: [task])
+        let result = try await pool.call("resolveMedia", arguments: [task])
         guard let media = result as? [String: Any] else {
             throw ModuleError.bridge("模块播放结果格式无效")
         }
@@ -76,6 +76,6 @@ struct ModuleProvider {
 
     /// account(command, payload) → 账号命令（资源页暂未用到，保留接口）
     func account(command: String, payload: Any?) async throws -> Any? {
-        try await runtime.call("account", arguments: [command, payload ?? NSNull()])
+        try await pool.call("account", arguments: [command, payload ?? NSNull()])
     }
 }

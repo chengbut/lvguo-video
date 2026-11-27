@@ -20,7 +20,7 @@ struct MineView: View {
                         Label {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("播放")
-                                Text("倍速、静音、跳过片头片尾、自动连播")
+                                Text("倍速、静音、跳过片头片尾、手势与显示")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -95,14 +95,10 @@ struct PlaybackSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Toggle(isOn: $settings.autoAdvance) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("自动连播")
-                    Text("一集播完自动播放下一集")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            // 注意：Flutter 设置页没有「自动连播」开关条目——
+            // 只有 PlaybackPreferences.autoAdvance 字段（默认开）
+            // 与播放逻辑。按先照搬原则此处不摆开关，字段与
+            // 默认值在 SettingsStore 里保留、行为不变。
             Picker("跳过片头", selection: $settings.skipIntroSeconds) {
                 ForEach(Self.introOptions, id: \.0) { option in
                     Text(option.1).tag(option.0)
@@ -127,6 +123,24 @@ struct PlaybackSettingsView: View {
                     Text("关闭后不再保存观看进度与历史")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+            }
+            Section("手势与显示") {
+                Toggle("双击快进 / 快退", isOn: $settings.doubleTapSeek)
+                Toggle("滑动调节亮度 / 音量", isOn: $settings.swipeLevels)
+                Toggle("滑动切换集数", isOn: $settings.swipeEpisodes)
+                Toggle("显示时钟", isOn: $settings.showClock)
+                Toggle("显示网速", isOn: $settings.showNetworkSpeed)
+                Toggle("自动画中画", isOn: $settings.autoPictureInPicture)
+                Picker("长按倍速", selection: $settings.boostSpeed) {
+                    ForEach([1.5, 2.0, 2.5, 3.0, 4.0], id: \.self) { speed in
+                        Text(speedLabel(speed)).tag(speed)
+                    }
+                }
+                Picker("默认画面比例", selection: $settings.videoFit) {
+                    ForEach(VideoFitMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
                 }
             }
         }

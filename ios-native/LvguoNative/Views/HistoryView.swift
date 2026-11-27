@@ -319,6 +319,24 @@ struct HistoryView: View {
         resumingId = record.key
         defer { resumingId = nil }
         let session = PlaybackSession()
+        session.displayTitle = progress.title
+        session.onRefresh = { [source] _ in
+            // 恢复时重新取址（云盘/直链地址可能已过期）
+            if source.type == .http {
+                guard let url = URL(string: progress.url.isEmpty ? source.url : progress.url)
+                else { return nil }
+                return PlaybackRequest(url: url, title: progress.title)
+            }
+            let client = createFileSourceClient(source)
+            let entry = FileEntry(
+                name: progress.title,
+                href: progress.ref.isEmpty ? progress.url : progress.ref,
+                isDirectory: false
+            )
+            guard let target = try? await client.target(entry),
+                  let url = URL(string: target.url) else { return nil }
+            return PlaybackRequest(url: url, headers: target.headers, title: progress.title)
+        }
         session.onProgress = { [fileStore, source] _, position, duration in
             fileStore.saveProgress(
                 record.key,

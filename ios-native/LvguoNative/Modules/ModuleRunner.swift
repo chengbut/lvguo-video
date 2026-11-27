@@ -23,6 +23,20 @@ enum ModuleError: Error, CustomStringConvertible, LocalizedError {
     }
 }
 
+/// 模块级共享状态：同一模块的全部运行时实例共用一份
+/// （对齐 Go jsProvider——cache/日志/reserve 票据/exclusive
+/// 锁都是 provider 级，实例只是 JS 虚拟机的个数）。
+final class ModuleSharedState {
+    var cache: [String: (value: String, expires: Date?)] = [:]
+    var logs: [String] = []
+    var ticketCounter = 0
+    var issuedTickets = Set<Int>()
+    /// host.exclusive 的跨实例串行锁（递归锁：嵌套 exclusive
+    /// 时不自锁死；Go 的 channel 信号量嵌套会死锁，此处放宽）
+    let exclusiveLock = NSRecursiveLock()
+    let lock = NSLock()
+}
+
 /// host.* 桥的原生实现：与 JS 上下文无关，只依赖清单与状态目录，
 /// 因此可以被 block 捕获而不与 JSContext 形成引用环。
 /// 约定与 Go 核心 module_script.go / module_host.go 一一对应：
@@ -32,12 +46,21 @@ enum ModuleError: Error, CustomStringConvertible, LocalizedError {
 final class ModuleHostBridge {
     let manifest: ModuleManifest
     private let stateDirectory: URL
-    private(set) var logs: [String] = []
-    private var cache: [String: (value: String, expires: Date?)] = [:]
+    let shared: ModuleSharedState
 
-    init(manifest: ModuleManifest, stateDirectory: URL) {
+    var logs: [String] {
+        shared.lock.lock()
+        defer { shared.lock.unlock() }
+        return shared.logs
+    }
+
+    init(
+        manifest: ModuleManifest, stateDirectory: URL,
+        shared: ModuleSharedState = ModuleSharedState()
+    ) {
         self.manifest = manifest
         self.stateDirectory = stateDirectory
+        self.shared = shared
     }
 
     // MARK: - 基础工具
@@ -60,10 +83,12 @@ final class ModuleHostBridge {
     }
 
     func appendLog(_ message: String) {
-        logs.append(message)
-        if logs.count > 200 {
-            logs.removeFirst(logs.count - 200)
+        shared.lock.lock()
+        shared.logs.append(message)
+        if shared.logs.count > 200 {
+            shared.logs.removeFirst(shared.logs.count - 200)
         }
+        shared.lock.unlock()
         print("[Module \(manifest.id)] \(message)")
     }
 
@@ -178,8 +203,13 @@ final class ModuleHostBridge {
         // 带 ticket 的请求先消费名额（Go takeReservation：一次性，
         // 不存在直接报「站源请求名额已失效」）
         let ticket = JSON.dictInt(payload["ticket"])
-        if ticket > 0, issuedTickets.remove(ticket) == nil {
-            return envelope(["error": "站源请求名额已失效"])
+        if ticket > 0 {
+            shared.lock.lock()
+            let consumed = shared.issuedTickets.remove(ticket) != nil
+            shared.lock.unlock()
+            if !consumed {
+                return envelope(["error": "站源请求名额已失效"])
+            }
         }
         let timeoutMs = JSON.dictInt(payload["timeoutMs"])
         request.timeoutInterval = timeoutMs > 0 ? Double(timeoutMs) / 1000.0 : 30
@@ -209,19 +239,30 @@ final class ModuleHostBridge {
                     "oversized": true,
                 ])
             }
-            // Go 的可接受判定：2xx，或 anyStatus，或 acceptStatus 命中
-            // 且响应体是合法 JSON（AcceptJSONStatus 的语义）
-            let acceptedByList = acceptStatus.contains(status)
+            // 拦截判定（Go catalogResponseBlockReason）：命中后
+            // 除非 anyStatus，否则与非 2xx 一样按失败处理，
+            // 错误文案走 catalogResponseError 的格式
+            let reason = Self.blockReason(
+                headers: response.allHeaderFields, body: data
+            )
+            let blocked = !reason.isEmpty
+            let acceptedByList = !blocked && acceptStatus.contains(status)
                 && (try? JSONSerialization.jsonObject(with: data)) != nil
-            let acceptable = anyStatus || acceptedByList || (200...299).contains(status)
+            let acceptable = anyStatus || acceptedByList
+                || ((200...299).contains(status) && !blocked)
             guard acceptable else {
                 return envelope([
-                    "error": "HTTP \(status)",
+                    "error": Self.responseErrorText(
+                        host: host, status: status, reason: reason
+                    ),
                     "status": status,
                     "bodyText": String(decoding: data, as: UTF8.self),
+                    "blocked": blocked,
                 ])
             }
-            var result: [String: Any] = ["status": status, "headers": headers]
+            var result: [String: Any] = [
+                "status": status, "headers": headers, "blocked": blocked,
+            ]
             if binary {
                 result["bodyB64"] = data.base64EncodedString()
             } else {
@@ -231,11 +272,40 @@ final class ModuleHostBridge {
         }
     }
 
-    // MARK: - host.reserve（请求名额：Go 侧是限流票据，原生无限制器，
-    // 只做地址校验 + 发号，fetch 时一次性消费，语义对模块等价）
+    /// 响应拦截判定，逐行对齐 Go catalogResponseBlockReason：
+    /// 只看正文前 64KB（小写后子串匹配）与 Cf-Mitigated 头，
+    /// 返回拦截原因（空串 = 未拦截）。
+    static func blockReason(headers: [AnyHashable: Any], body: Data) -> String {
+        let page = String(decoding: body.prefix(64 * 1024), as: UTF8.self)
+            .lowercased()
+        var cfMitigated = ""
+        for (key, value) in headers
+        where String(describing: key).lowercased() == "cf-mitigated" {
+            cfMitigated = "\(value)"
+        }
+        if page.contains("cloudflare"),
+           page.contains("sorry, you have been blocked")
+            || page.contains("you are unable to access") {
+            return "Cloudflare 拒绝了当前请求"
+        }
+        if cfMitigated.lowercased() == "challenge"
+            || page.contains("_cf_chl_opt")
+            || (page.contains("<title>just a moment") && page.contains("cloudflare")) {
+            return "站点要求浏览器验证，当前请求无法通过"
+        }
+        return ""
+    }
 
-    private var ticketCounter = 0
-    private var issuedTickets = Set<Int>()
+    /// Go catalogResponseError 的文案：host HTTP 状态[：拦截原因]
+    static func responseErrorText(host: String, status: Int, reason: String) -> String {
+        reason.isEmpty
+            ? "\(host) HTTP \(status)"
+            : "\(host) HTTP \(status)：\(reason)"
+    }
+
+    // MARK: - host.reserve（请求名额：Go 侧是限流票据，原生无限制器，
+    // 只做地址校验 + 发号，fetch 时一次性消费，语义对模块等价；
+    // 票据是 provider 级，同模块全部实例共用一份）
 
     func reserveEnvelope(_ json: String) -> String {
         guard let payload = parsePayload(json) else {
@@ -250,13 +320,29 @@ final class ModuleHostBridge {
         guard manifest.allowsHost(host) else {
             return envelope(["error": "模块清单未声明访问 \(host)"])
         }
-        ticketCounter += 1
-        issuedTickets.insert(ticketCounter)
-        return envelope(["ticket": ticketCounter])
+        shared.lock.lock()
+        shared.ticketCounter += 1
+        let ticket = shared.ticketCounter
+        shared.issuedTickets.insert(ticket)
+        shared.lock.unlock()
+        return envelope(["ticket": ticket])
     }
+
+    /// Go 核心的默认 UA（config_defaults.go UserAgent）
+    static let defaultUserAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) " +
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 " +
+        "Mobile/15E148 Safari/604.1"
 
     // MARK: - host.fetchText
 
+    /// 逐项对齐 Go fetchProviderRequest（FetchText 的底层）：
+    /// 候选 = 主地址 + mirrors（未声明 hosts 的镜像被过滤、
+    /// 去重）；多候选时每个只试 1 次、单次超时 5 秒，单候选
+    /// 时试 cfg.Retries 次（默认 2)、超时 ProviderTimeout
+    /// 12 秒，重试前按尝试序号秒数退避；被拦截或 4xx（408
+    /// 除外）立即放弃当前候选；多候选全败的错误文案带
+    /// 「已尝试 N 个域名」。
     func fetchTextEnvelope(_ json: String) -> String {
         guard let payload = parsePayload(json) else {
             return envelope(["error": "请求参数无效"])
@@ -268,42 +354,80 @@ final class ModuleHostBridge {
         guard manifest.allowsHost(host) else {
             return envelope(["error": "模块清单未声明访问 \(host)"])
         }
-        let referer = JSON.dictString(payload["referer"])
+        var referer = JSON.dictString(payload["referer"])
+        if referer.isEmpty { referer = urlString }
         let userAgent = JSON.dictString(payload["userAgent"])
         let cookie = JSON.dictString(payload["cookie"])
+        let noCache = JSON.dictBool(payload["noCache"])
         let body = JSON.dictString(payload["body"])
-        // Go 侧：镜像地址逐个过滤未声明 hosts，主地址未声明直接报错
         var candidates = [urlString]
         for mirror in payload["mirrors"] as? [Any] ?? [] {
             let mirrorString = JSON.dictString(mirror)
             if let mirrorURL = URL(string: mirrorString),
                let mirrorHost = mirrorURL.host,
-               manifest.allowsHost(mirrorHost) {
+               manifest.allowsHost(mirrorHost),
+               !candidates.contains(mirrorString) {
                 candidates.append(mirrorString)
             }
         }
+        let multiple = candidates.count > 1
+        let attemptsPerCandidate = multiple ? 1 : 2
+        let timeout: TimeInterval = multiple ? 5 : 12
         var lastError = "请求失败"
+        var tried = 0
         for candidate in candidates {
             guard let candidateURL = URL(string: candidate) else { continue }
-            var request = URLRequest(url: candidateURL)
-            request.httpMethod = body.isEmpty ? "GET" : "POST"
-            request.timeoutInterval = 30
-            if !referer.isEmpty { request.setValue(referer, forHTTPHeaderField: "Referer") }
-            if !userAgent.isEmpty { request.setValue(userAgent, forHTTPHeaderField: "User-Agent") }
-            if !cookie.isEmpty { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
-            if !body.isEmpty { request.httpBody = Data(body.utf8) }
-            switch perform(request, timeout: 30) {
-            case .failure(let message):
-                lastError = message
-            case .success(let data, let response):
-                if (200...299).contains(response.statusCode) {
-                    return envelope([
-                        "body": String(decoding: data, as: UTF8.self),
-                        "url": response.url?.absoluteString ?? candidate,
-                    ])
+            for attempt in 1...attemptsPerCandidate {
+                tried += 1
+                if attempt > 1 {
+                    Thread.sleep(forTimeInterval: Double(attempt))
                 }
-                lastError = "HTTP \(response.statusCode)"
+                var request = URLRequest(url: candidateURL)
+                request.httpMethod = body.isEmpty ? "GET" : "POST"
+                request.timeoutInterval = timeout
+                request.setValue(
+                    userAgent.isEmpty ? Self.defaultUserAgent : userAgent,
+                    forHTTPHeaderField: "User-Agent"
+                )
+                request.setValue(referer, forHTTPHeaderField: "Referer")
+                request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
+                if !cookie.isEmpty { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
+                if noCache { request.setValue("no-cache", forHTTPHeaderField: "Cache-Control") }
+                if !body.isEmpty {
+                    request.httpBody = Data(body.utf8)
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("application/json", forHTTPHeaderField: "Accept")
+                }
+                var abandonCandidate = false
+                switch perform(request, timeout: timeout) {
+                case .failure(let message):
+                    lastError = message
+                case .success(let data, let response):
+                    let status = response.statusCode
+                    let reason = Self.blockReason(
+                        headers: response.allHeaderFields, body: data
+                    )
+                    if (200...299).contains(status), reason.isEmpty {
+                        return envelope([
+                            "body": String(decoding: data, as: UTF8.self),
+                            "url": response.url?.absoluteString ?? candidate,
+                        ])
+                    }
+                    lastError = Self.responseErrorText(
+                        host: candidateURL.host ?? host, status: status, reason: reason
+                    )
+                    if !reason.isEmpty
+                        || (400..<500).contains(status) && status != 408 {
+                        abandonCandidate = true
+                    }
+                }
+                if abandonCandidate { break }
             }
+        }
+        if multiple {
+            return envelope([
+                "error": "站源请求失败：已尝试 \(tried) 个域名，最后错误：\(lastError)"
+            ])
         }
         return envelope(["error": lastError])
     }
@@ -342,10 +466,27 @@ final class ModuleHostBridge {
         case .failure(let message):
             return envelope(["error": message])
         case .success(let data, let response):
-            guard (200...299).contains(response.statusCode) else {
-                return envelope(["error": "HTTP \(response.statusCode)"])
+            // 对齐 Go fetchMediaPlaylist：恰好 200、未被拦截、
+            // 不超 4MB、正文（去 BOM/空白后）以 #EXTM3U 开头，
+            // 否则分别报 catalogResponseError / PlaylistError 文案
+            if data.count > 4 << 20 {
+                return envelope(["error": "播放列表过大或读取失败"])
+            }
+            let reason = Self.blockReason(
+                headers: response.allHeaderFields, body: data
+            )
+            guard response.statusCode == 200, reason.isEmpty else {
+                return envelope(["error": Self.responseErrorText(
+                    host: url.host ?? "", status: response.statusCode, reason: reason
+                )])
             }
             let playlist = String(decoding: data, as: UTF8.self)
+            let trimmed = playlist
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}"))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("#EXTM3U") else {
+                return envelope(["error": "站源未返回有效的播放列表，链接可能已失效"])
+            }
             // 与 Go M3u8Duration 一致：累加 #EXTINF 秒数
             var seconds = 0.0
             for line in playlist.split(separator: "\n") {
@@ -365,12 +506,18 @@ final class ModuleHostBridge {
 
     // MARK: - host.prepareWebMedia / finishMedia
 
-    /// 拉播放列表原文（带凭据头），失败返回错误文本。
-    /// Go 侧 fetchMediaPlaylist 还有多候选地址重试，原生只拉主地址。
+    /// 拉播放列表原文（带凭据头），失败把具体错误带回来
+    /// （对齐 Go fetchMediaPlaylist 的错误原文，不再吞成一句
+    /// 「拉取失败」）。说明：Go 的 fetchMediaPlaylist 本身也是
+    /// 单地址直拉（doMediaRequest 无域名轮换），多候选轮换只
+    /// 存在于文本抓取 fetchProviderRequest——已在 fetchText
+    /// 里对齐，故这里单地址即与 Go 等价。
     private func fetchPlaylistRaw(
         urlString: String, referer: String, credentials: MediaCredentials?
-    ) -> (playlist: String, finalURL: String)? {
-        guard let url = URL(string: urlString) else { return nil }
+    ) -> (playlist: String, finalURL: String, error: String?) {
+        guard let url = URL(string: urlString) else {
+            return ("", "", "播放列表地址无效")
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         var effectiveReferer = referer
@@ -392,13 +539,24 @@ final class ModuleHostBridge {
             request.setValue(effectiveReferer, forHTTPHeaderField: "Referer")
         }
         switch perform(request, timeout: 30) {
-        case .failure:
-            return nil
+        case .failure(let message):
+            return ("", "", message)
         case .success(let data, let response):
-            guard (200...299).contains(response.statusCode) else { return nil }
+            if data.count > 4 << 20 {
+                return ("", "", "播放列表过大或读取失败")
+            }
+            let reason = Self.blockReason(
+                headers: response.allHeaderFields, body: data
+            )
+            guard response.statusCode == 200, reason.isEmpty else {
+                return ("", "", Self.responseErrorText(
+                    host: url.host ?? "", status: response.statusCode, reason: reason
+                ))
+            }
             return (
                 playlist: String(decoding: data, as: UTF8.self),
-                finalURL: response.url?.absoluteString ?? urlString
+                finalURL: response.url?.absoluteString ?? urlString,
+                error: nil
             )
         }
     }
@@ -424,14 +582,15 @@ final class ModuleHostBridge {
         }
         if url.path.lowercased().hasSuffix(".m3u8") {
             let credentials = MediaCredentials.parse(media["credentials"])
-            guard let fetched = fetchPlaylistRaw(
+            let fetched = fetchPlaylistRaw(
                 urlString: urlString,
                 referer: JSON.dictString(media["referer"]),
                 credentials: credentials
-            ) else {
+            )
+            if let fetchError = fetched.error {
                 return envelope(["error": finish
-                    ? "获取播放列表失败: 拉取播放列表失败"
-                    : "获取\(sourceName)播放列表失败：拉取播放列表失败"])
+                    ? "获取播放列表失败: \(fetchError)"
+                    : "获取\(sourceName)播放列表失败：\(fetchError)"])
             }
             let trimmed = fetched.playlist
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}"))
@@ -524,9 +683,11 @@ final class ModuleHostBridge {
     // MARK: - host.cacheGet / cacheSet（内存缓存，语义同 Go moduleCache）
 
     func cacheGetEnvelope(_ key: String) -> String {
-        if let entry = cache[key] {
+        shared.lock.lock()
+        defer { shared.lock.unlock() }
+        if let entry = shared.cache[key] {
             if let expires = entry.expires, expires < Date() {
-                cache[key] = nil
+                shared.cache[key] = nil
             } else {
                 return envelope(["value": entry.value])
             }
@@ -535,13 +696,15 @@ final class ModuleHostBridge {
     }
 
     func cacheSet(_ key: String, _ value: String, _ ttlMs: Double) {
+        shared.lock.lock()
+        defer { shared.lock.unlock() }
         // Go：空值即删键
         if value.isEmpty {
-            cache[key] = nil
+            shared.cache[key] = nil
             return
         }
         let expires = ttlMs > 0 ? Date().addingTimeInterval(ttlMs / 1000.0) : nil
-        cache[key] = (value: value, expires: expires)
+        shared.cache[key] = (value: value, expires: expires)
     }
 
     // MARK: - host 加密/摘要（入参出参均为 base64）
@@ -1178,26 +1341,74 @@ function __parseHtml(text) {
           attrValue = text.substring(valueStart, j);
         }
       }
-      if (attrName && !(attrName in attrs)) {
+      if (attrName) {
+        // 重复属性后胜：对齐 Go moduleHTMLTree 把 Attr 列表
+        // 顺序写进 map 的覆盖结果
         attrs[attrName] = __decodeEntities(attrValue);
       }
     }
     i = j;
-    // 常见自动闭合规则的子集
-    var top = stack[stack.length - 1];
-    if (top && top.tag === 'p' && pClosers[tagName]) stack.pop();
+    // 自动闭合：按 HTML5 的作用域规则向上查找要关的元素
+    //（不只看栈顶；stoppers 是作用域边界），对齐 x/net/html
+    // 对常见页面的树形状。foster parenting 等极端情形仍有
+    // 出入，见 README 对齐表。
+    function closeUpTo(tags, stoppers) {
+      for (var s = stack.length - 1; s >= 0; s--) {
+        if (tags[stack[s].tag]) { stack.length = s; return true; }
+        if (stoppers[stack[s].tag]) return false;
+      }
+      return false;
+    }
+    var scopeStop = { html: 1, body: 1, table: 1, td: 1, th: 1, caption: 1 };
+    if (pClosers[tagName]) {
+      closeUpTo({ p: 1 }, { html: 1, body: 1, table: 1, td: 1, th: 1,
+        caption: 1, button: 1 });
+    }
     if (tagName === 'li') {
-      if (top && top.tag === 'li') stack.pop();
+      closeUpTo({ li: 1 }, { ul: 1, ol: 1, html: 1, body: 1, table: 1,
+        td: 1, th: 1, caption: 1 });
     } else if (tagName === 'dt' || tagName === 'dd') {
-      if (top && (top.tag === 'dt' || top.tag === 'dd')) stack.pop();
+      closeUpTo({ dt: 1, dd: 1 }, { dl: 1, html: 1, body: 1 });
     } else if (tagName === 'td' || tagName === 'th') {
-      if (top && (top.tag === 'td' || top.tag === 'th')) stack.pop();
+      closeUpTo({ td: 1, th: 1 }, { tr: 1, table: 1, html: 1, body: 1 });
     } else if (tagName === 'tr') {
-      while (stack.length && (stack[stack.length - 1].tag === 'td'
-          || stack[stack.length - 1].tag === 'th')) stack.pop();
-      if (stack.length && stack[stack.length - 1].tag === 'tr') stack.pop();
+      closeUpTo({ tr: 1 }, { table: 1, html: 1, body: 1 });
+    } else if (tagName === 'tbody' || tagName === 'thead' || tagName === 'tfoot') {
+      closeUpTo({ tbody: 1, thead: 1, tfoot: 1 }, { table: 1, html: 1, body: 1 });
     } else if (tagName === 'option') {
-      if (top && top.tag === 'option') stack.pop();
+      closeUpTo({ option: 1 }, { select: 1, html: 1, body: 1 });
+    } else if (tagName === 'optgroup') {
+      closeUpTo({ option: 1 }, { select: 1, html: 1, body: 1 });
+      closeUpTo({ optgroup: 1 }, { select: 1, html: 1, body: 1 });
+    } else if (tagName === 'a') {
+      closeUpTo({ a: 1 }, scopeStop);
+    } else if (tagName === 'button') {
+      closeUpTo({ button: 1 }, scopeStop);
+    } else if (/^h[1-6]$/.test(tagName)) {
+      var topNow = stack[stack.length - 1];
+      if (topNow && /^h[1-6]$/.test(topNow.tag)) stack.pop();
+    }
+    // 表格隐含包装：tr 直接在 table 下要包 tbody，
+    // td/th 缺行时补 tbody+tr 或 tr（x/net/html 同）
+    var parentNow = stack[stack.length - 1];
+    if (tagName === 'tr' && parentNow && parentNow.tag === 'table') {
+      var tbodyEl = makeElement('tbody', {});
+      parentNow.children.push(tbodyEl);
+      stack.push(tbodyEl);
+    } else if ((tagName === 'td' || tagName === 'th') && parentNow) {
+      if (parentNow.tag === 'table') {
+        var tbodyEl2 = makeElement('tbody', {});
+        parentNow.children.push(tbodyEl2);
+        stack.push(tbodyEl2);
+        var trEl2 = makeElement('tr', {});
+        tbodyEl2.children.push(trEl2);
+        stack.push(trEl2);
+      } else if (parentNow.tag === 'tbody' || parentNow.tag === 'thead'
+          || parentNow.tag === 'tfoot') {
+        var trEl3 = makeElement('tr', {});
+        parentNow.children.push(trEl3);
+        stack.push(trEl3);
+      }
     }
     var element = makeElement(tagName, attrs);
     currentChildren().push(element);
@@ -1353,7 +1564,11 @@ var __hostObject = {
     return resolved;
   },
   preferredSite: function () { return ''; },
-  exclusive: function (fn) { return fn(); },
+  exclusive: function (fn) {
+    // 跨实例串行（Go 的 provider 级信号量）：原生锁在桥侧持有
+    __host_exclusiveBegin();
+    try { return fn(); } finally { __host_exclusiveEnd(); }
+  },
   prepareWebMedia: function (media, sourceName) {
     var env = JSON.parse(__host_webMedia(
       JSON.stringify(media || {}), String(sourceName || ''), 'prepare'));
@@ -1463,11 +1678,12 @@ var __hostObject = {
 
 // MARK: - 模块运行时
 
-/// 一个已安装模块的 JS 运行时：与 Go jsProvider 的单实例对应。
+/// 一个已安装模块的 JS 运行时实例：与 Go jsInstance 对应。
 /// 模块代码按 Go 的方式包装：(function(module, exports, host) { <main.js> })，
 /// 调用走同款 invoker（参数 JSON 编码、结果 JSON 回收、异步函数拒绝）。
-/// 全部 JS 执行串行化到一条队列；桥里的网络请求同步阻塞该队列，
-/// 与 goja 的同步语义一致（Go 侧最多 4 实例，这里 1 个，差异见 README）。
+/// 每个实例的 JS 执行串行化到自己的队列；桥里的网络请求同步
+/// 阻塞该队列，与 goja 的同步语义一致。同模块最多 4 个实例
+/// 由 ModuleRuntimePool 管理（对齐 Go moduleInstanceLimit）。
 final class ModuleRuntime {
     let manifest: ModuleManifest
     private let bridge: ModuleHostBridge
@@ -1477,9 +1693,14 @@ final class ModuleRuntime {
     private var exceptionMessage: String?
     private var exceptionLoginRequired = false
 
-    init(manifest: ModuleManifest, code: String, stateDirectory: URL) throws {
+    init(
+        manifest: ModuleManifest, code: String, stateDirectory: URL,
+        shared: ModuleSharedState = ModuleSharedState()
+    ) throws {
         self.manifest = manifest
-        let bridge = ModuleHostBridge(manifest: manifest, stateDirectory: stateDirectory)
+        let bridge = ModuleHostBridge(
+            manifest: manifest, stateDirectory: stateDirectory, shared: shared
+        )
         self.bridge = bridge
         guard let context = JSContext() else {
             throw ModuleError.bridge("JSContext 创建失败")
@@ -1572,6 +1793,18 @@ final class ModuleRuntime {
             bridge.randomBytesEnvelope(Int(count))
         }
         context.setObject(randomBlock, forKeyedSubscript: "__host_randomBytes" as NSString)
+        let exclusiveBeginBlock: @convention(block) () -> Void = {
+            shared.exclusiveLock.lock()
+        }
+        context.setObject(
+            exclusiveBeginBlock, forKeyedSubscript: "__host_exclusiveBegin" as NSString
+        )
+        let exclusiveEndBlock: @convention(block) () -> Void = {
+            shared.exclusiveLock.unlock()
+        }
+        context.setObject(
+            exclusiveEndBlock, forKeyedSubscript: "__host_exclusiveEnd" as NSString
+        )
 
         // shim 建好 host 对象并写入源标识（id 已通过清单正则校验，可安全内插）
         context.evaluateScript(moduleHostShim)
@@ -1658,5 +1891,94 @@ final class ModuleRuntime {
 
     func recentLogs() -> [String] {
         bridge.logs
+    }
+}
+
+// MARK: - 运行时池（多实例）
+
+/// 模块运行时池：对齐 Go jsProvider 的实例模型——同模块最多
+/// 4 个实例并行（moduleInstanceLimit = 4），调用先借空闲
+/// 实例、未达上限就新建、达上限则排队等待。首页与详情可以
+/// 同时各占一个实例跑，不再互相排队。provider 级状态
+/// （缓存/票据/日志/exclusive 锁）由 ModuleSharedState 一份
+/// 共享，与 Go 的结构一致。
+/// 与 Go 的剩余差异：Go 的单次调用有 60 秒超时并可中断
+/// goja 虚拟机（moduleCallTimeout + Interrupt）；JSContext
+/// 没有公开的脚本中断 API，原生侧无法等价实现，见 README。
+final class ModuleRuntimePool {
+    let manifest: ModuleManifest
+    private let code: String
+    private let stateDirectory: URL
+    private let shared = ModuleSharedState()
+    private let limit = 4
+    private var idle: [ModuleRuntime] = []
+    private var created = 0
+    private var waiters: [CheckedContinuation<ModuleRuntime, Error>] = []
+    private let lock = NSLock()
+
+    init(manifest: ModuleManifest, code: String, stateDirectory: URL) {
+        self.manifest = manifest
+        self.code = code
+        self.stateDirectory = stateDirectory
+    }
+
+    func call(_ function: String, arguments: [Any]) async throws -> Any? {
+        let runtime = try await acquire()
+        defer { release(runtime) }
+        return try await runtime.call(function, arguments: arguments)
+    }
+
+    func recentLogs() -> [String] {
+        shared.lock.lock()
+        defer { shared.lock.unlock() }
+        return shared.logs
+    }
+
+    private func acquire() async throws -> ModuleRuntime {
+        lock.lock()
+        if let runtime = idle.popLast() {
+            lock.unlock()
+            return runtime
+        }
+        if created < limit {
+            created += 1
+            lock.unlock()
+            do {
+                return try ModuleRuntime(
+                    manifest: manifest, code: code,
+                    stateDirectory: stateDirectory, shared: shared
+                )
+            } catch {
+                lock.lock()
+                created -= 1
+                let waiter = waiters.isEmpty ? nil : waiters.removeFirst()
+                lock.unlock()
+                waiter?.resume(throwing: error)
+                throw error
+            }
+        }
+        lock.unlock()
+        return try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let runtime = idle.popLast() {
+                lock.unlock()
+                continuation.resume(returning: runtime)
+                return
+            }
+            waiters.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    private func release(_ runtime: ModuleRuntime) {
+        lock.lock()
+        if !waiters.isEmpty {
+            let waiter = waiters.removeFirst()
+            lock.unlock()
+            waiter.resume(returning: runtime)
+            return
+        }
+        idle.append(runtime)
+        lock.unlock()
     }
 }

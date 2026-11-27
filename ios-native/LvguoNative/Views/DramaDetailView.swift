@@ -322,13 +322,16 @@ struct DramaDetailView: View {
         return entry
     }
 
-    /// 组装一次播放会话：进度回调写历史，上下集 handler 自行
-    /// 推进 session.index 并重新取址。
+    /// 组装一次播放会话：进度回调写历史，上下集/选集 handler
+    /// 自行推进 session.index 并重新取址；取址失败把原始错误
+    /// 写进 session.lastError，播放页会原样透出（不再静默吞掉）。
     private func makeSession(startIndex: Int) -> PlaybackSession {
         let session = PlaybackSession()
         session.index = startIndex
         session.canPrevious = startIndex > 0
         session.canNext = startIndex < chapters.count - 1
+        session.displayTitle = displayDrama.title
+        session.episodeLabels = chapters.map(\.episodeLabel)
         session.onProgress = { [self] session, position, duration in
             guard settings.recordHistory else { return }
             let entry = makeEntry(index: session.index, position: position, duration: duration)
@@ -340,7 +343,7 @@ struct DramaDetailView: View {
             session.index = next
             session.canPrevious = true
             session.canNext = next < chapters.count - 1
-            return await resolveRequest(index: next, startPosition: 0)
+            return await resolveRequest(index: next, startPosition: 0, session: session)
         }
         session.onPrevious = { [self] session in
             let previous = session.index - 1
@@ -348,12 +351,24 @@ struct DramaDetailView: View {
             session.index = previous
             session.canPrevious = previous > 0
             session.canNext = true
-            return await resolveRequest(index: previous, startPosition: 0)
+            return await resolveRequest(index: previous, startPosition: 0, session: session)
+        }
+        session.onSelectEpisode = { [self] session, index in
+            guard chapters.indices.contains(index) else { return nil }
+            session.index = index
+            session.canPrevious = index > 0
+            session.canNext = index < chapters.count - 1
+            return await resolveRequest(index: index, startPosition: 0, session: session)
+        }
+        session.onRefresh = { [self] session in
+            await resolveRequest(index: session.index, startPosition: 0, session: session)
         }
         return session
     }
 
-    private func resolveRequest(index: Int, startPosition: Double) async -> PlaybackRequest? {
+    private func resolveRequest(
+        index: Int, startPosition: Double, session: PlaybackSession
+    ) async -> PlaybackRequest? {
         guard chapters.indices.contains(index) else { return nil }
         do {
             let plan = try await provider.resolveMedia(
@@ -362,18 +377,46 @@ struct DramaDetailView: View {
                 index: index,
                 total: chapters.count
             )
-            guard !plan.url.isEmpty, let url = URL(string: plan.url) else {
+            guard let request = requestFromPlan(
+                plan,
+                title: "\(displayDrama.title) · \(chapters[index].episodeLabel)",
+                start: startPosition
+            ) else {
+                session.lastError = "模块没有返回可播放地址"
                 return nil
             }
-            return PlaybackRequest(
-                url: url,
-                headers: plan.headers,
-                title: "\(displayDrama.title) · \(chapters[index].episodeLabel)",
-                startPosition: startPosition
-            )
+            return request
         } catch {
+            session.lastError = error.localizedDescription
             return nil
         }
+    }
+
+    /// 播放计划 → 播放请求：地址型与播放列表文本型都可播
+    /// （文本型经播放引擎的资源代理在本地合成），全部画质
+    /// 变体随请求带走，供清晰度切换与备用线路恢复使用。
+    private func requestFromPlan(
+        _ plan: MediaPlan, title: String, start: Double
+    ) -> PlaybackRequest? {
+        guard plan.isPlayable else { return nil }
+        let variants = plan.variants.filter(\.isPlayable).map { variant in
+            PlaybackVariant(
+                quality: variant.quality,
+                url: URL(string: variant.url),
+                playlistText: variant.playlistText.isEmpty ? nil : variant.playlistText,
+                headers: variant.headers
+            )
+        }
+        return PlaybackRequest(
+            url: URL(string: plan.url),
+            playlistText: plan.playlistText.isEmpty ? nil : plan.playlistText,
+            headers: plan.headers,
+            title: title,
+            startPosition: start,
+            variants: variants,
+            quality: plan.quality,
+            expectedDuration: Double(plan.durationMs) / 1000
+        )
     }
 
     private func play(chapter: ChapterItem, index: Int, startPosition: Double? = nil) async {
@@ -387,28 +430,24 @@ struct DramaDetailView: View {
                 index: index,
                 total: chapters.count
             )
-            if !plan.url.isEmpty, let url = URL(string: plan.url) {
-                // 续播点（对齐 Flutter _startAt）：显式传入优先；
-                // 否则只有「正是历史里那一集（按集号比对）且没看完」
-                // 才带进度，其余从头播
-                var start = startPosition ?? 0
-                if startPosition == nil,
-                   let entry = historyEntry, !entry.finished,
-                   Int(chapter.episodeLabel) != nil,
-                   Int(chapter.episodeLabel) == Int(entry.episodeLabel) {
-                    start = entry.position
-                }
+            // 续播点（对齐 Flutter _startAt）：显式传入优先；
+            // 否则只有「正是历史里那一集（按集号比对）且没看完」
+            // 才带进度，其余从头播
+            var start = startPosition ?? 0
+            if startPosition == nil,
+               let entry = historyEntry, !entry.finished,
+               Int(chapter.episodeLabel) != nil,
+               Int(chapter.episodeLabel) == Int(entry.episodeLabel) {
+                start = entry.position
+            }
+            if let request = requestFromPlan(
+                plan,
+                title: "\(displayDrama.title) · \(chapter.episodeLabel)",
+                start: start
+            ) {
                 playSession = makeSession(startIndex: index)
-                playRequest = PlaybackRequest(
-                    url: url,
-                    headers: plan.headers,
-                    title: "\(displayDrama.title) · \(chapter.episodeLabel)",
-                    startPosition: start
-                )
+                playRequest = request
                 showPlayer = true
-            } else if !plan.playlistText.isEmpty {
-                // 已知限制：模块只给 m3u8 文本（Go 侧走本地代理）时原生版暂不能直接播
-                errorText = "模块只返回了播放列表文本，原生版暂不支持这类播放（已知限制）"
             } else {
                 errorText = "模块没有返回可播放地址"
             }

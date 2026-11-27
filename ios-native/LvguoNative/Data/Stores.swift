@@ -72,8 +72,12 @@ enum AppData {
 
 /// 播放设置：键名与 Flutter 版 PlaybackPreferences 的 JSON 一致
 /// （users/<id>/settings.json 的 playback 子对象），迁移可直接对位。
-/// 只搬与原生播放器相关的项：默认静音、自动连播、记录历史、
-/// 保持常亮、跳过片头/片尾、倍速。
+/// 覆盖与原生播放器相关的全部项：倍速、自动连播（仅字段与播放
+/// 逻辑，Flutter 设置页没有这个开关条目）、记录历史、保持常亮、
+/// 跳过片头/片尾、默认静音、双击快进、滑动调节、时钟/网速显示、
+/// 长按倍速、自动画中画、默认画面比例。
+/// 弹幕一组与 preload/backgroundPlayback 等 mpv 专属项不在此列
+/// （JS 模块源在 Flutter 版同样不支持弹幕，见 README 对齐表）。
 @MainActor
 final class SettingsStore: ObservableObject {
     @Published var startMuted: Bool { didSet { save() } }
@@ -83,6 +87,14 @@ final class SettingsStore: ObservableObject {
     @Published var skipIntroSeconds: Int { didSet { save() } }
     @Published var skipOutroSeconds: Int { didSet { save() } }
     @Published var speed: Double { didSet { save() } }
+    @Published var doubleTapSeek: Bool { didSet { save() } }
+    @Published var swipeLevels: Bool { didSet { save() } }
+    @Published var swipeEpisodes: Bool { didSet { save() } }
+    @Published var showClock: Bool { didSet { save() } }
+    @Published var showNetworkSpeed: Bool { didSet { save() } }
+    @Published var autoPictureInPicture: Bool { didSet { save() } }
+    @Published var boostSpeed: Double { didSet { save() } }
+    @Published var videoFit: String { didSet { save() } }
 
     private let file: URL
     private var loading = true
@@ -98,6 +110,16 @@ final class SettingsStore: ObservableObject {
         skipOutroSeconds = JSON.dictInt(dict["skipOutroSeconds"])
         let storedSpeed = (dict["speed"] as? NSNumber)?.doubleValue ?? 1.0
         speed = storedSpeed > 0 ? storedSpeed : 1.0
+        doubleTapSeek = dict["doubleTapSeek"] == nil ? true : JSON.dictBool(dict["doubleTapSeek"])
+        swipeLevels = dict["swipeLevels"] == nil ? true : JSON.dictBool(dict["swipeLevels"])
+        swipeEpisodes = JSON.dictBool(dict["swipeEpisodes"])
+        showClock = dict["showClock"] == nil ? true : JSON.dictBool(dict["showClock"])
+        showNetworkSpeed = dict["showNetworkSpeed"] == nil ? true : JSON.dictBool(dict["showNetworkSpeed"])
+        autoPictureInPicture = JSON.dictBool(dict["autoPictureInPicture"])
+        let storedBoost = (dict["boostSpeed"] as? NSNumber)?.doubleValue ?? 2.0
+        boostSpeed = storedBoost > 0 ? storedBoost : 2.0
+        let storedFit = JSON.dictString(dict["videoFit"])
+        videoFit = VideoFitMode(rawValue: storedFit) != nil ? storedFit : VideoFitMode.auto.rawValue
         loading = false
     }
 
@@ -111,7 +133,40 @@ final class SettingsStore: ObservableObject {
             "skipIntroSeconds": skipIntroSeconds,
             "skipOutroSeconds": skipOutroSeconds,
             "speed": speed,
+            "doubleTapSeek": doubleTapSeek,
+            "swipeLevels": swipeLevels,
+            "swipeEpisodes": swipeEpisodes,
+            "showClock": showClock,
+            "showNetworkSpeed": showNetworkSpeed,
+            "autoPictureInPicture": autoPictureInPicture,
+            "boostSpeed": boostSpeed,
+            "videoFit": videoFit,
         ], to: file)
+    }
+}
+
+/// 画面比例，对齐 Flutter VideoFit（name 与 label 逐项一致）
+enum VideoFitMode: String, CaseIterable {
+    case auto
+    case stretch
+    case crop
+    case fitWidth
+    case fitHeight
+    case original
+    case ratio4x3
+    case ratio16x9
+
+    var label: String {
+        switch self {
+        case .auto: return "自动"
+        case .stretch: return "拉伸"
+        case .crop: return "裁切"
+        case .fitWidth: return "等宽"
+        case .fitHeight: return "等高"
+        case .original: return "原始"
+        case .ratio4x3: return "4:3"
+        case .ratio16x9: return "16:9"
+        }
     }
 }
 

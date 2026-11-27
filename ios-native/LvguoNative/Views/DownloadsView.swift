@@ -8,13 +8,16 @@ struct DownloadsView: View {
     @EnvironmentObject private var downloads: DownloadManager
 
     @State private var playRequest: PlaybackRequest?
+    @State private var playSession: PlaybackSession?
     @State private var showPlayer = false
     @State private var notice: String?
     @State private var pendingDelete: DownloadJob?
     @State private var tab = 0
 
     /// 页签对齐 Flutter downloads_page.dart：「下载中 N」「已下载 N」
-    /// （Flutter 还有「合并 N」，原生没有合并功能，不摆假页签）
+    /// （Flutter 另有「合并 N」页签是手动合并已下载 HLS 的入口；
+    /// 原生在下载完成时自动合并为单文件，该功能已被吸收，
+    /// 不再单设页签，见 README 对齐表）
     private var activeJobs: [DownloadJob] {
         downloads.jobs.filter { $0.state != "completed" }
     }
@@ -56,9 +59,17 @@ struct DownloadsView: View {
                 }
             }
             .navigationTitle("下载")
+            .toolbar {
+                if activeJobs.contains(where: { $0.state == "queued" || $0.state == "downloading" }) {
+                    Button("全部暂停") { downloads.pauseAll() }
+                }
+                if activeJobs.contains(where: { $0.state == "paused" || $0.state == "failed" }) {
+                    Button("全部继续") { downloads.resumeAll() }
+                }
+            }
             .fullScreenCover(isPresented: $showPlayer) {
                 if let playRequest {
-                    PlayerPage(request: playRequest)
+                    PlayerPage(request: playRequest, session: playSession)
                 }
             }
             .confirmationDialog(
@@ -92,7 +103,8 @@ struct DownloadsView: View {
                     .font(.caption)
                     .foregroundStyle(job.state == "failed" ? .red : .secondary)
                     .lineLimit(2)
-                if job.state == "downloading" || job.state == "queued" {
+                if job.state == "downloading" || job.state == "queued"
+                    || job.state == "paused" || job.state == "converting" {
                     ProgressView(value: job.progress)
                         .tint(.green)
                 }
@@ -106,6 +118,22 @@ struct DownloadsView: View {
                     Image(systemName: "play.circle.fill")
                         .font(.title2)
                         .foregroundStyle(.green)
+                }
+                .buttonStyle(.plain)
+            case "downloading", "queued":
+                Button {
+                    downloads.pause(job)
+                } label: {
+                    Image(systemName: "pause.circle")
+                        .font(.title2)
+                }
+                .buttonStyle(.plain)
+            case "paused":
+                Button {
+                    downloads.resume(job)
+                } label: {
+                    Image(systemName: "play.circle")
+                        .font(.title2)
                 }
                 .buttonStyle(.plain)
             case "failed":
@@ -131,7 +159,10 @@ struct DownloadsView: View {
         if job.state == "failed", !job.error.isEmpty {
             parts.append(job.error)
         }
-        if job.state == "downloading" {
+        if !job.note.isEmpty {
+            parts.append(job.note)
+        }
+        if job.state == "downloading" || job.state == "paused" {
             if job.isHLS, job.hlsTotal > 0 {
                 parts.append("分片 \(job.hlsDone)/\(job.hlsTotal)")
             } else if job.bytes > 0 {
@@ -145,7 +176,17 @@ struct DownloadsView: View {
     }
 
     private func play(_ job: DownloadJob) {
-        if job.isHLS {
+        // 本地播放会话：失败时可「改为在线播放」，恢复取址也
+        // 走在线地址（对齐 Flutter 本地失败的在线回退）
+        let session = PlaybackSession()
+        session.displayTitle = job.title
+        session.onlineFallback = { [downloads] _ in
+            await downloads.fallbackRequest(for: job)
+        }
+        session.onRefresh = { [downloads] _ in
+            await downloads.fallbackRequest(for: job)
+        }
+        if job.fileName == "playlist.m3u8" {
             guard let url = LocalFileServer.shared.url(
                 jobId: job.id, fileName: "playlist.m3u8",
                 root: downloads.downloadsDirectory
@@ -153,8 +194,9 @@ struct DownloadsView: View {
                 notice = "本地播放服务启动失败"
                 return
             }
+            playSession = session
             playRequest = PlaybackRequest(
-                url: url, title: "\(job.title) \(job.subtitle)"
+                url: url, title: "\(job.title) \(job.subtitle)", isLocal: true
             )
             showPlayer = true
             return
@@ -163,8 +205,9 @@ struct DownloadsView: View {
             notice = "本地文件不存在，可能已被删除"
             return
         }
+        playSession = session
         playRequest = PlaybackRequest(
-            url: fileURL, title: "\(job.title) \(job.subtitle)"
+            url: fileURL, title: "\(job.title) \(job.subtitle)", isLocal: true
         )
         showPlayer = true
     }

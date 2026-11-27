@@ -338,9 +338,12 @@ private final class FtpLineChannel {
 
 final class FtpConnection {
     private let channel: FtpLineChannel
+    /// 控制连接的服务器地址：PASV 回 0.0.0.0 时回退用它
+    private let serverHost: String
 
-    private init(channel: FtpLineChannel) {
+    private init(channel: FtpLineChannel, serverHost: String) {
         self.channel = channel
+        self.serverHost = serverHost
     }
 
     static func connect(
@@ -353,7 +356,7 @@ final class FtpConnection {
             host: NWEndpoint.Host(host), port: nwPort, using: .tcp
         )
         let channel = FtpLineChannel(connection: connection)
-        let ftp = FtpConnection(channel: channel)
+        let ftp = FtpConnection(channel: channel, serverHost: host)
         do {
             try await channel.start()
             try await ftp.expect([220])
@@ -408,8 +411,10 @@ final class FtpConnection {
         }
     }
 
-    /// PASV 开数据连接（元组里的 0.0.0.0 等异常地址不特殊处理，
-    /// 绝大多数服务器返回真实地址；连不上时报错透出）
+    /// PASV 开数据连接。元组里的地址是 0.0.0.0（或 0. 开头
+    /// 的不可路由地址）时回退到控制连接的服务器地址——不少
+    /// NAT 后的 FTP 服务器会回这种占位地址（对齐 Flutter 版
+    /// B 段偏差清单余项，本轮补齐）。
     private func openData() async throws -> FtpLineChannel {
         channel.send("PASV\r\n")
         let (code, text) = try await readResponse()
@@ -427,8 +432,11 @@ final class FtpConnection {
             let r = Range(match.range(at: index), in: text)!
             return Int(text[r]) ?? 0
         }
-        let dataHost = [group(1), group(2), group(3), group(4)]
+        var dataHost = [group(1), group(2), group(3), group(4)]
             .map(String.init).joined(separator: ".")
+        if dataHost == "0.0.0.0" || dataHost.hasPrefix("0.") {
+            dataHost = serverHost
+        }
         let dataPort = group(5) * 256 + group(6)
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(dataPort)) else {
             throw FileSourceFailure("FTP 数据端口无效")

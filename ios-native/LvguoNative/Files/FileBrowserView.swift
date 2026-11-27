@@ -177,6 +177,9 @@ struct FileBrowserView: View {
         session.index = startIndex
         session.canPrevious = startIndex > 0
         session.canNext = startIndex < videos.count - 1
+        session.displayTitle = videos.indices.contains(startIndex)
+            ? videos[startIndex].name : source.name
+        session.episodeLabels = videos.map(\.name)
         session.onProgress = { [fileStore, source] session, position, duration in
             guard videos.indices.contains(session.index) else { return }
             let entry = videos[session.index]
@@ -217,6 +220,7 @@ struct FileBrowserView: View {
             session.index = next
             session.canPrevious = true
             session.canNext = next < videos.count - 1
+            session.displayTitle = videos[next].name
             return await request(for: next)
         }
         session.onPrevious = { session in
@@ -225,7 +229,19 @@ struct FileBrowserView: View {
             session.index = previous
             session.canPrevious = previous > 0
             session.canNext = true
+            session.displayTitle = videos[previous].name
             return await request(for: previous)
+        }
+        session.onSelectEpisode = { session, index in
+            guard videos.indices.contains(index) else { return nil }
+            session.index = index
+            session.canPrevious = index > 0
+            session.canNext = index < videos.count - 1
+            session.displayTitle = videos[index].name
+            return await request(for: index)
+        }
+        session.onRefresh = { session in
+            await request(for: session.index)
         }
         return session
     }
@@ -334,6 +350,11 @@ struct FileSourceOpenView: View {
             return
         }
         let session = PlaybackSession()
+        session.displayTitle = source.name
+        session.onRefresh = { [source] _ in
+            guard let url = URL(string: source.url) else { return nil }
+            return PlaybackRequest(url: url, title: source.name)
+        }
         session.onProgress = { [fileStore, source] _, position, duration in
             fileStore.saveProgress(
                 source.url,

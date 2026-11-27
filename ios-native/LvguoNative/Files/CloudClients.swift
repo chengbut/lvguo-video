@@ -172,17 +172,20 @@ struct MobileSourceClient: FileSourceClient {
         return value
     }
 
-    /// 从令牌解出账号名（base64 解码后冒号分段，第二段是账号）
+    /// 从令牌解出账号名（base64 解码后冒号分段，第二段是账号）。
+    /// 对齐 Dart _account：UTF-8 解码用 allowMalformed——分段里
+    /// 有非 UTF-8 字节时以替换字符继续拆分，而不是整串放弃
+    /// （String(decoding:as:) 正是这个语义，永不返回 nil）。
     var account: String? {
         var normalized = token
         let remainder = normalized.count % 4
         if remainder != 0 {
             normalized += String(repeating: "=", count: 4 - remainder)
         }
-        guard let data = Data(base64Encoded: normalized, options: [.ignoreUnknownCharacters]),
-              let decoded = String(data: data, encoding: .utf8) else {
+        guard let data = Data(base64Encoded: normalized, options: [.ignoreUnknownCharacters]) else {
             return nil
         }
+        let decoded = String(decoding: data, as: UTF8.self)
         let splits = decoded.split(separator: ":", omittingEmptySubsequences: false)
         if splits.count >= 3, !splits[1].isEmpty {
             return String(splits[1])
@@ -397,8 +400,19 @@ struct MobileSourceClient: FileSourceClient {
         )
     }
 
+    /// 严格布尔判定，对齐 Dart 的 `json['success'] == true`：
+    /// JSON 数字 1 在 Dart 里不等于 true；而 Swift 的 NSNumber
+    /// 桥接会把 1 当 Bool 接受，必须按 CFBoolean 类型区分。
+    static func strictSuccess(_ value: Any?) -> Bool {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            return false
+        }
+        return number.boolValue
+    }
+
     func check(_ json: [String: Any]) throws {
-        let ok = json["success"] as? Bool == true
+        let ok = Self.strictSuccess(json["success"])
             || (json["code"] as? NSNumber)?.intValue == 0
             || (json["code"] as? String) == "0"
         if !ok {

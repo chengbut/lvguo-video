@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Network
 
@@ -8,9 +9,14 @@ struct DownloadJob: Identifiable {
     var kind: String = "station"       // station / file
     var title: String = ""
     var subtitle: String = ""           // 集号文本或文件名
-    var fileName: String = ""           // 完成后的本地文件名（HLS 为 playlist.m3u8）
+    var fileName: String = ""           // 完成后的本地文件名（HLS 未合并时为 playlist.m3u8，合并后为 media.mp4）
     var isHLS: Bool = false
-    var state: String = "queued"        // queued / downloading / completed / failed
+    /// 状态集对齐 Flutter DownloadJob：queued / downloading /
+    /// converting（HLS 合并处理中）/ paused / completed / failed
+    /// （Flutter 还有瞬态 removing，原生删除是本地同步操作，无此态）
+    var state: String = "queued"
+    /// 附加说明（如 HLS 合并失败后按分片形式保存的原因）
+    var note: String = ""
     var bytes: Int64 = 0
     var total: Int64 = 0                // 未知为 0
     var hlsDone: Int = 0
@@ -38,12 +44,15 @@ struct DownloadJob: Identifiable {
     }
 
     var stateLabel: String {
+        // 文案逐项对齐 Flutter models.dart 的 stateLabel
         switch state {
         case "queued": return "等待下载"
         case "downloading": return "正在下载"
+        case "converting": return "正在处理"
+        case "paused": return "已暂停"
         case "completed": return "已下载"
         case "failed": return "下载失败"
-        default: return state
+        default: return "等待更新"
         }
     }
 
@@ -51,6 +60,7 @@ struct DownloadJob: Identifiable {
         [
             "id": id, "kind": kind, "title": title, "subtitle": subtitle,
             "fileName": fileName, "isHLS": isHLS, "state": state,
+            "note": note,
             "bytes": bytes, "total": total,
             "hlsDone": hlsDone, "hlsTotal": hlsTotal,
             "error": error, "createdAt": AppData.isoString(createdAt),
@@ -70,8 +80,11 @@ struct DownloadJob: Identifiable {
         job.subtitle = JSON.dictString(dict["subtitle"])
         job.fileName = JSON.dictString(dict["fileName"])
         job.isHLS = JSON.dictBool(dict["isHLS"])
+        job.note = JSON.dictString(dict["note"])
         job.state = JSON.dictString(dict["state"])
-        if job.state == "downloading" { job.state = "queued" }  // 重启后重新排队
+        if job.state == "downloading" || job.state == "converting" {
+            job.state = "queued"  // 重启后重新排队（合并会重跑）
+        }
         job.bytes = JSON.dictInt64(dict["bytes"])
         job.total = JSON.dictInt64(dict["total"])
         job.hlsDone = JSON.dictInt(dict["hlsDone"])
@@ -91,6 +104,9 @@ struct DownloadJob: Identifiable {
     }
 }
 
+/// 用户暂停信号：run 收尾时据此把任务转 paused 而不是 failed
+struct DownloadPausedError: Error {}
+
 /// 下载管理：串行执行（一次一个），进度落盘，失败可重试
 /// （站源重试会重新走 resolveMedia 取址，凭据过期也能自愈）。
 @MainActor
@@ -100,6 +116,9 @@ final class DownloadManager: ObservableObject {
     let downloadsDirectory: URL
     private let jobsFile: URL
     private var running = false
+    private var runTask: Task<Void, Never>?
+    /// 被用户暂停的在跑任务：run 收尾时据此转 paused 而不是 failed
+    private var pauseRequested: Set<String> = []
     private lazy var sessionDelegate = DownloadSessionDelegate(manager: self)
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -127,7 +146,9 @@ final class DownloadManager: ObservableObject {
                 .map { job -> DownloadJob in
                     // 上次进程退出时还在下的，重启后重新排队
                     var job = job
-                    if job.state == "downloading" { job.state = "queued" }
+                    if job.state == "downloading" || job.state == "converting" {
+                        job.state = "queued"
+                    }
                     return job
                 }
                 .sorted { $0.createdAt > $1.createdAt }
@@ -270,14 +291,76 @@ final class DownloadManager: ObservableObject {
         update(job.id) { target in
             target.state = "queued"
             target.error = ""
+            target.note = ""
             target.bytes = 0
             target.hlsDone = 0
         }
         pump()
     }
 
+    /// 暂停（对齐 Flutter 的 pause）：排队中的直接转 paused；
+    /// 正在下的取消当前传输、转 paused（HLS 已落盘分片保留，
+    /// 继续时跳过；普通文件重新下）。例外：FTP 下载走自实现
+    /// 通道、无法中途取消，暂停对它在传完当前文件后以
+    /// 「已完成」落地（不会误标 paused）。
+    func pause(_ job: DownloadJob) {
+        guard job.state == "queued" || job.state == "downloading" else { return }
+        if job.state == "queued" {
+            update(job.id) { $0.state = "paused" }
+            return
+        }
+        pauseRequested.insert(job.id)
+        sessionDelegate.cancelTask(jobId: job.id)
+        runTask?.cancel()
+    }
+
+    /// 继续（对齐 Flutter 的 resume：paused/failed 都可继续）
+    func resume(_ job: DownloadJob) {
+        guard job.state == "paused" || job.state == "failed" else { return }
+        update(job.id) { target in
+            target.state = "queued"
+            target.error = ""
+        }
+        pump()
+    }
+
+    func pauseAll() {
+        for job in jobs where job.state == "queued" || job.state == "downloading" {
+            pause(job)
+        }
+    }
+
+    func resumeAll() {
+        for job in jobs where job.state == "paused" || job.state == "failed" {
+            resume(job)
+        }
+    }
+
+    /// 本地播放失败时的在线回退请求（站源重新取址 / 文件源
+    /// 重新 target），供播放页的「改为在线播放」与恢复取址用
+    func fallbackRequest(for job: DownloadJob) async -> PlaybackRequest? {
+        if job.kind == "station", let stationResolver,
+           let resolved = await stationResolver(job),
+           let url = URL(string: resolved.url) {
+            return PlaybackRequest(
+                url: url, headers: resolved.headers,
+                title: "\(job.title) \(job.subtitle)"
+            )
+        }
+        if job.kind == "file", let fileResolver,
+           let resolved = await fileResolver(job),
+           let url = URL(string: resolved.url) {
+            return PlaybackRequest(
+                url: url, headers: resolved.headers, title: job.title
+            )
+        }
+        return nil
+    }
+
     func delete(_ job: DownloadJob) {
         sessionDelegate.cancel(jobId: job.id)
+        sessionDelegate.cancelTask(jobId: job.id)
+        pauseRequested.remove(job.id)
         jobs.removeAll { $0.id == job.id }
         try? FileManager.default.removeItem(at: jobDirectory(job.id))
         save()
@@ -293,7 +376,7 @@ final class DownloadManager: ObservableObject {
         guard let next = jobs.first(where: { $0.state == "queued" }) else { return }
         running = true
         update(next.id) { $0.state = "downloading"; $0.error = "" }
-        Task { [weak self] in
+        runTask = Task { [weak self] in
             await self?.run(next.id)
         }
     }
@@ -311,19 +394,79 @@ final class DownloadManager: ObservableObject {
             } else {
                 try await runDirect(job)
             }
+            // HLS 下载完先合并为单文件（converting 态），再标完成
+            if job.isHLS {
+                await convertHLS(jobId)
+            }
+            pauseRequested.remove(jobId)
             update(jobId) { target in
                 target.state = "completed"
                 target.error = ""
                 if target.total > 0 { target.bytes = target.total }
             }
         } catch {
-            update(jobId) { target in
-                target.state = "failed"
-                target.error = error.localizedDescription
+            if pauseRequested.remove(jobId) != nil || error is DownloadPausedError {
+                update(jobId) { target in
+                    target.state = "paused"
+                    target.error = ""
+                }
+            } else {
+                update(jobId) { target in
+                    target.state = "failed"
+                    target.error = error.localizedDescription
+                }
             }
         }
         running = false
         pump()
+    }
+
+    /// HLS 合并为单文件（对齐 Flutter/Go 的合并形态）：用
+    /// AVAssetExportSession 直通导出 media.mp4，成功后删分片
+    /// 与播放列表。某些编码（如 AV1、AC-3 音频）直通导出会
+    /// 失败——那种情况保留分片形式，原因写进 job.note 在
+    /// 下载页透出（见 README 对齐表）。
+    private func convertHLS(_ jobId: String) async {
+        update(jobId) { $0.state = "converting" }
+        let directory = jobDirectory(jobId)
+        guard let playlistURL = LocalFileServer.shared.url(
+            jobId: jobId, fileName: "playlist.m3u8", root: downloadsDirectory
+        ) else {
+            update(jobId) { $0.note = "本地播放服务启动失败，已按分片形式保存" }
+            return
+        }
+        let asset = AVURLAsset(url: playlistURL)
+        guard let exporter = AVAssetExportSession(
+            asset: asset, presetName: AVAssetExportPresetPassthrough
+        ) else {
+            update(jobId) { $0.note = "无法创建合并导出，已按分片形式保存" }
+            return
+        }
+        let output = directory.appendingPathComponent("media.mp4")
+        try? FileManager.default.removeItem(at: output)
+        do {
+            try await exporter.export(to: output, as: .mp4)
+            let size = (try? FileManager.default.attributesOfItem(
+                atPath: output.path
+            ))?[.size] as? Int64 ?? 0
+            for name in (try? FileManager.default.contentsOfDirectory(
+                atPath: directory.path
+            )) ?? [] where name != "media.mp4" {
+                try? FileManager.default.removeItem(
+                    at: directory.appendingPathComponent(name)
+                )
+            }
+            update(jobId) { target in
+                target.fileName = "media.mp4"
+                target.isHLS = false
+                target.bytes = size
+                target.note = ""
+            }
+        } catch {
+            update(jobId) { target in
+                target.note = "合并为单文件失败（\(error.localizedDescription)），已按分片形式保存"
+            }
+        }
     }
 
     private func isFtpJob(_ job: DownloadJob) async -> Bool {
@@ -456,19 +599,46 @@ final class DownloadManager: ObservableObject {
         guard segmentIndex > 0 else {
             throw FileSourceFailure("播放列表里没有分片")
         }
-        update(job.id) { target in
-            target.hlsTotal = segmentIndex
-            target.hlsDone = 0
-            target.bytes = 0
+        // 断点续传：已完整落盘的分片先计数（分片都是原子写，
+        // 存在且非空即完整），循环里直接跳过
+        func existingSize(_ fileName: String) -> Int64 {
+            let path = directory.appendingPathComponent(fileName).path
+            let size = (try? FileManager.default.attributesOfItem(
+                atPath: path
+            ))?[.size] as? Int64 ?? 0
+            return size
         }
         var done = 0
         var totalBytes: Int64 = 0
+        for (_, fileName) in segments where fileName != initFileName {
+            let size = existingSize(fileName)
+            if size > 0 {
+                done += 1
+                totalBytes += size
+            }
+        }
+        update(job.id) { target in
+            target.hlsTotal = segmentIndex
+            target.hlsDone = done
+            target.bytes = totalBytes
+        }
         for (url, fileName) in segments {
+            if pauseRequested.contains(job.id) || Task.isCancelled {
+                throw DownloadPausedError()
+            }
+            let destination = directory.appendingPathComponent(fileName)
+            if existingSize(fileName) > 0 {
+                continue
+            }
             let (data, http) = try await FileNetwork.data(for: Self.request(url, headers: headers))
             guard (200...299).contains(http.statusCode) else {
                 throw FileSourceFailure("分片下载失败（HTTP \(http.statusCode)）")
             }
-            try data.write(to: directory.appendingPathComponent(fileName))
+            // 原子写：临时文件写完再改名，半截分片不算已完成
+            let temp = directory.appendingPathComponent(fileName + ".part")
+            try data.write(to: temp)
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: temp, to: destination)
             totalBytes += Int64(data.count)
             if fileName != initFileName {
                 done += 1
@@ -609,14 +779,26 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
 
     private var pendingByJob: [String: Pending] = [:]
 
+    private var tasks: [String: URLSessionDownloadTask] = [:]
+
     func attach(task: URLSessionDownloadTask, jobId: String) {
         lock.lock()
+        tasks[jobId] = task
         if let entry = pendingByJob.removeValue(forKey: jobId) {
             pending[task.taskIdentifier] = entry
             jobByTask[task.taskIdentifier] = jobId
             taskByJob[jobId] = task.taskIdentifier
         }
         lock.unlock()
+    }
+
+    /// 真正取消在跑的下载任务（暂停/删除用）：取消后
+    /// didCompleteWithError 会把错误抛回 run 的等待点
+    func cancelTask(jobId: String) {
+        lock.lock()
+        let task = tasks[jobId]
+        lock.unlock()
+        task?.cancel()
     }
 
     func cancel(jobId: String) {
@@ -642,7 +824,10 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
         lock.lock()
         let entry = pending.removeValue(forKey: downloadTask.taskIdentifier)
         let jobId = jobByTask.removeValue(forKey: downloadTask.taskIdentifier)
-        if let jobId { taskByJob.removeValue(forKey: jobId) }
+        if let jobId {
+            taskByJob.removeValue(forKey: jobId)
+            tasks.removeValue(forKey: jobId)
+        }
         lock.unlock()
         guard let entry else { return }
         if let http = downloadTask.response as? HTTPURLResponse,
@@ -690,7 +875,10 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
         lock.lock()
         let entry = pending.removeValue(forKey: task.taskIdentifier)
         let jobId = jobByTask.removeValue(forKey: task.taskIdentifier)
-        if let jobId { taskByJob.removeValue(forKey: jobId) }
+        if let jobId {
+            taskByJob.removeValue(forKey: jobId)
+            tasks.removeValue(forKey: jobId)
+        }
         lock.unlock()
         entry?.continuation.resume(throwing: error)
     }

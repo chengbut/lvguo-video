@@ -229,58 +229,93 @@ struct MediaCredentials {
     }
 }
 
-/// resolveMedia 的结果 → 播放计划（对应 Dart 侧 PlaybackPlan 的 url/headers 子集，
-/// 直接喂给一期的 PlaybackEngine/PlaybackRequest）。
+/// 播放计划里的一个画质变体：字段与 Go ProviderMedia 的
+/// url/playlist/credentials/referer 一一对应，凭据头在解析时
+/// 就地展开（变体缺凭据时回落到外层凭据，同 Go/Dart）。
+struct MediaVariant {
+    var quality: Int = 0
+    var url: String = ""
+    var playlistText: String = ""
+    var headers: [String: String] = [:]
+    var durationMs: Int64 = 0
+
+    var isPlayable: Bool { !url.isEmpty || !playlistText.isEmpty }
+}
+
+/// resolveMedia 的结果 → 播放计划（对应 Dart 侧 PlaybackPlan）。
+/// 全部变体都保留：播放页的清晰度切换与恢复时的「备用线路」
+/// 直接用变体重开，不必再问模块。
 struct MediaPlan {
     var url: String = ""
     var headers: [String: String] = [:]
     var quality: Int = 0
     var qualities: [Int] = []
-    /// 模块只回了内嵌播放列表文本、没有 URL 时非空（已知限制，见 README）
+    /// 模块只回了内嵌播放列表文本、没有 URL 时非空（经本地代理播放）
     var playlistText: String = ""
     var durationMs: Int64 = 0
+    var variants: [MediaVariant] = []
 
-    static func parse(_ media: [String: Any]) -> MediaPlan {
-        var plan = MediaPlan()
-        var chosen = media
-        if let variants = media["variants"] as? [[String: Any]], !variants.isEmpty {
-            plan.qualities = variants
-                .map { JSON.dictInt($0["quality"]) }
-                .sorted(by: >)
-            // 选画质最高且带 URL 的变体；变体缺凭据时回落到外层凭据
-            if let best = variants
-                .filter({ !JSON.dictString($0["url"]).isEmpty })
-                .max(by: { JSON.dictInt($0["quality"]) < JSON.dictInt($1["quality"]) }) {
-                chosen = best
-                if chosen["credentials"] == nil, media["credentials"] != nil {
-                    chosen["credentials"] = media["credentials"]
-                }
-                if JSON.dictString(chosen["referer"]).isEmpty {
-                    chosen["referer"] = media["referer"]
-                }
-            }
+    var isPlayable: Bool { !url.isEmpty || !playlistText.isEmpty }
+
+    /// 一个媒体字典（外层或某个变体）→ 变体：凭据展开成请求头
+    private static func variant(
+        from dict: [String: Any], fallback: [String: Any]?
+    ) -> MediaVariant {
+        var source = dict
+        if source["credentials"] == nil, let fallback {
+            source["credentials"] = fallback["credentials"]
         }
-        plan.url = JSON.dictString(chosen["url"])
-        plan.playlistText = JSON.dictString(chosen["playlist"])
-        plan.quality = JSON.dictInt(chosen["quality"])
-        plan.durationMs = JSON.dictInt64(chosen["durationMs"])
-        var referer = JSON.dictString(chosen["referer"])
-        if let credentials = MediaCredentials.parse(chosen["credentials"]) {
+        if JSON.dictString(source["referer"]).isEmpty, let fallback {
+            source["referer"] = fallback["referer"]
+        }
+        var variant = MediaVariant()
+        variant.quality = JSON.dictInt(source["quality"])
+        variant.url = JSON.dictString(source["url"])
+        variant.playlistText = JSON.dictString(source["playlist"])
+        variant.durationMs = JSON.dictInt64(source["durationMs"])
+        var referer = JSON.dictString(source["referer"])
+        if let credentials = MediaCredentials.parse(source["credentials"]) {
             if !credentials.cookie.isEmpty {
-                plan.headers["Cookie"] = credentials.cookie
+                variant.headers["Cookie"] = credentials.cookie
             }
             if !credentials.userAgent.isEmpty {
-                plan.headers["User-Agent"] = credentials.userAgent
+                variant.headers["User-Agent"] = credentials.userAgent
             }
             if !credentials.origin.isEmpty {
-                plan.headers["Origin"] = credentials.origin
+                variant.headers["Origin"] = credentials.origin
             }
             if !credentials.referer.isEmpty {
                 referer = credentials.referer
             }
         }
         if !referer.isEmpty {
-            plan.headers["Referer"] = referer
+            variant.headers["Referer"] = referer
+        }
+        return variant
+    }
+
+    static func parse(_ media: [String: Any]) -> MediaPlan {
+        var plan = MediaPlan()
+        let rawVariants = media["variants"] as? [[String: Any]] ?? []
+        plan.variants = rawVariants.map { variant(from: $0, fallback: media) }
+        plan.qualities = plan.variants.map(\.quality).sorted(by: >)
+        // 选画质最高且可播的变体（对齐原逻辑：先看带 URL 的，
+        // 其次带播放列表文本的）；变体都不可用时回落到外层字段
+        let chosen = plan.variants
+            .filter { !$0.url.isEmpty }
+            .max(by: { $0.quality < $1.quality })
+            ?? plan.variants
+                .filter { !$0.playlistText.isEmpty }
+                .max(by: { $0.quality < $1.quality })
+        let outer = variant(from: media, fallback: nil)
+        let effective = chosen ?? outer
+        plan.url = effective.url
+        plan.playlistText = effective.playlistText
+        plan.quality = effective.quality
+        plan.durationMs = effective.durationMs
+        plan.headers = effective.headers
+        if plan.variants.isEmpty {
+            plan.variants = [outer]
         }
         return plan
     }

@@ -29,7 +29,7 @@ final class ModuleStore: ObservableObject {
     var stateDirectory: URL { dataDirectory.appendingPathComponent("module-state") }
     private var libraryFile: URL { dataDirectory.appendingPathComponent("library.json") }
     private var disabledIds: Set<String> = []
-    private var runtimes: [String: ModuleRuntime] = [:]
+    private var pools: [String: ModuleRuntimePool] = [:]
     private var providers: [String: ModuleProvider] = [:]
     private var runtimeErrors: [String: String] = [:]
 
@@ -120,7 +120,7 @@ final class ModuleStore: ObservableObject {
     func uninstall(_ id: String) {
         let directory = modulesDirectory.appendingPathComponent(id)
         try? FileManager.default.removeItem(at: directory)
-        runtimes[id] = nil
+        pools[id] = nil
         providers[id] = nil
         runtimeErrors[id] = nil
         disabledIds.remove(id)
@@ -188,7 +188,7 @@ final class ModuleStore: ObservableObject {
         )
         try manifestData.write(to: directory.appendingPathComponent("manifest.json"))
         try codeData.write(to: directory.appendingPathComponent("main.js"))
-        runtimes[manifest.id] = nil
+        pools[manifest.id] = nil
         providers[manifest.id] = nil
         runtimeErrors[manifest.id] = nil
         reload()
@@ -235,21 +235,19 @@ final class ModuleStore: ObservableObject {
             .appendingPathComponent(manifest.id)
             .appendingPathComponent("main.js")
         guard let code = try? String(contentsOf: codeURL, encoding: .utf8) else {
+            runtimeErrors[manifest.id] = "模块缺少 main.js"
             return nil
         }
-        do {
-            let runtime = try ModuleRuntime(
-                manifest: manifest, code: code, stateDirectory: stateDirectory
-            )
-            let provider = ModuleProvider(runtime: runtime)
-            runtimes[manifest.id] = runtime
-            providers[manifest.id] = provider
-            runtimeErrors[manifest.id] = nil
-            return provider
-        } catch {
-            runtimeErrors[manifest.id] = "\(error)"
-            return nil
-        }
+        // 运行时池惰性建实例（对齐 Go：实例在首次调用时才建），
+        // 模块代码的加载错误会在首次调用时以原始错误透出
+        let pool = ModuleRuntimePool(
+            manifest: manifest, code: code, stateDirectory: stateDirectory
+        )
+        let provider = ModuleProvider(pool: pool)
+        pools[manifest.id] = pool
+        providers[manifest.id] = provider
+        runtimeErrors[manifest.id] = nil
+        return provider
     }
 
     /// 最近一次创建当前模块运行时失败的原因（供首页展示诊断）
