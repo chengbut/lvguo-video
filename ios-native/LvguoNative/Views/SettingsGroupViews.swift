@@ -383,7 +383,9 @@ struct DownloadSettingsView: View {
                     title: "默认画质",
                     subtitle: "指定画质不可用时，使用源站可用画质",
                     options: DownloadPreferencesStore.qualities
-                        .map { ($0, $0 == 0 ? "自动（优先高清）" : "\($0)P") },
+                        .map {
+                            (String($0), $0 == 0 ? "自动（优先高清）" : "\($0)P")
+                        },
                     selection: Binding(
                         get: { String(downloadPreferences.quality) },
                         set: { downloadPreferences.quality = Int($0) ?? 0 }
