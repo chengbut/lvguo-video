@@ -18,15 +18,18 @@ xcodebuild -resolvePackageDependencies \
   -scheme LvguoNative \
   -derivedDataPath build/DerivedData \
   -scmProvider system
-# No -destination: with -sdk iphoneos, xcodebuild builds for the SDK's
-# default device destination. Passing 'generic/platform=iOS' alongside
-# -sdk made xcodebuild exit 70 ("Unable to find a destination") on the
-# macos-26 runner (run 45869500692).
+# Destination: early runs used -sdk iphoneos alone (worked while the
+# project had no package dependencies). With SPM products, building
+# without a destination leaves the package targets unscheduled and
+# the app link fails with "Build input files cannot be found:
+# KSPlayer.o" (runs 45964085342 / 45965192004). Use the generic iOS
+# destination WITHOUT -sdk (the combination of both exited 70 on
+# run 45869500692).
 xcodebuild build \
   -project LvguoNative.xcodeproj \
   -scheme LvguoNative \
   -configuration Release \
-  -sdk iphoneos \
+  -destination 'generic/platform=iOS' \
   -derivedDataPath build/DerivedData \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
