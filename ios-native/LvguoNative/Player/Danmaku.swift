@@ -45,7 +45,7 @@ let user = LegacySettingsSeed.userSettings(),
 let playback = user["playback"] as? [String: Any] {
 dict = playback
 }
-let source = dict?? [:]
+let source = dict ?? [:]
 enabled = source["danmaku"] == nil
 ? true: JSON.dictBool(source["danmaku"])
 scale = Self.clamp(
@@ -73,7 +73,7 @@ Self.double(source["danmakuSpeed"], fallback: 1), 0.5...2.0
 let storedMerge = JSON.dictString(source["danmakuMerge"])
 merge = Self.merges.contains { $0.0 == storedMerge}
 ? storedMerge: "ten"
-words = (source["danmakuWords"] as? [Any]?? [])
+words = (source["danmakuWords"] as? [Any]) ?? []
 .compactMap { $0 as? String}
 loading = false
 if AppData.readJSONDictionary(file) == nil, dict!= nil {
@@ -82,11 +82,11 @@ save()
 }
 
 var coverageFraction: Double {
-Self.coverages.first { $0.0 == coverage}?.2?? 0.5
+Self.coverages.first { $0.0 == coverage}?.2 ?? 0.5
 }
 
 var mergeSeconds: Int {
-Self.merges.first { $0.0 == merge}?.2?? 10
+Self.merges.first { $0.0 == merge}?.2 ?? 10
 }
 
 var color: Color {
@@ -94,7 +94,7 @@ Color(argb: UInt32(bitPattern: Int32(truncatingIfNeeded: colorValue)))
 }
 
 private static func double(_ value: Any?, fallback: Double) -> Double {
-(value as? NSNumber)?.doubleValue?? fallback
+(value as? NSNumber)?.doubleValue ?? fallback
 }
 
 private static func clamp(
@@ -104,7 +104,7 @@ min(max(value, range.lowerBound), range.upperBound)
 }
 
 private func save() {
-guard!loading else { return}
+guard !loading else { return }
 AppData.writeJSON([
 "danmaku": enabled,
 "danmakuScale": scale,
@@ -147,7 +147,7 @@ result.unicodeScalars.append(converted)
 }
 let stripped = result.lowercased().unicodeScalars.filter { scalar in
 if scalar.properties.isWhitespace { return false}
-return!"，。！？、：；·「」『』（）《》“”‘’.,!?:;-_/()[]{}".unicodeScalars
+return !"，。！？、：；·「」『』（）《》“”‘’.,!?:;-_/()[]{}".unicodeScalars
 .contains(scalar)
 }
 return String(String.UnicodeScalarView(stripped))
@@ -241,7 +241,7 @@ let kept = source
 .filter { item in
 if blocked.isEmpty { return true}
 let text = normalizedDanmakuText(item.text)
-return!blocked.contains { text.contains($0)}
+return !blocked.contains { text.contains($0) }
 }
 .sorted { $0.timeMS < $1.timeMS}
 let window = preferences.mergeSeconds * 1000
@@ -637,7 +637,7 @@ dismiss()
 
 private func add() {
 let word = input.trimmingCharacters(in:.whitespaces)
-guard!word.isEmpty else { return}
+guard !word.isEmpty else { return }
 if word.count > 40 {
 error = "单个屏蔽词最多 40 个字"
 return
