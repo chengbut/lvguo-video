@@ -17,7 +17,9 @@ final class PiPBridge: NSObject, ObservableObject, AVPictureInPictureControllerD
 
     func attach(to layer: AVPlayerLayer) {
         if controller?.playerLayer === layer { return }
-        let created = AVPictureInPictureController(playerLayer: layer)
+        guard let created = AVPictureInPictureController(playerLayer: layer) else {
+            return
+        }
         created.delegate = self
         controller = created
         possibleObservation = created.observe(

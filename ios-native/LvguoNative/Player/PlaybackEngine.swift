@@ -104,13 +104,26 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         lock.unlock()
     }
 
+    /// URL 的已编码路径/查询（经 URLComponents 取，
+    /// 不直接用 URL 的 percentEncoded* 成员，兼容性更稳）
+    static func encodedPath(of url: URL) -> String {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .percentEncodedPath ?? url.path
+    }
+
+    static func encodedQuery(of url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .percentEncodedQuery
+    }
+
     /// 资源 URL：lvguo-media://<key><原路径>?<原查询>
     static func assetURL(key: String, original: URL) -> URL {
         var components = URLComponents()
         components.scheme = scheme
         components.host = key
-        components.percentEncodedPath = original.path.isEmpty ? "/" : original.path
-        components.percentEncodedQuery = original.query
+        let path = encodedPath(of: original)
+        components.percentEncodedPath = path.isEmpty ? "/" : path
+        components.percentEncodedQuery = encodedQuery(of: original)
         return components.url ?? original
     }
 
@@ -284,8 +297,8 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         components.scheme = base.scheme
         components.host = base.host
         components.port = base.port
-        components.percentEncodedPath = url.percentEncodedPath
-        components.percentEncodedQuery = url.percentEncodedQuery
+        components.percentEncodedPath = Self.encodedPath(of: url)
+        components.percentEncodedQuery = Self.encodedQuery(of: url)
         return components.url
     }
 
@@ -482,8 +495,9 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
                 var components = URLComponents()
                 components.scheme = scheme
                 components.host = key
-                components.percentEncodedPath = resolved.path.isEmpty ? "/" : resolved.path
-                components.percentEncodedQuery = resolved.query
+                let path = encodedPath(of: resolved)
+                components.percentEncodedPath = path.isEmpty ? "/" : path
+                components.percentEncodedQuery = encodedQuery(of: resolved)
                 return components.url?.absoluteString ?? raw
             }
             let encoded = Data(resolved.absoluteString.utf8).base64URLEncodedString()
@@ -969,7 +983,7 @@ final class PlaybackEngine: ObservableObject {
 
     private func refreshTracks(_ item: AVPlayerItem) {
         let asset = item.asset
-        if let group = asset.mediaSelectionGroup(for: .audible) {
+        if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .audible) {
             let current = item.currentMediaSelection.selectedMediaOption(in: group)
             audioOptions = group.options.map { option in
                 TrackOption(
@@ -981,7 +995,7 @@ final class PlaybackEngine: ObservableObject {
         } else {
             audioOptions = []
         }
-        if let group = asset.mediaSelectionGroup(for: .legible) {
+        if let group = asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
             let current = item.currentMediaSelection.selectedMediaOption(in: group)
             var options = [TrackOption(id: "sub-off", title: "关闭", selected: current == nil)]
             for (index, option) in group.options.enumerated() {
@@ -999,7 +1013,7 @@ final class PlaybackEngine: ObservableObject {
 
     func selectAudioTrack(id: String) {
         guard let item = player.currentItem,
-              let group = item.asset.mediaSelectionGroup(for: .audible),
+              let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible),
               let index = Int(id.dropFirst("audio-".count)),
               group.options.indices.contains(index) else { return }
         item.select(group.options[index], in: group)
@@ -1008,7 +1022,7 @@ final class PlaybackEngine: ObservableObject {
 
     func selectSubtitle(id: String) {
         guard let item = player.currentItem,
-              let group = item.asset.mediaSelectionGroup(for: .legible) else { return }
+              let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else { return }
         if id == "sub-off" {
             item.select(nil, in: group)
         } else if let index = Int(id.dropFirst("sub-".count)),
