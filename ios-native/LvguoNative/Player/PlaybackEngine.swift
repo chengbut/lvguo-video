@@ -30,7 +30,7 @@ final class PlaybackEngine: ObservableObject {
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
-        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+        timeControlObservation = player.observe(\AVPlayer.timeControlStatus, options: [.new]) { [weak self] player, _ in
             guard let self else { return }
             DispatchQueue.main.async {
                 self.isPlaying = player.timeControlStatus == .playing
@@ -62,11 +62,12 @@ final class PlaybackEngine: ObservableObject {
         intentToPlay = autoplay
         // AVURLAsset 的 HTTP 头注入点。
         // 注意：HLS 分片请求不继承该头，二期用 AVAssetResourceLoaderDelegate 处理带头分片。
+        // 该键在 Swift 中没有桥接常量，用字面量字符串（值与 AVURLAssetHTTPHeaderFieldsKey 相同）
         let asset = AVURLAsset(url: request.url, options: [
-            AVURLAssetHTTPHeaderFieldsKey: request.headers
+            "AVURLAssetHTTPHeaderFieldsKey": request.headers
         ])
         let item = AVPlayerItem(asset: asset)
-        itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+        itemStatusObservation = item.observe(\AVPlayerItem.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch item.status {
