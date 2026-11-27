@@ -490,3 +490,140 @@ struct MobileSourceClient: FileSourceClient {
         "src:\(source.id):139:\(entry.href)"
     }
 }
+
+// MARK: - 夸克网盘原生（实验）
+
+/// 夸克网盘原生客户端（实验性，未实测）：按 OpenList 公开
+/// 驱动 drivers/quark_uc 的 Quark 配置逐项核对实现——
+/// 接口基址 https://drive.quark.cn/1/clouddrive，全部
+/// 请求带 pr=ucpro&fr=pc 查询与 Cookie / Referer 头；
+/// 列目录 GET /file/sort（pdir_fid 分页，根 fid 为 "0"，
+/// 条目 file 为 false 即文件夹，页数按 metadata._total
+/// 走完）；取址 POST /file/download（body
+/// {"fids":[fid]} → data[0].download_url）。播放/下载
+/// 地址必须带 Cookie + Referer + 桌面端 UA 才能打开
+/// （同驱动 getDownloadLink 的 Link.Header），
+/// FilePlayTarget.headers 三样带齐。
+struct QuarkSourceClient: FileSourceClient {
+    let source: FileSource
+
+    static let apiBase = "https://drive.quark.cn/1/clouddrive"
+    static let userAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 " +
+        "Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
+
+    var headers: [String: String] {
+        [
+            "Cookie": source.credential,
+            "Referer": "https://pan.quark.cn",
+            "Accept": "application/json, text/plain, */*",
+        ]
+    }
+
+    func apiURL(_ path: String, extra: [URLQueryItem] = []) -> URL {
+        var components = URLComponents(string: Self.apiBase + path)!
+        components.queryItems = [
+            URLQueryItem(name: "pr", value: "ucpro"),
+            URLQueryItem(name: "fr", value: "pc"),
+        ] + extra
+        return components.url!
+    }
+
+    /// 响应信封校验（同驱动 Resp：status >= 400 或
+    /// code != 0 即报错，文案取 message）
+    func check(_ json: [String: Any]) throws {
+        let status = (json["status"] as? NSNumber)?.intValue ?? 0
+        let code = (json["code"] as? NSNumber)?.intValue ?? 0
+        if status >= 400 || code != 0 {
+            throw FileSourceFailure(
+                "夸克网盘接口报错：\(JSON.dictString(json["message"]))（原始返回：\(excerptText(serializeJSON(json)))）"
+            )
+        }
+    }
+
+    func list(_ path: String?) async throws -> [FileEntry] {
+        let parent = (path == nil || path!.isEmpty) ? "0" : path!
+        var entries: [FileEntry] = []
+        var page = 1
+        while page <= 100 {
+            let json = try await jsonRequest(
+                apiURL("/file/sort", extra: [
+                    URLQueryItem(name: "pdir_fid", value: parent),
+                    URLQueryItem(name: "_page", value: "\(page)"),
+                    URLQueryItem(name: "_size", value: "100"),
+                    URLQueryItem(name: "_fetch_total", value: "1"),
+                    URLQueryItem(name: "fetch_all_file", value: "1"),
+                    URLQueryItem(name: "fetch_risk_file_name", value: "1"),
+                ]),
+                headers: headers
+            )
+            try check(json)
+            let data = json["data"] as? [String: Any]
+            guard let list = data?["list"] as? [Any] else {
+                throw FileSourceFailure(
+                    "夸克网盘返回结构异常（原始返回：\(excerptText(serializeJSON(json)))）"
+                )
+            }
+            for row in list {
+                guard let row = row as? [String: Any] else { continue }
+                let isFile = (row["file"] as? NSNumber)?.boolValue ?? false
+                entries.append(FileEntry(
+                    name: Self.unescapeHTML(JSON.dictString(row["file_name"])),
+                    href: JSON.dictString(row["fid"]),
+                    isDirectory: !isFile,
+                    size: (row["size"] as? NSNumber)?.int64Value ?? 0
+                ))
+            }
+            let total = ((json["metadata"] as? [String: Any])?["_total"]
+                as? NSNumber)?.intValue ?? 0
+            if total > 0, page * 100 >= total { break }
+            if list.count < 100 { break }
+            page += 1
+        }
+        entries.sort {
+            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            return $0.name.lowercased() < $1.name.lowercased()
+        }
+        return entries
+    }
+
+    func target(_ entry: FileEntry) async throws -> FilePlayTarget {
+        let body = try JSONSerialization.data(
+            withJSONObject: ["fids": [entry.href]]
+        )
+        let json = try await jsonRequest(
+            apiURL("/file/download"),
+            method: "POST", headers: headers, body: body
+        )
+        try check(json)
+        let first = (json["data"] as? [Any])?.first as? [String: Any]
+        let download = JSON.dictString(first?["download_url"])
+        if download.isEmpty {
+            throw FileSourceFailure(
+                "夸克网盘没有返回下载地址（原始返回：\(excerptText(serializeJSON(json)))）"
+            )
+        }
+        return FilePlayTarget(url: download, headers: [
+            "Cookie": source.credential,
+            "Referer": "https://pan.quark.cn",
+            "User-Agent": Self.userAgent,
+        ])
+    }
+
+    func progressKey(_ entry: FileEntry) -> String {
+        "src:\(source.id):quark:\(entry.href)"
+    }
+
+    /// 文件名 HTML 反转义（驱动对 file_name 做
+    /// html.UnescapeString；这里覆盖常用命名实体）
+    static func unescapeHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+}

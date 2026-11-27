@@ -4,6 +4,7 @@ import Foundation
 enum FileSourceType: String, CaseIterable, Identifiable {
     case tianyi
     case mobile
+    case quark
     case webdav
     case http
     case ftp
@@ -14,6 +15,7 @@ enum FileSourceType: String, CaseIterable, Identifiable {
         switch self {
         case .tianyi: return "天翼云盘"
         case .mobile: return "中国移动云盘"
+        case .quark: return "夸克网盘"
         case .webdav: return "WebDAV"
         case .http: return "HTTP 拉取"
         case .ftp: return "FTP"
@@ -42,15 +44,16 @@ struct FileSource: Identifiable, Equatable {
     var password: String = ""
     var url: String = ""
     var mode: String = FileSourceMode.webDav
-    /// 原生登录凭据：天翼是 Cookie 整段；移动是 authorization 令牌
+    /// 原生登录凭据：天翼/夸克是 Cookie 整段；移动是 authorization 令牌
     /// （或整段 Cookie，客户端按形态自动判断）。
     var cookie: String = ""
     var port: Int = 0
     var path: String = ""
 
-    /// 仅天翼/移动且 mode 为 native 时走原生客户端
+    /// 仅天翼/移动/夸克且 mode 为 native 时走原生客户端
     var nativeMode: Bool {
-        (type == .tianyi || type == .mobile) && mode == FileSourceMode.native
+        (type == .tianyi || type == .mobile || type == .quark)
+            && mode == FileSourceMode.native
     }
 
     var usesWebDav: Bool {
@@ -59,7 +62,11 @@ struct FileSource: Identifiable, Equatable {
 
     var host: String {
         if nativeMode {
-            return type == .tianyi ? "cloud.189.cn" : "yun.139.com"
+            switch type {
+            case .tianyi: return "cloud.189.cn"
+            case .quark: return "pan.quark.cn"
+            default: return "yun.139.com"
+            }
         }
         if type == .ftp {
             let effective = port == 0 ? 21 : port

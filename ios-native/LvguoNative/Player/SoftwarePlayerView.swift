@@ -1,6 +1,92 @@
+import AVKit
 import KSPlayer
 import SwiftUI
 import UIKit
+
+// MARK: - 软件内核画中画桥（修复轮 11）
+
+/// 软件内核小窗桥：KSMEPlayer 自带一个基于
+/// AVSampleBufferDisplayLayer 的 PiP 控制器
+/// （KSPictureInPictureController，AVPictureInPictureController
+/// 子类，内容源是 MetalPlayView 的 displayLayer——内核
+/// 在 options.isUseDisplayLayer 成立时逐帧把解码帧
+/// enqueue 进该层）。本桥只做三件事：接管该控制器的
+/// delegate（不用 KSPlayerLayer 的 pipStart——它会把
+/// delegate 抢成 layer 自己且其恢复回调不调
+/// completionHandler，与本页 fullScreenCover 形态冲突）、
+/// 观察 isPictureInPicturePossible、转发开始/停止/失败。
+/// 帧供给的前提是内核走 displayLayer 渲染通路；若真机
+/// 上 displayLayer 没帧，系统会报 failedToStart，本桥
+/// 如实记日记并回调页面 toast，不假装成功。
+final class SoftwarePiPBridge: NSObject, ObservableObject,
+    AVPictureInPictureControllerDelegate {
+    @Published var isPossible = false
+    @Published var isActive = false
+    var onStopped: (() -> Void)?
+    var onFailed: ((String) -> Void)?
+    /// coordinator 注册的延迟拆除（小窗中退出页面时
+    /// teardown 先挂起，小窗关闭后由托管方调用）
+    var deferredTeardownHandler: (() -> Void)?
+    private weak var controller: AVPictureInPictureController?
+    private var possibleObservation: NSKeyValueObservation?
+
+    func attach(controller: AVPictureInPictureController?) {
+        guard let controller, controller !== self.controller else { return }
+        self.controller = controller
+        controller.delegate = self
+        possibleObservation = controller.observe(
+            \AVPictureInPictureController.isPictureInPicturePossible,
+            options: [.new]
+        ) { [weak self] controller, _ in
+            DispatchQueue.main.async {
+                self?.isPossible = controller.isPictureInPicturePossible
+            }
+        }
+        isPossible = controller.isPictureInPicturePossible
+    }
+
+    func start() { controller?.startPictureInPicture() }
+    func stop() { controller?.stopPictureInPicture() }
+
+    func runDeferredTeardown() {
+        deferredTeardownHandler?()
+        deferredTeardownHandler = nil
+    }
+
+    func pictureInPictureControllerDidStartPictureInPicture(
+        _ controller: AVPictureInPictureController
+    ) {
+        isActive = true
+        DiaryStore.shared.add("软件内核小窗已开始")
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(
+        _ controller: AVPictureInPictureController
+    ) {
+        isActive = false
+        DiaryStore.shared.add("软件内核小窗已关闭")
+        onStopped?()
+    }
+
+    func pictureInPictureController(
+        _ controller: AVPictureInPictureController,
+        failedToStartPictureInPictureWithError error: Error
+    ) {
+        DiaryStore.shared.add(
+            "软件内核小窗启动失败：\(error.localizedDescription)"
+        )
+        onFailed?(error.localizedDescription)
+    }
+
+    func pictureInPictureController(
+        _ controller: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
+            completionHandler: @escaping (Bool) -> Void
+    ) {
+        // 播放页仍以 fullScreenCover 呈现着，直接恢复即可
+        completionHandler(true)
+    }
+}
 
 /// 软件内核（KSPlayer 的 FFmpeg 内核 KSMEPlayer）的
 /// 播放表面：只负责出画面与把引擎的控制指令转给内核，
@@ -187,6 +273,7 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
     let engine: PlaybackEngine
     let fit: VideoFitMode
     let muted: Bool
+    let pipBridge: SoftwarePiPBridge
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -196,7 +283,8 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         let container = SoftwarePlayerContainerView()
         context.coordinator.attach(
             container: container, request: request,
-            engine: engine, fit: fit, muted: muted
+            engine: engine, fit: fit, muted: muted,
+            pipBridge: pipBridge
         )
         return container
     }
@@ -265,13 +353,21 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         /// 「内核自身触发的 paused」（build 6 真机出现
         /// 状态自行变 paused 而触发者不明）
         private var appCommandedPause = false
+        /// 软件内核小窗桥（修复轮 11）：attach 时接管
+        /// KSMEPlayer 自带 PiP 控制器的 delegate
+        private weak var pipBridge: SoftwarePiPBridge?
 
         func attach(
             container: SoftwarePlayerContainerView, request: PlaybackRequest,
-            engine: PlaybackEngine, fit: VideoFitMode, muted: Bool
+            engine: PlaybackEngine, fit: VideoFitMode, muted: Bool,
+            pipBridge: SoftwarePiPBridge
         ) {
             self.container = container
             self.engine = engine
+            self.pipBridge = pipBridge
+            pipBridge.deferredTeardownHandler = { [weak self] in
+                self?.teardownNow()
+            }
             container.onWindowAttached = { [weak self] in
                 guard let self else { return }
                 // 入窗复核：渲染视图必须在容器里且被约束
@@ -308,6 +404,17 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             layer.player.isMuted = muted
             layer.player.playbackRate = engine.playbackRate
             engine.softwareControl = self
+            attachPiPController()
+        }
+
+        /// 把 KSMEPlayer 自带的 PiP 控制器交给小窗桥：
+        /// 控制器是懒建的（首次访问才基于 videoOutput
+        /// 的 displayLayer 创建），attach 时与就绪时各
+        /// 试一次；拿不到（无视频输出等）就保持桥的
+        /// isPossible = false，页面不显示小窗入口
+        private func attachPiPController() {
+            guard let mePlayer = layer?.player as? KSMEPlayer else { return }
+            pipBridge?.attach(controller: mePlayer.pipController)
         }
 
         func update(request: PlaybackRequest, fit: VideoFitMode) {
@@ -328,6 +435,22 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         }
 
         func teardown() {
+            // 小窗进行中退出播放页（修复轮 11）：内核
+            // 不能停——小窗的帧源就是这个 layer。拆除
+            // 延迟到小窗关闭，由 PlaybackKeepAlive 经
+            // 小窗桥的 deferredTeardownHandler 回调
+            // teardownNow；页面还在时小窗不会 active 到
+            // 这里（恢复 UI 走 delegate completionHandler）
+            if pipBridge?.isActive == true {
+                DiaryStore.shared.add(
+                    "软件内核小窗进行中退出播放页，内核拆除延迟到小窗关闭"
+                )
+                return
+            }
+            teardownNow()
+        }
+
+        func teardownNow() {
             FFmpegDiaryLogHandler.shared.endSession()
             pendingErrorWork?.cancel()
             if let engine, engine.softwareControl === self {
@@ -349,6 +472,7 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             switch state {
             case .readyToPlay:
                 reportTrackInfoIfNeeded(layer: layer)
+                attachPiPController()
                 engine?.noteSoftwareReady()
             case .buffering:
                 engine?.noteSoftwareBuffering(true)
@@ -434,6 +558,9 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             guard !trackInfoReported else { return }
             trackInfoReported = true
             let player = layer.player
+            // 画面自然尺寸发布给引擎（修复轮 11）：播放页
+            // 据此算软件内核的画面矩形锚定弹幕层
+            engine?.noteSoftwarePresentationSize(player.naturalSize)
             var parts: [String] = []
             let videos = player.tracks(mediaType: .video)
             if videos.isEmpty {

@@ -23,7 +23,11 @@ struct CloudLoginView: View {
     }
 
     private var home: URL {
-        URL(string: type == .tianyi ? "https://cloud.189.cn/" : "https://yun.139.com/")!
+        switch type {
+        case .tianyi: return URL(string: "https://cloud.189.cn/")!
+        case .quark: return URL(string: "https://pan.quark.cn/")!
+        default: return URL(string: "https://yun.139.com/")!
+        }
     }
 
     var body: some View {
@@ -121,6 +125,7 @@ final class CloudLoginModel: ObservableObject {
     }
 
     private var isTianyi: Bool { type == .tianyi }
+    private var isQuark: Bool { type == .quark }
 
     func loadIfNeeded(home: URL) {
         guard !loaded else { return }
@@ -145,9 +150,14 @@ final class CloudLoginModel: ObservableObject {
         }
         let cookieMap = await readCookieMap()
         guard sequence == hintSequence, !busy else { return }
-        let hasKeyCookie = isTianyi
-            ? url.contains("cloud.189.cn") && !cookieMap.isEmpty
-            : cookieMap.keys.contains { $0.lowercased() == "authorization" }
+        let hasKeyCookie: Bool
+        if isTianyi {
+            hasKeyCookie = url.contains("cloud.189.cn") && !cookieMap.isEmpty
+        } else if isQuark {
+            hasKeyCookie = url.contains("pan.quark.cn") && !cookieMap.isEmpty
+        } else {
+            hasKeyCookie = cookieMap.keys.contains { $0.lowercased() == "authorization" }
+        }
         status = hasKeyCookie
             ? "检测到已进入网盘页面，点右上角「完成」读取登录状态。"
             : "请先在页面里完成登录，成功进入网盘后再点右上角「完成」。"
@@ -157,9 +167,14 @@ final class CloudLoginModel: ObservableObject {
     /// 再补一遍 document.cookie（非 HttpOnly 部分）
     func readCookieMap() async -> [String: String] {
         var byName: [String: String] = [:]
-        let domains = isTianyi
-            ? ["cloud.189.cn", "api.cloud.189.cn"]
-            : ["yun.139.com", "personal-kd-njs.yun.139.com", "caiyun.139.com"]
+        let domains: [String]
+        if isTianyi {
+            domains = ["cloud.189.cn", "api.cloud.189.cn"]
+        } else if isQuark {
+            domains = ["pan.quark.cn", "drive.quark.cn"]
+        } else {
+            domains = ["yun.139.com", "personal-kd-njs.yun.139.com", "caiyun.139.com"]
+        }
         let cookies = await webView.configuration.websiteDataStore
             .httpCookieStore.allCookies()
         for cookie in cookies {
@@ -244,7 +259,7 @@ final class CloudLoginModel: ObservableObject {
                 candidates.append(v)
             }
         }
-        if !isTianyi {
+        if type == .mobile {
             for (name, value) in cookieMap where name.lowercased() == "authorization" {
                 addCandidate(Self.stripBasic(value.trimmingCharacters(in: .whitespaces)))
             }

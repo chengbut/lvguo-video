@@ -38,6 +38,12 @@ struct DownloadJob: Identifiable {
     /// 按站源分类保存时的子目录名（站源 = 模块 id，文件源 = 源 id）；
     /// 空 = 直接放在 downloads 根下（旧任务与未开启分类时）
     var sourceGroup: String = ""
+    /// 规则命名算出的保存名（不含扩展名，修复轮 11 第 10 项）：
+    /// 站源集数为「剧名-第X季-第X集」/「剧名-第X集」；
+    /// 空 = 按旧规则（直链尾名 / HLS 的 media.mp4 / 文件源
+    /// 的原文件名）。最终文件名 = saveBase + 实际扩展名，
+    /// 在 applyResolved / convertHLS 落定时拼
+    var saveBase: String = ""
 
     var progress: Double {
         if state == "completed" { return 1 }
@@ -72,7 +78,7 @@ struct DownloadJob: Identifiable {
             "episodeTotal": episodeTotal,
             "fileSourceId": fileSourceId, "fileRef": fileRef,
             "resolvedURL": resolvedURL, "resolvedHeadersJSON": resolvedHeadersJSON,
-            "sourceGroup": sourceGroup,
+            "sourceGroup": sourceGroup, "saveBase": saveBase,
         ]
     }
 
@@ -105,6 +111,7 @@ struct DownloadJob: Identifiable {
         job.resolvedURL = JSON.dictString(dict["resolvedURL"])
         job.resolvedHeadersJSON = JSON.dictString(dict["resolvedHeadersJSON"])
         job.sourceGroup = JSON.dictString(dict["sourceGroup"])
+        job.saveBase = JSON.dictString(dict["saveBase"])
         return job
     }
 }
@@ -122,6 +129,17 @@ final class DownloadManager: ObservableObject {
 
     private(set) var downloadsDirectory: URL
     private let jobsFile: URL
+    /// 自定义下载文件夹的 security-scoped 访问句柄
+    /// （修复轮 11 第 9 项）：进程内保持 start 状态，
+    /// 下载才能往用户自选文件夹里写。换选文件夹时旧
+    /// 访问不立即释放——迁移还要从旧目录复制文件，
+    /// 先停访问会让复制读不到；统一在切回内置位置
+    /// 时释放（endAccessingCustomFolder）
+    private var customFolderAccessURL: URL?
+    private var accessedFolderURLs: [URL] = []
+    /// 自定义文件夹书签失效、已回落默认位置（存储页
+    /// 据此显示提示，不静默）
+    private(set) var customFolderFallback = false
     /// 正在跑的任务集合（并发泵）：pump 按 downloadConcurrency 上限补位
     private var runningIds: Set<String> = []
     private var runTasks: [String: Task<Void, Never>] = [:]
@@ -154,15 +172,43 @@ final class DownloadManager: ObservableObject {
 
     init(dataDirectory: URL) {
         // 下载位置（存储页可改）：support 应用内部 / documents
-        // 文件 App 可见，落盘在 resource-settings.json，init 时直读
+        // 文件 App 可见 / custom 用户自选文件夹（security-scoped
+        // 书签，修复轮 11 第 9 项），落盘在 resource-settings.json，
+        // init 时直读
         let resourceDict = AppData.readJSONDictionary(
             dataDirectory.appendingPathComponent("resource-settings.json")
         ) ?? [:]
-        let location = JSON.dictString(resourceDict["downloadsLocation"])
-            == "documents" ? "documents" : "support"
-        let base = ResourceSettingsStore.downloadsBaseDirectory(
-            dataDirectory: dataDirectory, location: location
-        )
+        let locationRaw = JSON.dictString(resourceDict["downloadsLocation"])
+        let base: URL
+        if locationRaw == "custom",
+           let resolved = ResourceSettingsStore.resolveDownloadsFolder(
+               bookmarkBase64: JSON.dictString(
+                   resourceDict["downloadsFolderBookmark"]
+               )
+           ) {
+            base = resolved.url
+            customFolderAccessURL = resolved.url
+            accessedFolderURLs.append(resolved.url)
+            _ = resolved.url.startAccessingSecurityScopedResource()
+            if resolved.stale {
+                DiaryStore.shared.add(
+                    "自定义下载文件夹书签已过期，按解析出的地址继续使用（建议在存储页重新选择一次文件夹）"
+                )
+            }
+        } else {
+            if locationRaw == "custom" {
+                // 书签失效/无权限：回落应用内部存储并留痕，
+                // 存储页也会显示回落提示，不静默失败
+                customFolderFallback = true
+                DiaryStore.shared.add(
+                    "自定义下载文件夹书签解析失败，已回落应用内部存储"
+                )
+            }
+            let location = locationRaw == "documents" ? "documents" : "support"
+            base = ResourceSettingsStore.downloadsBaseDirectory(
+                dataDirectory: dataDirectory, location: location
+            )
+        }
         downloadsDirectory = base.appendingPathComponent("downloads")
         jobsFile = dataDirectory.appendingPathComponent("downloads.json")
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -264,6 +310,29 @@ final class DownloadManager: ObservableObject {
         pump()
     }
 
+    /// 存储页选定自定义文件夹后调用（修复轮 11 第 9 项）：
+    /// 接管该文件夹的 security-scoped 访问——须先于
+    /// relocateDownloads 调用，迁移与后续下载都靠它。
+    /// 旧文件夹的访问保留到切回内置位置时统一释放
+    /// （迁移要从旧目录复制，先停访问会复制失败）
+    func beginAccessingCustomFolder(_ url: URL) {
+        if !accessedFolderURLs.contains(url) {
+            _ = url.startAccessingSecurityScopedResource()
+            accessedFolderURLs.append(url)
+        }
+        customFolderAccessURL = url
+        customFolderFallback = false
+    }
+
+    /// 切回内置位置时释放全部自定义文件夹的访问
+    func endAccessingCustomFolder() {
+        for url in accessedFolderURLs {
+            url.stopAccessingSecurityScopedResource()
+        }
+        accessedFolderURLs.removeAll()
+        customFolderAccessURL = nil
+    }
+
     /// 迁移下载目录（存储页「更改下载位置」）：有在跑任务时
     /// 拒绝（先暂停全部），其余整体搬目录并切换根路径。
     func relocateDownloads(toBase base: URL) throws {
@@ -345,6 +414,7 @@ final class DownloadManager: ObservableObject {
         if resourceSettings?.downloadBySource == true {
             job.sourceGroup = Self.sanitizedGroup(provider.manifest.id)
         }
+        job.saveBase = Self.episodeSaveBase(title: drama.title, chapter: chapter)
         job.dramaJSON = serializeJSON([
             "id": drama.id, "source": drama.source, "sourceId": drama.sourceId,
             "title": drama.title, "cover": drama.coverURL,
@@ -392,15 +462,84 @@ final class DownloadManager: ObservableObject {
         return cleaned.isEmpty ? "_" : cleaned
     }
 
+    /// 文件名清洗（修复轮 11 第 10 项）：路径分隔与
+    /// Windows/macOS 非法字符一律换下划线，控制字符
+    /// 去掉，首尾空白与点去掉，过长截断；清洗后为空
+    /// 返回空串，交给调用方走回落链
+    static func sanitizedFileBase(_ raw: String) -> String {
+        var result = ""
+        for character in raw {
+            if "/\\:*?\"<>|".contains(character) {
+                result.append("_")
+            } else if character.unicodeScalars.allSatisfy({ $0.value >= 0x20 }) {
+                result.append(character)
+            }
+        }
+        var cleaned = result.trimmingCharacters(
+            in: CharacterSet(charactersIn: " .")
+        )
+        while cleaned.contains("__") {
+            cleaned = cleaned.replacingOccurrences(of: "__", with: "_")
+        }
+        if cleaned.count > 120 {
+            cleaned = String(cleaned.prefix(120))
+        }
+        return cleaned
+    }
+
+    /// 保存名规则（修复轮 11 第 10 项）：有剧名时
+    /// 「剧名-第X季-第X集」（季号只在章节原始数据里
+    /// 带 season 类字段时才有）/「剧名-第X集」；剧名
+    /// 缺失回落集标题；再缺返回空串（调用方回落原
+    /// 文件名规则）。集号用 episodeLabel（模块给的
+    /// 集号文本，缺失时解析层已按序号兜底）
+    static func episodeSaveBase(
+        title: String, chapter: ChapterItem
+    ) -> String {
+        let cleanTitle = sanitizedFileBase(title)
+        if !cleanTitle.isEmpty {
+            var base = cleanTitle
+            if let season = seasonText(chapter.raw), !season.isEmpty {
+                base += "-第\(season)季"
+            }
+            base += "-第\(chapter.episodeLabel)集"
+            return base
+        }
+        return sanitizedFileBase(chapter.title)
+    }
+
+    /// 季号提取：章节原始数据里的 season 类字段
+    /// （数字或纯数字字符串）；没有返回 nil（大部分
+    /// 短剧模块不带季信息，走无季形态）
+    static func seasonText(_ raw: [String: Any]) -> String? {
+        for key in ["season", "seasonNumber", "season_number", "seasonIndex"] {
+            if let number = raw[key] as? NSNumber, number.doubleValue > 0 {
+                return String(Int(number.doubleValue))
+            }
+            if let text = raw[key] as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty,
+                   trimmed.allSatisfy({ $0.isNumber }) {
+                    return trimmed
+                }
+            }
+        }
+        return nil
+    }
+
     private func applyResolved(_ job: inout DownloadJob, url: String, headers: [String: String]) {
         job.resolvedURL = url
         job.resolvedHeadersJSON = serializeJSON(headers)
         job.isHLS = URL(string: url)?.pathExtension.lowercased() == "m3u8"
-        if !job.isHLS, job.fileName.isEmpty {
-            job.fileName = URL(string: url)?.lastPathComponent ?? "video"
-        }
         if job.isHLS {
             job.fileName = "playlist.m3u8"
+        } else if !job.saveBase.isEmpty {
+            // 规则命名（修复轮 11 第 10 项）：名用规则名，
+            // 扩展名沿用直链尾名的（无扩展名就不带）
+            let ext = URL(string: url)?.pathExtension ?? ""
+            job.fileName = ext.isEmpty ? job.saveBase : "\(job.saveBase).\(ext)"
+        } else if job.fileName.isEmpty {
+            job.fileName = URL(string: url)?.lastPathComponent ?? "video"
         }
     }
 
@@ -577,7 +716,11 @@ final class DownloadManager: ObservableObject {
             update(jobId) { $0.note = "无法创建合并导出，已按分片形式保存" }
             return
         }
-        let output = directory.appendingPathComponent("media.mp4")
+        // 合并产物名（修复轮 11 第 10 项）：有规则名用
+        // 规则名 + .mp4，没有沿用 media.mp4
+        let saveBase = jobs.first(where: { $0.id == jobId })?.saveBase ?? ""
+        let outputName = saveBase.isEmpty ? "media.mp4" : "\(saveBase).mp4"
+        let output = directory.appendingPathComponent(outputName)
         try? FileManager.default.removeItem(at: output)
         do {
             try await exporter.export(to: output, as: .mp4)
@@ -586,13 +729,13 @@ final class DownloadManager: ObservableObject {
             ))?[.size] as? Int64 ?? 0
             for name in (try? FileManager.default.contentsOfDirectory(
                 atPath: directory.path
-            )) ?? [] where name != "media.mp4" {
+            )) ?? [] where name != outputName {
                 try? FileManager.default.removeItem(
                     at: directory.appendingPathComponent(name)
                 )
             }
             update(jobId) { target in
-                target.fileName = "media.mp4"
+                target.fileName = outputName
                 target.isHLS = false
                 target.bytes = size
                 target.note = ""

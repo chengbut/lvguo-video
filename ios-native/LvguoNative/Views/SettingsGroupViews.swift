@@ -562,6 +562,7 @@ struct StorageSettingsView: View {
     @State private var confirmDeleteAll = false
     @State private var notice: String?
     @State private var errorText: String?
+    @State private var showFolderPicker = false
 
     private var dataDirectory: URL { AppData.directory }
 
@@ -605,18 +606,40 @@ struct StorageSettingsView: View {
                     options: [
                         ("support", "应用内部存储"),
                         ("documents", "文件 App 可见目录"),
+                        ("custom", "自定义文件夹…"),
                     ],
                     selection: Binding(
                         get: { resourceSettings.downloadsLocation },
                         set: { _ in }
                     ),
                     onSelect: { value in
-                        if value != resourceSettings.downloadsLocation {
+                        if value == "custom" {
+                            // 先选文件夹，选好再走迁移确认
+                            // （修复轮 11 第 9 项）
+                            showFolderPicker = true
+                        } else if value != resourceSettings.downloadsLocation {
                             pendingLocation = value
                         }
                         return true
                     }
                 )
+                if resourceSettings.downloadsLocation == "custom" {
+                    SettingsRowDivider()
+                    ValueSettingsRow(
+                        title: "自定义文件夹",
+                        subtitle: resourceSettings.downloadsFolderName.isEmpty
+                            ? "点此重新选择" : resourceSettings.downloadsFolderName,
+                        action: { showFolderPicker = true }
+                    )
+                    if downloadManager.customFolderFallback {
+                        Text("自定义文件夹书签已失效，当前已回落应用内部存储。点「自定义文件夹」重新选择。")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                    }
+                }
                 SettingsRowDivider()
                 ValueSettingsRow(title: "刷新用量") {
                     Task { await measure() }
@@ -651,6 +674,13 @@ struct StorageSettingsView: View {
             }
         }
         .task { await measure() }
+        .fileImporter(
+            isPresented: $showFolderPicker,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFolderPick(result)
+        }
         .alert(
             "迁移已下载内容？",
             isPresented: Binding(
@@ -668,8 +698,7 @@ struct StorageSettingsView: View {
         } message: {
             Text(
                 "将下载目录里的全部内容迁移到"
-                    + (pendingLocation == "documents"
-                        ? "文件 App 可见目录" : "应用内部存储")
+                    + locationDisplayName(pendingLocation)
                     + "。下载会先暂停，复制成功后清理旧目录。请保证目标有足够空间。"
             )
         }
@@ -715,15 +744,65 @@ struct StorageSettingsView: View {
         cacheBytes = result.cacheBytes
     }
 
+    private func locationDisplayName(_ location: String?) -> String {
+        switch location {
+        case "documents":
+            return "文件 App 可见目录"
+        case "custom":
+            let name = resourceSettings.downloadsFolderName
+            return name.isEmpty ? "自定义文件夹" : "自定义文件夹「\(name)」"
+        default:
+            return "应用内部存储"
+        }
+    }
+
+    /// 选完自定义文件夹：先做书签落盘，再走既有迁移
+    /// 确认（pendingLocation = "custom"）
+    private func handleFolderPick(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let bookmark = ResourceSettingsStore
+                .makeDownloadsFolderBookmark(url) else {
+                errorText = "无法保存这个文件夹的访问书签，请换一个文件夹重试"
+                return
+            }
+            resourceSettings.downloadsFolderBookmark = bookmark
+            resourceSettings.downloadsFolderName = url.lastPathComponent
+            if resourceSettings.downloadsLocation == "custom" {
+                // 已经是自定义位置：直接切换到新文件夹
+                relocate(to: "custom")
+            } else {
+                pendingLocation = "custom"
+            }
+        case .failure(let error):
+            errorText = "选择文件夹失败：\(error.localizedDescription)"
+        }
+    }
+
     private func relocate(to location: String) {
-        let base = ResourceSettingsStore.downloadsBaseDirectory(
-            dataDirectory: dataDirectory, location: location
-        )
+        let base: URL
+        if location == "custom" {
+            guard let resolved = ResourceSettingsStore.resolveDownloadsFolder(
+                bookmarkBase64: resourceSettings.downloadsFolderBookmark
+            ) else {
+                errorText = "自定义文件夹书签已失效，请重新选择文件夹"
+                return
+            }
+            downloadManager.beginAccessingCustomFolder(resolved.url)
+            base = resolved.url
+        } else {
+            downloadManager.endAccessingCustomFolder()
+            base = ResourceSettingsStore.downloadsBaseDirectory(
+                dataDirectory: dataDirectory, location: location
+            )
+        }
         do {
             try downloadManager.relocateDownloads(toBase: base)
             resourceSettings.downloadsLocation = location
-            notice = "已迁移到"
-                + (location == "documents" ? "文件 App 可见目录" : "应用内部存储")
+            notice = "已迁移到" + locationDisplayName(location)
             Task { await measure() }
         } catch {
             errorText = error.localizedDescription

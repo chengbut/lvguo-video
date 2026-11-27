@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 资源页：站源组 = 模块管理（安装 / 启用停用 / 设为当前 / 卸载），
 /// 文件源组 = 文件源管理（添加 / 打开 / 删除，与首页文件模式
@@ -13,31 +14,23 @@ struct ResourcesView: View {
     @State private var pendingDelete: InstalledModule?
     @State private var showAddFileSource = false
     @State private var pendingDeleteFileSource: FileSource?
+    @State private var showAddModule = false
+    @State private var showModuleFilePicker = false
 
     var body: some View {
         NavigationStack {
             List {
                 Section("站源 · 模块管理") {
-                    HStack {
-                        TextField("模块包 URL（https://…/module.zip）", text: $installURL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.footnote)
-                        Button {
-                            Task { await installFromURL() }
-                        } label: {
-                            if installing {
-                                ProgressView()
-                            } else {
-                                Text("安装")
-                            }
-                        }
-                        .disabled(installURL.trimmingCharacters(in: .whitespaces).isEmpty || installing)
-                    }
+                    // 添加入口对齐 Flutter modules_page：组头
+                    // 「+ 添加」打开「添加站源模块」，里面
+                    // 选择本地文件 / 输入下载地址两条路
+                    // （修复轮 11 第 7 项；旧版只有一行内嵌
+                    // URL 输入框，且顶部挂着示例模块入口，
+                    // 第 8 项已一并移除）
                     Button {
-                        installSample()
+                        showAddModule = true
                     } label: {
-                        Label("安装内置示例模块（假数据）", systemImage: "puzzlepiece.extension")
+                        Label("添加模块", systemImage: "plus.circle")
                     }
                     if let message {
                         Text(message)
@@ -48,7 +41,7 @@ struct ResourcesView: View {
 
                 Section("已安装模块") {
                     if store.modules.isEmpty {
-                        Text("还没有安装任何模块")
+                        Text("还没有安装站源模块。点「添加模块」，选择本地文件或输入下载地址安装。")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(store.modules) { module in
@@ -83,6 +76,16 @@ struct ResourcesView: View {
             .navigationTitle("资源")
             .sheet(isPresented: $showAddFileSource) {
                 FileSourceTypePickerView()
+            }
+            .sheet(isPresented: $showAddModule) {
+                addModuleSheet
+            }
+            .fileImporter(
+                isPresented: $showModuleFilePicker,
+                allowedContentTypes: [.zip, .data],
+                allowsMultipleSelection: false
+            ) { result in
+                handleModuleFilePick(result)
             }
             .confirmationDialog(
                 "删除文件源「\(pendingDeleteFileSource?.name ?? "")」？",
@@ -125,58 +128,140 @@ struct ResourcesView: View {
 
     private func moduleRow(_ module: InstalledModule) -> some View {
         let isCurrent = module.id == store.currentSourceId
-        return HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(module.name)
-                        .font(.body.weight(isCurrent ? .semibold : .regular))
-                    if isCurrent {
-                        Text("当前")
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .glassEffect(.regular.tint(.green.opacity(0.4)), in: Capsule())
+        // 动作呈现对齐 Flutter _InstalledCard（修复轮 11
+        // 第 6 项）：「设为当前」「卸载」是卡片上的直达
+        // 按钮，不再藏进省略号菜单；启用开关仍在行尾。
+        // 「设为当前」只在可切换时出现（已启用且不是
+        // 当前），「卸载」恒显示、走既有确认弹窗
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(module.name)
+                            .font(.body.weight(isCurrent ? .semibold : .regular))
+                        if isCurrent {
+                            Text("当前")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .glassEffect(.regular.tint(.green.opacity(0.4)), in: Capsule())
+                        }
+                    }
+                    Text("\(module.id) · v\(module.manifest?.version ?? "-")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if !module.loadError.isEmpty {
+                        Text(module.loadError)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
                     }
                 }
-                Text("\(module.id) · v\(module.manifest?.version ?? "-")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if !module.loadError.isEmpty {
-                    Text(module.loadError)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                }
-            }
-            Spacer()
-            Toggle(
-                "",
-                isOn: Binding(
-                    get: { module.enabled },
-                    set: { store.setEnabled(module.id, $0) }
+                Spacer()
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { module.enabled },
+                        set: { store.setEnabled(module.id, $0) }
+                    )
                 )
-            )
-            .labelsHidden()
-            Menu {
-                Button("设为当前") { store.setCurrent(module.id) }
-                    .disabled(isCurrent || !module.isUsable)
-                Button("卸载", role: .destructive) { pendingDelete = module }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.title3)
+                .labelsHidden()
+            }
+            HStack(spacing: 10) {
+                if !isCurrent, module.enabled {
+                    Button {
+                        store.setCurrent(module.id)
+                    } label: {
+                        Label("设为当前", systemImage: "checkmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!module.isUsable)
+                }
+                Button(role: .destructive) {
+                    pendingDelete = module
+                } label: {
+                    Label("卸载", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Spacer()
             }
         }
     }
 
     // MARK: - 安装
 
-    private func installSample() {
-        do {
-            let manifest = try store.installSampleModule()
-            store.setCurrent(manifest.id)
-            message = "示例模块「\(manifest.name)」已安装并设为当前，去首页看分类列表。"
-        } catch {
-            message = "\(error)"
+    /// 「添加站源模块」面板（修复轮 11 第 7 项）：两条
+    /// 安装路与 Flutter 添加对话框一致——选择本地文件
+    /// （文件导入 → installPackage，与 URL 安装同一条
+    /// 安装链）/ 输入下载地址（installFromURL）
+    private var addModuleSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        showAddModule = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            showModuleFilePicker = true
+                        }
+                    } label: {
+                        Label("选择本地文件", systemImage: "doc.badge.plus")
+                    }
+                } footer: {
+                    Text("从「文件」里选模块包（.zip），包根目录或唯一一层文件夹里要有 manifest.json 和 main.js。")
+                }
+                Section("输入下载地址") {
+                    TextField("模块包 URL（https://…/module.zip）", text: $installURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.footnote)
+                    Button {
+                        Task { await installFromURL() }
+                    } label: {
+                        if installing {
+                            ProgressView()
+                        } else {
+                            Text("下载并安装")
+                        }
+                    }
+                    .disabled(installURL.trimmingCharacters(in: .whitespaces).isEmpty || installing)
+                }
+                if let message {
+                    Section {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("添加站源模块")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { showAddModule = false }
+                }
+            }
+        }
+        .presentationBackground(.ultraThinMaterial)
+    }
+
+    private func handleModuleFilePick(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let data = try Data(contentsOf: url)
+                let manifest = try store.installPackage(data: data)
+                store.setCurrent(manifest.id)
+                message = "模块「\(manifest.name)」安装成功，已设为当前。"
+            } catch {
+                message = "\(error)"
+            }
+        case .failure(let error):
+            message = "读取文件失败：\(error.localizedDescription)"
         }
     }
 
@@ -188,6 +273,7 @@ struct ResourcesView: View {
             store.setCurrent(manifest.id)
             message = "模块「\(manifest.name)」安装成功，已设为当前。"
             installURL = ""
+            showAddModule = false
         } catch {
             message = "\(error)"
         }

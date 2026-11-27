@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// 添加文件源：先选类型（顺序固定：天翼、中国移动、WebDAV、
-/// HTTP 拉取、FTP——对齐 Flutter addFileSource），再进对应表单。
+/// 添加文件源：先选类型（顺序固定：天翼、中国移动、夸克、
+/// WebDAV、HTTP 拉取、FTP——前两项对齐 Flutter
+/// addFileSource，夸克为修复轮 11 新增），再进对应表单。
 struct FileSourceTypePickerView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var chosen: FileSourceType?
@@ -39,6 +40,7 @@ struct FileSourceTypePickerView: View {
     private func subtitle(_ type: FileSourceType) -> String {
         switch type {
         case .tianyi, .mobile: return "网页登录（实验）/ WebDAV 挂载"
+        case .quark: return "网页登录（实验）"
         case .webdav: return "WebDAV 服务器"
         case .http: return "单个媒体文件的直链地址"
         case .ftp: return "FTP 服务器"
@@ -68,7 +70,10 @@ struct FileSourceFormView: View {
     @State private var credential = ""
     @State private var loginDone = false
 
-    private var isCloud: Bool { type == .tianyi || type == .mobile }
+    private var isCloud: Bool { type == .tianyi || type == .mobile || type == .quark }
+    /// 接入方式可选（原生/WebDAV）的只有天翼/移动；夸克
+    /// 没有官方 WebDAV，恒走原生登录（修复轮 11）
+    private var canPickMode: Bool { type == .tianyi || type == .mobile }
 
     private var canSave: Bool {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return false }
@@ -77,7 +82,7 @@ struct FileSourceFormView: View {
             return !url.trimmingCharacters(in: .whitespaces).isEmpty
         case .ftp, .webdav:
             return !server.trimmingCharacters(in: .whitespaces).isEmpty
-        case .tianyi, .mobile:
+        case .tianyi, .mobile, .quark:
             if mode == FileSourceMode.native {
                 return !credential.trimmingCharacters(in: .whitespaces).isEmpty
             }
@@ -90,7 +95,7 @@ struct FileSourceFormView: View {
             Section("名称") {
                 TextField("显示名称", text: $name)
             }
-            if isCloud {
+            if canPickMode {
                 Section("接入方式") {
                     Picker("接入方式", selection: $mode) {
                         Text("原生登录（实验）").tag(FileSourceMode.native)
@@ -119,7 +124,7 @@ struct FileSourceFormView: View {
             case .webdav:
                 serverSection
                 accountSection
-            case .tianyi, .mobile:
+            case .tianyi, .mobile, .quark:
                 if mode == FileSourceMode.native {
                     nativeSection
                 } else {
@@ -172,7 +177,7 @@ struct FileSourceFormView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextField(
-                type == .tianyi ? "Cookie 整段" : "authorization 令牌或整段 Cookie",
+                type == .mobile ? "authorization 令牌或整段 Cookie" : "Cookie 整段",
                 text: $credential,
                 axis: .vertical
             )
@@ -183,9 +188,18 @@ struct FileSourceFormView: View {
         } header: {
             Text("原生登录（实验）")
         } footer: {
-            Text(type == .tianyi
-                ? "天翼用 Cookie 整段；保存前建议先用网页登录自动验证。"
-                : "移动用 authorization 令牌（Authorization: Basic 后面的内容），或整段 Cookie，客户端会自动判断。")
+            Text(nativeFooterText)
+        }
+    }
+
+    private var nativeFooterText: String {
+        switch type {
+        case .tianyi:
+            return "天翼用 Cookie 整段；保存前建议先用网页登录自动验证。"
+        case .quark:
+            return "夸克用 Cookie 整段；保存前建议先用网页登录自动验证。"
+        default:
+            return "移动用 authorization 令牌（Authorization: Basic 后面的内容），或整段 Cookie，客户端会自动判断。"
         }
     }
 
@@ -198,7 +212,8 @@ struct FileSourceFormView: View {
             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
             password: password,
             url: url.trimmingCharacters(in: .whitespacesAndNewlines),
-            mode: isCloud ? mode : FileSourceMode.webDav,
+            mode: type == .quark ? FileSourceMode.native
+                : (isCloud ? mode : FileSourceMode.webDav),
             cookie: credential.trimmingCharacters(in: .whitespacesAndNewlines),
             port: Int(portText) ?? 0,
             path: path.trimmingCharacters(in: .whitespacesAndNewlines)

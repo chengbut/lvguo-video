@@ -55,12 +55,29 @@ final class PiPBridge: NSObject, ObservableObject, AVPictureInPictureControllerD
 final class PlaybackKeepAlive {
     static let shared = PlaybackKeepAlive()
     private var engine: PlaybackEngine?
+    private var softwareEngine: PlaybackEngine?
+    private var softwareBridge: SoftwarePiPBridge?
 
     func adopt(_ engine: PlaybackEngine, bridge: PiPBridge) {
         self.engine = engine
         bridge.onStopped = { [weak self, weak engine] in
             engine?.pause()
             self?.engine = nil
+        }
+    }
+
+    /// 软件内核小窗进行中退出播放页（修复轮 11）：引擎
+    /// 与小窗桥一起托管续命（coordinator 的 teardown
+    /// 已在小窗激活时自动延迟）；小窗关闭后暂停引擎
+    /// 并执行延迟拆除，再释放托管。
+    func adoptSoftware(_ engine: PlaybackEngine, bridge: SoftwarePiPBridge) {
+        softwareEngine = engine
+        softwareBridge = bridge
+        bridge.onStopped = { [weak self, weak engine, weak bridge] in
+            engine?.pause()
+            bridge?.runDeferredTeardown()
+            self?.softwareEngine = nil
+            self?.softwareBridge = nil
         }
     }
 }
@@ -243,6 +260,7 @@ struct PlayerPage: View {
     @StateObject private var engine = PlaybackEngine()
     @StateObject private var danmakuController = DanmakuController()
     @StateObject private var pipBridge = PiPBridge()
+    @StateObject private var softwarePipBridge = SoftwarePiPBridge()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
@@ -300,6 +318,65 @@ struct PlayerPage: View {
         scrubValue ?? dragSeekTarget ?? engine.currentTime
     }
 
+    /// 当前画面实际渲染矩形（修复轮 11，弹幕锚定用）：
+    /// 系统内核与 PlayerLayerView 内部完全同式；软件
+    /// 内核的 MetalPlayView 以 contentMode 撑满全屏，
+    /// 矩形按 contentMode 对 naturalSize 的等比规则算
+    /// （crop/fill 时矩形可超出屏幕，position 居中裁切
+    /// 与渲染一致）。任一尺寸未知时回退整屏
+    private func videoRect(in size: CGSize) -> CGRect {
+        let box = CGRect(origin: .zero, size: size)
+        if engine.activeKernel == .software {
+            let natural = engine.softwarePresentationSize
+            guard natural.width > 0, natural.height > 0 else { return box }
+            switch SoftwarePlayerSurface.contentMode(for: fit) {
+            case .scaleAspectFill:
+                let scale = max(size.width / natural.width, size.height / natural.height)
+                let rectSize = CGSize(
+                    width: natural.width * scale, height: natural.height * scale
+                )
+                return CGRect(
+                    x: box.midX - rectSize.width / 2,
+                    y: box.midY - rectSize.height / 2,
+                    width: rectSize.width, height: rectSize.height
+                )
+            case .scaleToFill:
+                return box
+            default:
+                let scale = min(size.width / natural.width, size.height / natural.height)
+                let rectSize = CGSize(
+                    width: natural.width * scale, height: natural.height * scale
+                )
+                return CGRect(
+                    x: box.midX - rectSize.width / 2,
+                    y: box.midY - rectSize.height / 2,
+                    width: rectSize.width, height: rectSize.height
+                )
+            }
+        }
+        return PlayerContainerView.frame(
+            fit: fit, videoSize: engine.presentationSize, box: box
+        )
+    }
+
+    // MARK: 小窗（双内核分发，修复轮 11）
+
+    /// 小窗入口是否可用：按当前活动内核看各自的桥
+    private var pipPossibleNow: Bool {
+        engine.activeKernel == .software
+            ? softwarePipBridge.isPossible
+            : pipBridge.isPossible
+    }
+
+    private func startPiP() {
+        if engine.activeKernel == .software {
+            softwarePipBridge.start()
+        } else {
+            pipBridge.start()
+        }
+        showControls()
+    }
+
     /// 真实 window 安全区（修复轮 6）：chrome 的
     /// GeometryReader 自带 ignoresSafeArea，其
     /// proxy.safeAreaInsets 恒为 0——1.4 真机竖屏顶栏
@@ -331,7 +408,8 @@ struct PlayerPage: View {
                     request: softwareRequest,
                     engine: engine,
                     fit: fit,
-                    muted: engine.player.isMuted
+                    muted: engine.player.isMuted,
+                    pipBridge: softwarePipBridge
                 )
                 .ignoresSafeArea()
             } else {
@@ -345,10 +423,24 @@ struct PlayerPage: View {
             }
 
             // 弹幕层在画面之上、手势层之下（弹幕不吃手势）；
-            // 无弹幕数据源或开关关闭时自身不渲染
-            DanmakuOverlay(
-                engine: engine, controller: danmakuController
-            )
+            // 无弹幕数据源或开关关闭时自身不渲染。
+            // 锚定（修复轮 11）：旧版弹幕层铺满全屏，竖屏
+            // letterbox 时弹幕飘进上下黑边（真机截图里压
+            // 到标题栏上方）。对齐 Flutter danmaku_overlay
+            // ——弹幕盒子就是视频画面矩形：系统内核按
+            // PlayerContainerView.frame 同一公式（fit +
+            // presentationSize）算，软件内核按其
+            // contentMode + naturalSize 算（scaleAspectFit/
+            // Fill 等比、scaleToFill 全屏）。尺寸未知时
+            // 回退全屏（与旧行为一致，不丢弹幕）
+            GeometryReader { proxy in
+                let rect = videoRect(in: proxy.size)
+                DanmakuOverlay(
+                    engine: engine, controller: danmakuController
+                )
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+            }
             .ignoresSafeArea()
 
             gestureSurface
@@ -397,7 +489,7 @@ struct PlayerPage: View {
                 eqSaturation: $eqSaturation,
                 sleepLabel: sleepSectionLabel,
                 sleepSelection: sleepSelection,
-                pipPossible: pipBridge.isPossible && engine.activeKernel == .avplayer,
+                pipPossible: pipPossibleNow,
                 onSpeed: { speed in
                     engine.playbackRate = Float(speed)
                     settings.speed = speed
@@ -407,7 +499,7 @@ struct PlayerPage: View {
                 onFit: { fitOverride = $0 },
                 onScreenshot: { await takeScreenshot() },
                 onSleep: { raw in applySleepSelection(raw) },
-                onPiP: { pipBridge.start() },
+                onPiP: { startPiP() },
                 onLock: {
                     showSettings = false
                     setLocked(true)
@@ -434,13 +526,25 @@ struct PlayerPage: View {
             if pipBridge.isActive {
                 PlaybackKeepAlive.shared.adopt(engine, bridge: pipBridge)
             }
+            if softwarePipBridge.isActive {
+                PlaybackKeepAlive.shared.adoptSoftware(
+                    engine, bridge: softwarePipBridge
+                )
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background,
                settings.autoPictureInPicture,
-               !engine.isPaused, pipBridge.isPossible, engine.activeKernel == .avplayer {
-                pipBridge.start()
+               !engine.isPaused, pipPossibleNow {
+                startPiP()
             }
+        }
+        .onChange(of: showSettings) { _, presented in
+            // 面板关掉后重新计控件隐藏（修复轮 11 第 3 项）
+            if !presented { showControls() }
+        }
+        .onChange(of: showEpisodes) { _, presented in
+            if !presented { showControls() }
         }
         .onChange(of: engine.isPlaying) { _, _ in scheduleControlsHide() }
         .onChange(of: danmakuPreferences.words) { _, _ in
@@ -455,6 +559,9 @@ struct PlayerPage: View {
 
     private func start() {
         PlaybackEngine.configureAudioSession()
+        softwarePipBridge.onFailed = { _ in
+            showToast("小窗启动失败，请重试")
+        }
         engine.playbackRate = Float(settings.speed)
         engine.outroThreshold = settings.autoAdvance
             ? Double(settings.skipOutroSeconds) : 0
@@ -609,11 +716,21 @@ struct PlayerPage: View {
         scheduleControlsHide()
     }
 
+    /// 控件自动隐藏（修复轮 11 第 3 项）：时长对齐
+    /// Flutter 横屏页 _scheduleHide 的 3 秒；到点时的
+    /// 守门对齐 Flutter player_surface——暂停、缓冲中、
+    /// 未就绪都不隐藏，面板（设置/选集）开着也不隐藏
+    /// （旧版不看面板：菜单里选完一项控件立刻消失，
+    /// 正是真机反馈的「隐藏太快」）。守门不过时顺延
+    /// 一个周期重试，而不是直接放弃计时
     private func scheduleControlsHide() {
         hideWork?.cancel()
-        let work = DispatchWorkItem {
-            if !engine.isPaused, engine.phase == .ready {
+        let work = DispatchWorkItem { [self] in
+            if !engine.isPaused, engine.phase == .ready,
+               !engine.isStalled, !showSettings, !showEpisodes {
                 controlsVisible = false
+            } else if controlsVisible {
+                scheduleControlsHide()
             }
         }
         hideWork = work
@@ -742,6 +859,17 @@ struct PlayerPage: View {
             if horizontal {
                 dragKind = .seek
                 dragStartPosition = engine.currentTime
+            } else if size.height > size.width,
+                      let session, session.canNext || session.canPrevious {
+                // 竖屏切集（修复轮 11 第 2 项）：Flutter
+                // 竖屏页本体就是整页竖向 PageView，上下滑
+                // 恒为切集、与「滑动切集」设置无关——原生
+                // 旧版把切集藏在设置仲裁后（默认被亮度/
+                // 音量挡住），真机表现为手势缺失。竖屏多集
+                // 会话优先切集；横屏保持原仲裁（亮度/音量
+                // 设置优先，其次设置开的切集）。阈值与
+                // 提示沿用既有切集实现（60pt、松手生效）
+                dragKind = .episode
             } else if settings.swipeLevels {
                 let brightness = value.startLocation.x < size.width / 2
                 dragKind = .level(
@@ -1085,9 +1213,9 @@ struct PlayerPage: View {
                         .foregroundStyle(.white.opacity(0.9))
                 }
             }
-            if pipBridge.isPossible, engine.activeKernel == .avplayer {
+            if pipPossibleNow {
                 Button {
-                    pipBridge.start()
+                    startPiP()
                 } label: {
                     Image(systemName: "pip.enter")
                         .font(.headline)
@@ -1097,6 +1225,7 @@ struct PlayerPage: View {
             }
             Button {
                 showSettings = true
+                showControls()
             } label: {
                 Image(systemName: "gearshape")
                     .font(.headline)
@@ -1180,6 +1309,7 @@ struct PlayerPage: View {
                         engine.playbackRate = Float(speed)
                         settings.speed = speed
                         if !engine.isPaused { engine.play() }
+                        showControls()
                     } label: {
                         if speed == settings.speed {
                             Label(speedLabel(speed), systemImage: "checkmark")
@@ -1227,9 +1357,9 @@ struct PlayerPage: View {
             }
             Spacer()
             sleepMenu
-            if pipBridge.isPossible, engine.activeKernel == .avplayer {
+            if pipPossibleNow {
                 Button {
-                    pipBridge.start()
+                    startPiP()
                 } label: {
                     Image(systemName: "pip.enter")
                         .frame(width: 40, height: 44)
@@ -1345,6 +1475,7 @@ struct PlayerPage: View {
                     ForEach(activeRequest.variants.sorted(by: { $0.quality > $1.quality }), id: \.quality) { variant in
                         Button {
                             switchQuality(variant)
+                            showControls()
                         } label: {
                             if variant.quality == activeRequest.quality {
                                 Label(variant.label, systemImage: "checkmark")
@@ -1366,6 +1497,7 @@ struct PlayerPage: View {
                         engine.playbackRate = Float(speed)
                         settings.speed = speed
                         if !engine.isPaused { engine.play() }
+                        showControls()
                     } label: {
                         if speed == settings.speed {
                             Label(speedLabel(speed), systemImage: "checkmark")
@@ -1384,6 +1516,7 @@ struct PlayerPage: View {
                 ForEach(VideoFitMode.allCases, id: \.self) { mode in
                     Button {
                         fitOverride = mode
+                        showControls()
                     } label: {
                         if mode == fit {
                             Label(mode.label, systemImage: "checkmark")
@@ -1405,9 +1538,9 @@ struct PlayerPage: View {
                 }
             }
             sleepMenu
-            if pipBridge.isPossible, engine.activeKernel == .avplayer {
+            if pipPossibleNow {
                 Button {
-                    pipBridge.start()
+                    startPiP()
                 } label: {
                     Image(systemName: "pip.enter")
                         .frame(width: 40, height: 48)
@@ -1483,6 +1616,7 @@ struct PlayerPage: View {
 
     private func applySleep(_ option: SleepOption) {
         sleepOption = option
+        showControls()
         sleepTask?.cancel()
         sleepDeadline = nil
         if case .minutes(let minutes) = option {

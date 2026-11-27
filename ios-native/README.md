@@ -582,6 +582,24 @@ input into NAL units」正是把加密样本当明文
 
 待真机验：装 build 10 播同一集——预期日记出现「计划字段审计：含计划自带密钥字段 [cencKey]」→「变体审计：#N … → 加密（… · 计划自带密钥：有）」→「路由：计划自带密钥，加密流固定走软件内核」→「计划自带密钥：有，已使用」，且出画有声。若仍无画，看 FFmpeg 行是否还报 NAL 错误（报 = 密钥形态与预期不符，把审计行与字段审计行发回）。
 
+## 修复轮 11（2026-11-27）：播放页四项 + 云盘播放链审计 + 资源页三项 + 下载两项 + 夸克网盘（1.5 build 1）
+
+版本口径：本轮起版本号迭代为 **1.5**、build 重置为 **1**。范围冻结为用户 2026-11-27 19:40–19:52 下达的 11 项；云盘刮取片库（爆米花式）不在本轮，单独排后续轮次。逐项状态如下（「代码已通」只代表代码侧，真机结论以用户实测为准）：
+
+1. **弹幕锚定画面矩形**（代码已通）：旧版弹幕层铺满全屏，竖屏 letterbox 时飘进黑边（真机截图压到标题栏上方）。改为锚定视频实际渲染矩形——系统内核用与 `PlayerContainerView.frame` 完全相同的公式（fit + presentationSize）；软件内核按其 contentMode 对 naturalSize 的等比规则算（fit→等比适配、crop→等比填充可溢出、stretch→全屏），尺寸由 coordinator 在 readyToPlay 时从 `KSMEPlayer.naturalSize` 发布到引擎（`softwarePresentationSize`）。尺寸未知时回退全屏（不丢弹幕）。弹幕轨道/速度等行为未动。
+2. **竖屏上下滑切集**（代码已通）：Flutter 竖屏页本体是整页竖向 PageView，上下滑恒为切集；原生旧版把切集藏在设置仲裁后（默认被亮度/音量挡住），表现为手势缺失。改为：竖屏 + 多集会话（canNext/canPrevious 任一成立）时竖滑优先切集，阈值 60pt、提示文案与松手生效沿用既有切集实现，切集走既有选集/恢复链（带钥集数照常带钥）；横屏保持原仲裁（亮度/音量设置优先，其次「滑动切集」设置）。单集/无会话时竖滑仍是亮度/音量，不误伤。
+3. **控件自动隐藏**（代码已通）：时长本来就是对齐 Flutter 横屏页的 3 秒；真机「太快」的根因是到点守门不看面板状态——菜单/sheet 里刚操作完控件立刻消失。本轮：到点守门加「设置/选集面板打开、缓冲中不隐藏」（与 Flutter player_surface 的守门口径一致），守门不过顺延一个周期；倍速/清晰度/画面比例/定时菜单的选择、设置与选集面板关闭、打开设置面板等交互一律重新计时。暂停时不隐藏（原有行为）。
+4. **软件内核小窗**（代码已通，真机待验）：KSPlayer 2.3.4 的 KSMEPlayer 自带基于 `AVSampleBufferDisplayLayer` 的 PiP 控制器（`KSPictureInPictureController`，内容源是渲染视图的 displayLayer）。新增 `SoftwarePiPBridge` 接管该控制器的 delegate 并直接调系统 `startPictureInPicture()`——不用 KSPlayerLayer 的 `pipStart`（它会把 delegate 抢成 layer 自己、其恢复回调不调 completionHandler、还会动视图控制器栈，与本页 fullScreenCover 形态冲突）。播放页三处小窗入口（顶栏/竖屏集数条/横屏工具栏）、设置面板小窗项、回后台自动小窗全部按活动内核分发。恢复 UI 时播放页仍在，直接 completionHandler(true)。小窗中退出播放页：coordinator 的 teardown 自动延迟，引擎与小窗桥由 PlaybackKeepAlive 托管，小窗关闭后暂停并真正拆除（与系统内核同口径）。**限制与诚实边界**：小窗帧源是内核的 displayLayer——只有内核走 displayLayer 渲染通路时才有帧；若真机上启动失败，系统回调 failedToStart，本桥记日记并 toast「小窗启动失败」，不假装成功。页面退出后的小窗续命是尽力而为（best-effort），以真机结果为准。绝不用系统内核冒充（加密流进不了系统内核）。
+5. **移动云盘播放链审计**（审计完成，无代码改动）：逐环对照 Flutter 2.0.4 核对原生链——WebView 登录探活（候选凭据逐个 `list(nil)` 探活通过才返回）→ 表单以 native 模式保存 → `createFileSourceClient` 分发 MobileSourceClient → /file/list 列目录、/file/getDownloadUrl 取址（cdnSwitch 时 cdnUrl 优先）→ 视频扩展名识别集合与 Dart 一致 → 点按视频走 target 现取地址进播放页（不缓存旧地址，续播/切集/历史恢复都重新 target）→ FilePlayTarget 两边都不带多余请求头。代码链已通；**真机登录与点播一条云盘视频待用户验**。
+6. **资源页动作直达**（代码已通）：对齐 Flutter `_InstalledCard`——「设为当前」（checkmark 圆图标按钮，仅未启用/已是当前时不出现，可用性不足时禁用）与「卸载」（垃圾桶图标按钮，恒显示）直接摆在模块卡片的动作行，不再藏进省略号菜单；启用开关仍在行尾；卸载仍走原有确认弹窗（文案未动）。
+7. **添加模块入口**（代码已通）：站源组加「添加模块」按钮，打开「添加站源模块」面板，两条路与 Flutter 添加对话框一致——「选择本地文件」（系统文件选择器读 zip → `installPackage`，与 URL 安装同一条链）与「输入下载地址」（既有 `installFromURL`）。空状态文案同步对齐 Flutter。
+8. **删除示例模块入口**（已完成）：资源页「安装内置示例模块（假数据）」按钮、`ModuleStore.installSampleModule()`、`Modules/SampleModule.swift` 一并移除，全仓无残留引用。
+9. **下载可指定文件夹**（代码已通）：存储页「下载位置」新增「自定义文件夹…」——系统文件夹选择器选目录，security-scoped 书签（base64）与文件夹名落盘 resource-settings.json，重启后 DownloadManager 在 init 时解析书签并持有访问，下载落到 `<所选文件夹>/downloads/…`（与内置位置同一内部布局，迁移走既有 relocate 流程）。书签解析失败/无权限时回落应用内部存储，存储页红字提示 + 日记留痕，不静默；书签过期（stale）时按解析地址继续用并记日记建议重选。换选文件夹时旧访问保留到迁移完成，避免复制读不到旧目录。
+10. **下载文件命名规则**（代码已通）：站源集数下载的保存名为 `剧名-第X季-第X集`（季号仅当章节原始数据带 season 类字段时）/ `剧名-第X集`；剧名缺失回落集标题，再缺回落旧规则（直链尾名/HLS 的 media.mp4）。扩展名沿用实际文件（直链尾名扩展名、HLS 合并产物为 .mp4；HLS 未合并成功的分片形式仍为 playlist.m3u8，不适用本规则）。文件名非法字符（`/ \ : * ? " < > |` 与控制字符）清洗为下划线并截断 120 字。重名不覆盖：每个任务有独立任务目录（downloads/[分组/]<任务ID>/），同名文件天然隔离。覆盖范围：站源集数下载（走 DownloadManager 的 enqueueStation 链）；文件源/云盘下载走同一下载链但条目没有剧名/集号元数据，按回落规则保留原文件名。
+11. **新增夸克网盘原生文件源**（代码已通，真机待验）：与天翼/移动同级——类型注册（列表顺序在移动之后）、添加表单（恒原生模式，不提供 WebDAV 选项，夸克无官方 WebDAV）、同一套 WKWebView 登录骨架（pan.quark.cn 登录、捕获 Cookie 整段、候选凭据以列目录探活）。客户端按 OpenList 公开驱动 drivers/quark_uc 的 Quark 配置逐项核对：基址 `https://drive.quark.cn/1/clouddrive`、查询 pr=ucpro&fr=pc、列目录 GET /file/sort（根 fid "0"、metadata._total 分页、file=false 为文件夹、文件名 HTML 反转义）、取址 POST /file/download（`{"fids":[fid]}` → download_url）；播放/下载地址带齐 Cookie + Referer(https://pan.quark.cn) + 驱动同款桌面 UA。已知边界：驱动会从响应 Set-Cookie 滚动刷新 __puus，本版未做凭据回写，Cookie 过期需重新登录（与其它实验性网盘同口径）。验收：代码链已通；真机登录与点播待用户验。
+
+待真机验清单：① 播一集带弹幕的剧，竖屏看弹幕只在画面内飘；② 竖屏上下滑切集（多集剧）；③ 播放中点开倍速/清晰度菜单选一项，控件应在约 3 秒后才隐藏、暂停时不隐藏；④ 加密流（软件内核）点小窗按钮进小窗、恢复全屏、及小窗中退页后续播/关闭行为，日记查「软件内核小窗已开始/已关闭/启动失败」；⑤ 移动云盘点开一个视频文件应直接播放；⑥ 资源页卡片上直接点「设为当前」/「卸载」，「添加模块」里分别用本地文件与 URL 各装一次；⑦ 存储页选自定义文件夹后下载一集，文件应落在所选文件夹；⑧ 下载文件名应为「剧名-第X集」形态；⑨ 添加夸克网盘源，网页登录后能列目录、点视频播放。
+
 ## 全量对齐表（2026-11-27 修复轮 5 结束时状态）
 
 状态含义：**已对齐** = 与 Flutter 版行为一致；**本轮补齐** = 本轮

@@ -14,9 +14,11 @@ protocol FileSourceClient {
 
 func createFileSourceClient(_ source: FileSource) -> FileSourceClient {
     if source.nativeMode {
-        return source.type == .tianyi
-            ? TianyiSourceClient(source: source)
-            : MobileSourceClient(source: source)
+        switch source.type {
+        case .tianyi: return TianyiSourceClient(source: source)
+        case .quark: return QuarkSourceClient(source: source)
+        default: return MobileSourceClient(source: source)
+        }
     }
     if source.type == .ftp {
         return FtpSourceClient(source: source)

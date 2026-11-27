@@ -357,6 +357,11 @@ final class ResourceSettingsStore: ObservableObject {
     @Published var downloadBySource: Bool { didSet { save() } }
     @Published var wifiOnlyDownloads: Bool { didSet { save() } }
     @Published var downloadsLocation: String { didSet { save() } }
+    /// 自定义下载文件夹（修复轮 11 第 9 项）：security-scoped
+    /// 书签（base64）与显示名；downloadsLocation == "custom"
+    /// 时生效，解析失败回落 support 并在存储页/日记提示
+    @Published var downloadsFolderBookmark: String { didSet { save() } }
+    @Published var downloadsFolderName: String { didSet { save() } }
     @Published var sourceProxies: [String: SourceProxySetting] {
         didSet { save() }
     }
@@ -375,7 +380,10 @@ final class ResourceSettingsStore: ObservableObject {
         downloadBySource = JSON.dictBool(dict["downloadBySource"])
         wifiOnlyDownloads = JSON.dictBool(dict["wifiOnlyDownloads"])
         let location = JSON.dictString(dict["downloadsLocation"])
-        downloadsLocation = location == "documents" ? "documents" : "support"
+        downloadsLocation = ["documents", "custom"].contains(location)
+            ? location : "support"
+        downloadsFolderBookmark = JSON.dictString(dict["downloadsFolderBookmark"])
+        downloadsFolderName = JSON.dictString(dict["downloadsFolderName"])
         var proxies: [String: SourceProxySetting] = [:]
         if let raw = dict["sourceProxies"] as? [String: Any] {
             for (key, value) in raw {
@@ -409,6 +417,37 @@ final class ResourceSettingsStore: ObservableObject {
         return dataDirectory
     }
 
+    /// 自定义下载文件夹的书签解析（修复轮 11 第 9 项）：
+    /// 成功返回文件夹 URL 与书签是否已过期（过期时地址
+    /// 仍可用，但建议用户重新选择以刷新书签）；解析
+    /// 失败返回 nil，调用方回落默认位置并如实提示
+    static func resolveDownloadsFolder(
+        bookmarkBase64: String
+    ) -> (url: URL, stale: Bool)? {
+        guard let data = Data(base64Encoded: bookmarkBase64),
+              !data.isEmpty else {
+            return nil
+        }
+        var stale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: data,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &stale
+        ) else {
+            return nil
+        }
+        return (url, stale)
+    }
+
+    /// 由文件夹 URL 现做书签（存储页选完文件夹时调用，
+    /// 调用方须正持有该 URL 的 security-scoped 访问）
+    static func makeDownloadsFolderBookmark(_ url: URL) -> String? {
+        (try? url.bookmarkData(
+            options: [], includingResourceValuesForKeys: nil, relativeTo: nil
+        ))?.base64EncodedString()
+    }
+
     private func save() {
         guard !loading else { return }
         var proxies: [String: Any] = [:]
@@ -426,6 +465,8 @@ final class ResourceSettingsStore: ObservableObject {
             "downloadBySource": downloadBySource,
             "wifiOnlyDownloads": wifiOnlyDownloads,
             "downloadsLocation": downloadsLocation,
+            "downloadsFolderBookmark": downloadsFolderBookmark,
+            "downloadsFolderName": downloadsFolderName,
             "sourceProxies": proxies,
         ], to: file)
         syncProxySnapshot()

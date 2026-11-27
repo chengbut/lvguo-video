@@ -195,24 +195,6 @@ final class ModuleStore: ObservableObject {
         return manifest
     }
 
-    /// 安装内置示例模块（jsexample，纯假数据、不访问网络，
-    /// 与 Flutter 仓库 native/module_example 里的示例逐字一致），
-    /// 用于离线验证「安装 → 首页 → 详情」整条链路。
-    @discardableResult
-    func installSampleModule() throws -> ModuleManifest {
-        let manifest = try ModuleManifest.parse(Data(SampleModule.manifestJSON.utf8))
-        let directory = modulesDirectory.appendingPathComponent(manifest.id)
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
-        try Data(SampleModule.manifestJSON.utf8)
-            .write(to: directory.appendingPathComponent("manifest.json"))
-        try Data(SampleModule.mainJS.utf8)
-            .write(to: directory.appendingPathComponent("main.js"))
-        reload()
-        return manifest
-    }
-
     // MARK: - 运行时
 
     /// 当前站源的调用入口；没有可用模块时返回 nil。

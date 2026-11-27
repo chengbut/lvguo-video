@@ -1812,6 +1812,10 @@ final class PlaybackEngine: ObservableObject {
     @Published private(set) var duration: Double = 0
     @Published private(set) var bufferedPosition: Double = 0
     @Published private(set) var presentationSize: CGSize = .zero
+    /// 软件内核的画面自然尺寸（coordinator 就绪时从
+    /// KSMEPlayer.naturalSize 发布）：弹幕层锚定画面
+    /// 矩形要用，系统内核走 presentationSize（修复轮 11）
+    @Published private(set) var softwarePresentationSize: CGSize = .zero
     @Published private(set) var networkSpeedText = ""
     @Published private(set) var audioOptions: [TrackOption] = []
     @Published private(set) var subtitleOptions: [TrackOption] = []
@@ -2649,6 +2653,7 @@ final class PlaybackEngine: ObservableObject {
         guard request.url != nil else { return }
         triedSoftwareThisChain = true
         activeKernel = .software
+        softwarePresentationSize = .zero
         softwareLastStateName = ""
         softwareReadyAt = nil
         softwareFirstFrameSeen = false
@@ -2932,6 +2937,16 @@ final class PlaybackEngine: ObservableObject {
     func noteSoftwareBuffering(_ buffering: Bool) {
         guard activeKernel == .software else { return }
         isStalled = buffering && intentToPlay
+    }
+
+    /// 软件内核画面自然尺寸（修复轮 11）：coordinator
+    /// 在 readyToPlay 时发布，供播放页算弹幕锚定矩形；
+    /// 换内容时由 startSoftwareKernel 的状态重置归零
+    func noteSoftwarePresentationSize(_ size: CGSize) {
+        guard activeKernel == .software else { return }
+        if size.width > 0, size.height > 0, size != softwarePresentationSize {
+            softwarePresentationSize = size
+        }
     }
 
     /// 软件内核播放结束：与系统内核同一套收尾
