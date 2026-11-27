@@ -1104,36 +1104,49 @@ final class MediaFormatProbe: NSObject, URLSessionDataDelegate {
 
 // MARK: - MP4 结构探针
 
-/// MP4 结构探针（修复轮 6，日志级）：格式探针判定
-/// 为 MP4 后，分段拉取解析盒子结构——ftyp 主品牌/
+/// MP4 结构探针（修复轮 6 立项，修复轮 8 改盒子步进）：
+/// 格式探针判定为 MP4 后，解析盒子结构——ftyp 主品牌/
 /// 兼容品牌、moov 位置、各轨道 stsd 首条目的编码
 /// 类型与视频分辨率——解释 AVPlayer 在盒子/编码层
 /// 拒收（-12848）的深层原因、给后续对齐轮留档。
 /// 本轮只记日记，不据此改路由。
-/// 步骤：先拉头部 64KB 解析顶层盒子；moov 盒头不在
-/// 头部（或在头部但盒身被截断）时，按 Content-Range
-/// 总长拉尾部 128KB 再定位解析。任一步失败只记一行
-/// 结论，绝不阻断播放。
+/// 修复轮 8 改步进的理由：旧版头部 64KB + 尾部 128KB
+/// 两窗口都定位不到 moov（build 7 真机：尾部拉取
+/// 206 成功、字节数足，确认 moov 真不在窗口内——
+/// 它在文件中部）。新版从文件头按盒子链步进：读
+/// 盒头（首步 64 字节兼读 ftyp 内容，后续每步
+/// 16 字节）→ 按 size 跳下一个，64 位 largesize
+/// 与 size=0（延伸到文件尾）都处理，每步一次小
+/// Range，最多 64 步；找到 moov 后整段拉回（上限
+/// 4MB）解析 trak→mdia→minf→stbl→stsd，并补报
+/// 视频条目的配置子盒（avcC/hvcC）与加密盒
+/// （sinf/schm/tenc、stbl 的 senc）有无。任一步
+/// 失败只记一行结论并写明卡在哪个偏移/哪一步，
+/// 绝不阻断播放。
 final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
-    private static let headBytes = 65536
-    private static let tailBytes = 131072
+    private static let maxSteps = 64
+    private static let moovFetchCap = 4 * 1024 * 1024
+    private static let firstFetchBytes = 64
 
     private var session: URLSession?
     private var received = Data()
     private var totalLength: Int64 = -1
     private var status = 0
-    /// 头部/尾部两次拉取各自的 HTTP 状态（修复轮 7）：
-    /// moov 定位失败要能区分是尾部被 403 拒了还是
-    /// 真不在窗口内，旧版只留一个 status 且收尾行不带
-    private var headStatus = 0
-    private var tailStatus = 0
-    private var stage = 0 // 0 = 头部，1 = 尾部
     private var finished = false
     private let url: URL
     private let headers: [String: String]
     private let sourceId: String
     private let completion: (String) -> Void
-    private var headSummary = ""
+
+    // 步进状态：mode 0 = 步进盒头，1 = 拉 moov 盒身
+    private var mode = 0
+    private var step = 0
+    private var offset: Int64 = 0
+    private var chain: [String] = []
+    private var ftypSummary = ""
+    private var moovStart: Int64 = 0
+    private var moovSize: Int64 = 0
+    private var moovHeader = 8
 
     private init(
         url: URL, headers: [String: String], sourceId: String,
@@ -1153,7 +1166,7 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
             url: url, headers: headers, sourceId: sourceId,
             completion: completion
         )
-        probe.fetch(range: "bytes=0-\(headBytes - 1)")
+        probe.fetch(range: "bytes=0-\(firstFetchBytes - 1)")
         return probe
     }
 
@@ -1189,6 +1202,14 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         DispatchQueue.main.async { completion(line) }
     }
 
+    private var summaryPrefix: String {
+        ftypSummary.isEmpty ? "" : "\(ftypSummary) · "
+    }
+
+    private var chainText: String {
+        chain.isEmpty ? "（无）" : chain.joined(separator: " → ")
+    }
+
     // MARK: URLSessionDataDelegate
 
     func urlSession(
@@ -1198,16 +1219,12 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
     ) {
         if let http = response as? HTTPURLResponse {
             status = http.statusCode
-            if stage == 0 {
-                headStatus = http.statusCode
-            } else {
-                tailStatus = http.statusCode
-            }
             if let range = http.value(forHTTPHeaderField: "Content-Range"),
                let total = range.split(separator: "/").last,
                let value = Int64(total) {
                 totalLength = value
-            } else if http.statusCode == 200 {
+            } else if http.statusCode == 200,
+                      http.expectedContentLength > 0 {
                 totalLength = http.expectedContentLength
             }
         }
@@ -1220,63 +1237,161 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         received.append(data)
     }
 
-    /// 尾部拉取状态文案：0 = 响应都没拿到（传输层失败）
-    private var tailStatusText: String {
-        tailStatus > 0 ? "状态 \(tailStatus)" : "未拿到响应"
-    }
-
     func urlSession(
         _ session: URLSession, task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
         if let error {
             let nsError = error as NSError
-            if stage == 0 {
-                finish("结构探针：头部拉取失败（\(nsError.domain) \(nsError.code)）")
+            if mode == 0 {
+                finish("结构探针：步进卡在偏移 \(offset)（第 \(step + 1) 步盒头拉取失败，\(nsError.domain) \(nsError.code)）")
             } else {
-                finish("结构探针：\(headSummary) · 尾部拉取失败（\(tailStatusText)，\(nsError.domain) \(nsError.code)）")
+                finish("结构探针：moov 在偏移 \(moovStart) 已定位，但盒身拉取失败（\(nsError.domain) \(nsError.code)）")
             }
             return
         }
-        let bytes = [UInt8](received)
-        if stage == 0 {
-            guard let parsed = Self.parseTopLevel(bytes, baseOffset: 0) else {
-                finish("结构探针：头部未见 ftyp（状态 \(status)，\(bytes.count) 字节）")
-                return
-            }
-            headSummary = parsed.summary
-            if parsed.moovParsed {
-                finish("结构探针：\(parsed.summary)")
-                return
-            }
-            // moov 不在头部窗口内：总长已知且文件比头部
-            // 窗口大时拉尾部再找；否则就此收尾
-            guard totalLength > Int64(bytes.count) else {
-                finish("结构探针：\(parsed.summary) · moov 未在头部窗口内定位（头部拉取状态 \(headStatus)，总长 \(totalLength)）")
-                return
-            }
-            stage = 1
-            let start = max(0, totalLength - Int64(Self.tailBytes))
-            fetch(range: "bytes=\(start)-\(totalLength - 1)")
+        if mode == 0 {
+            handleHeader()
         } else {
-            let base = max(0, totalLength - Int64(bytes.count))
-            if let parsed = Self.parseTopLevel(bytes, baseOffset: Int(base)),
-               parsed.moovFound {
-                finish("结构探针：\(headSummary) · \(parsed.moovSummary)（尾部拉取\(tailStatusText)，\(bytes.count) 字节）")
-            } else {
-                finish("结构探针：\(headSummary) · moov 未在尾部窗口内定位到盒头（尾部拉取\(tailStatusText)，\(bytes.count) 字节）")
-            }
+            handleMoov()
         }
     }
 
-    // MARK: 盒子解析（纯函数，只读字节）
+    // MARK: 盒子步进
 
-    private struct TopLevel {
-        var summary = ""
-        var moovFound = false
-        var moovParsed = false
-        var moovSummary = ""
+    private func handleHeader() {
+        let bytes = [UInt8](received)
+        let at = offset
+        // 服务器无视 Range 回 200：只在首步可接受——
+        // 响应体就是整个文件，转本地步进解析
+        if status == 200 {
+            if step == 0 {
+                analyzeWholeBuffer(bytes)
+            } else {
+                finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头拉取未按 Range 返回，状态 200）")
+            }
+            return
+        }
+        guard status == 206 else {
+            finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头拉取状态 \(status)，\(bytes.count) 字节）")
+            return
+        }
+        guard bytes.count >= 8 else {
+            finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头只拿到 \(bytes.count) 字节）")
+            return
+        }
+        var size = Int64(Self.u32(bytes, 0))
+        let type = Self.typeName(bytes, 4)
+        var header = 8
+        if size == 1 {
+            guard bytes.count >= 16 else {
+                finish("结构探针：步进卡在偏移 \(at)（\(type) 盒 largesize 头不全，\(bytes.count) 字节）")
+                return
+            }
+            size = Int64(Self.u64(bytes, 8))
+            header = 16
+        } else if size == 0 {
+            // 盒子延伸到文件尾：其后不可能再有盒子
+            if type == "moov" {
+                beginMoovFetch(
+                    start: at,
+                    size: totalLength > at ? totalLength - at : 0,
+                    header: header
+                )
+            } else {
+                finish("结构探针：\(summaryPrefix)步进到偏移 \(at) 的 \(type) 盒（大小 0，延伸到文件尾），其后无盒子，未找到 moov（链：\(chainText)）")
+            }
+            return
+        }
+        guard size >= Int64(header), !type.isEmpty else {
+            finish("结构探针：步进卡在偏移 \(at)（第 \(step + 1) 步盒头尺寸异常：\(type) \(size)）")
+            return
+        }
+        if step == 0, type == "ftyp" {
+            ftypSummary = Self.ftypSummary(bytes, boxSize: Int(size))
+        }
+        if type == "moov" {
+            beginMoovFetch(start: at, size: size, header: header)
+            return
+        }
+        chain.append(type == "mdat" ? "mdat(\(size / 1_048_576)MB)" : type)
+        step += 1
+        offset = at + size
+        if step >= Self.maxSteps {
+            finish("结构探针：\(summaryPrefix)步进 \(Self.maxSteps) 个盒子仍未找到 moov（链：\(chainText)，停在偏移 \(offset)）")
+            return
+        }
+        if totalLength > 0, offset >= totalLength {
+            finish("结构探针：\(summaryPrefix)步进到文件尾（偏移 \(offset) / 总长 \(totalLength)）未找到 moov（链：\(chainText)）")
+            return
+        }
+        fetch(range: "bytes=\(offset)-\(offset + 15)")
     }
+
+    private func beginMoovFetch(start: Int64, size: Int64, header: Int) {
+        moovStart = start
+        moovSize = size
+        moovHeader = header
+        mode = 1
+        if size > 0 {
+            let fetchSize = min(size, Int64(Self.moovFetchCap))
+            fetch(range: "bytes=\(start)-\(start + fetchSize - 1)")
+        } else {
+            // moov 大小未知（size=0 且总长未知）：开区间拉
+            fetch(range: "bytes=\(start)-")
+        }
+    }
+
+    private func handleMoov() {
+        let bytes = [UInt8](received)
+        guard status == 206 else {
+            finish("结构探针：moov 在偏移 \(moovStart) 已定位，但盒身拉取状态 \(status)（\(bytes.count) 字节）")
+            return
+        }
+        let tracks = Self.parseMoov(
+            bytes, from: moovHeader, to: bytes.count,
+            baseOffset: Int(moovStart)
+        )
+        var line = "结构探针：\(summaryPrefix)盒子链 \(chainText)"
+            + " · moov 在偏移 \(moovStart)（大小 \(moovSize)）"
+        if moovSize > Int64(bytes.count) {
+            line += " · moov 只拉到前 \(bytes.count) 字节，解析限于已到部分"
+        }
+        line += tracks.isEmpty
+            ? " · moov 内未解析出轨道"
+            : " · \(tracks.joined(separator: " · "))"
+        finish(line)
+    }
+
+    /// 服务器回 200 全量时的本地步进（盒子链口径与
+    /// 网络步进一致），moov 直接在本地缓冲里解析
+    private func analyzeWholeBuffer(_ bytes: [UInt8]) {
+        if bytes.count >= 8 {
+            ftypSummary = Self.ftypSummary(bytes, boxSize: Self.u32(bytes, 0))
+        }
+        let boxes = Self.scanBoxes(bytes, from: 0, to: bytes.count, baseOffset: 0)
+        var names: [String] = []
+        for box in boxes {
+            if box.type == "moov" {
+                let tracks = box.truncated ? [] : Self.parseMoov(
+                    bytes, from: box.start + box.header,
+                    to: box.start + box.size, baseOffset: 0
+                )
+                var line = "结构探针：\(summaryPrefix)盒子链 "
+                    + (names.isEmpty ? "（无）" : names.joined(separator: " → "))
+                    + " · moov 在偏移 \(box.start)（大小 \(box.size)，服务器未按 Range 返回、整文件本地解析）"
+                line += tracks.isEmpty
+                    ? " · moov 内未解析出轨道"
+                    : " · \(tracks.joined(separator: " · "))"
+                finish(line)
+                return
+            }
+            names.append(box.type == "mdat" ? "mdat(\(box.size / 1_048_576)MB)" : box.type)
+        }
+        finish("结构探针：\(summaryPrefix)整文件本地步进未找到 moov（链：\(names.isEmpty ? "（无）" : names.joined(separator: " → "))）")
+    }
+
+    // MARK: 盒子解析（纯函数，只读字节）
 
     private struct Box {
         var type: String
@@ -1337,22 +1452,17 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         return boxes
     }
 
-    private static func parseTopLevel(
-        _ bytes: [UInt8], baseOffset: Int
-    ) -> TopLevel? {
-        let boxes = scanBoxes(bytes, from: 0, to: bytes.count, baseOffset: baseOffset)
-        guard let ftyp = boxes.first, ftyp.type == "ftyp" else { return nil }
-        var result = TopLevel()
-        // ftyp 内容：主品牌(4) + 次版本(4) + 兼容品牌(每 4)
-        let contentStart = ftyp.start - baseOffset + ftyp.header
-        let contentEnd = ftyp.start - baseOffset + ftyp.size
+    /// ftyp 内容摘要：主品牌 + 兼容品牌（bytes 从盒头起）
+    private static func ftypSummary(_ bytes: [UInt8], boxSize: Int) -> String {
+        guard bytes.count >= 8, typeName(bytes, 4) == "ftyp" else { return "" }
         var brands: [String] = []
-        if contentStart + 4 <= bytes.count {
-            brands.append("主品牌 \(typeName(bytes, contentStart))")
+        if bytes.count >= 12 {
+            brands.append("主品牌 \(typeName(bytes, 8))")
         }
         var compatibles: [String] = []
-        var cursor = contentStart + 8
-        while cursor + 4 <= contentEnd, cursor + 4 <= bytes.count {
+        var cursor = 16
+        let end = min(boxSize, bytes.count)
+        while cursor + 4 <= end {
             let brand = typeName(bytes, cursor)
             if !brand.isEmpty { compatibles.append(brand) }
             cursor += 4
@@ -1360,30 +1470,12 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         if !compatibles.isEmpty {
             brands.append("兼容 \(compatibles.joined(separator: "/"))")
         }
-        result.summary = "ftyp \(brands.joined(separator: " · "))"
-        guard let moov = boxes.first(where: { $0.type == "moov" }) else {
-            return result
-        }
-        result.moovFound = true
-        let moovLocal = moov.start - baseOffset
-        let location = baseOffset == 0 ? "头部" : "尾部"
-        if moov.truncated {
-            result.moovSummary = "moov 在\(location)（偏移 \(moov.start)，盒身超出窗口未完整解析）"
-            return result
-        }
-        let tracks = parseMoov(
-            bytes, from: moovLocal + moov.header,
-            to: moovLocal + moov.size, baseOffset: baseOffset
-        )
-        result.moovParsed = true
-        result.moovSummary = "moov 在\(location)（偏移 \(moov.start)）"
-            + (tracks.isEmpty ? "" : " · \(tracks.joined(separator: " · "))")
-        result.summary += " · \(result.moovSummary)"
-        return result
+        return brands.isEmpty ? "ftyp" : "ftyp \(brands.joined(separator: " · "))"
     }
 
     /// 解析 moov 内的 trak：hdlr 定轨道类型，stsd 首
-    /// 条目给编码类型，视频条目另带宽高
+    /// 条目给编码类型，视频条目另带宽高与条目子盒
+    /// （avcC/hvcC、sinf/schm/tenc）及 senc 有无
     private static func parseMoov(
         _ bytes: [UInt8], from: Int, to: Int, baseOffset: Int
     ) -> [String] {
@@ -1415,10 +1507,14 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
                 to: minfStart + minf.size, baseOffset: baseOffset
             ).first(where: { $0.type == "stbl" && !$0.truncated }) else { continue }
             let stblStart = stbl.start - baseOffset
-            guard let stsd = scanBoxes(
+            let stblChildren = scanBoxes(
                 bytes, from: stblStart + stbl.header,
                 to: stblStart + stbl.size, baseOffset: baseOffset
-            ).first(where: { $0.type == "stsd" }) else { continue }
+            )
+            guard let stsd = stblChildren.first(
+                where: { $0.type == "stsd" }
+            ) else { continue }
+            let hasSenc = stblChildren.contains { $0.type == "senc" }
             // stsd 内容：版本/标志(4) + 条目数(4) + 条目
             // （条目：长(4) + 类型(4) + 内容）
             let entryAt = stsd.start - baseOffset + stsd.header + 8
@@ -1435,9 +1531,59 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
                         line += " \(width)×\(height)"
                     }
                 }
+                // 条目子盒（修复轮 8）：视觉条目定长头
+                // 86 字节之后是配置/加密子盒——avcC/
+                // hvcC 决定解码器能否拿到参数集，sinf
+                // （schm/schi→tenc）是加密标记
+                var extras: [String] = []
+                let entrySize = u32(bytes, entryAt)
+                if entrySize > 86, entryAt + 86 < bytes.count {
+                    let children = scanBoxes(
+                        bytes, from: entryAt + 86,
+                        to: min(entryAt + entrySize, bytes.count),
+                        baseOffset: baseOffset
+                    )
+                    let names = children.map(\.type)
+                    if names.contains("avcC") { extras.append("avcC 有") }
+                    if names.contains("hvcC") { extras.append("hvcC 有") }
+                    if !names.contains("avcC"), !names.contains("hvcC"),
+                       codec != "encv" {
+                        extras.append("无 avcC/hvcC")
+                    }
+                    if let sinf = children.first(where: { $0.type == "sinf" }) {
+                        var enc = ["sinf 有"]
+                        let sinfStart = sinf.start - baseOffset
+                        let sinfChildren = scanBoxes(
+                            bytes, from: sinfStart + sinf.header,
+                            to: min(sinfStart + sinf.size, bytes.count),
+                            baseOffset: baseOffset
+                        )
+                        if sinfChildren.contains(where: { $0.type == "schm" }) {
+                            enc.append("schm 有")
+                        }
+                        if let schi = sinfChildren.first(
+                            where: { $0.type == "schi" }
+                        ) {
+                            let schiStart = schi.start - baseOffset
+                            let schiChildren = scanBoxes(
+                                bytes, from: schiStart + schi.header,
+                                to: min(schiStart + schi.size, bytes.count),
+                                baseOffset: baseOffset
+                            )
+                            if schiChildren.contains(where: { $0.type == "tenc" }) {
+                                enc.append("tenc 有")
+                            }
+                        }
+                        extras.append(enc.joined(separator: "/"))
+                    }
+                }
+                if hasSenc { extras.append("senc 有") }
+                if !extras.isEmpty {
+                    line += "（\(extras.joined(separator: " · "))）"
+                }
                 lines.append(line)
             case "soun":
-                lines.append("音频 \(codec)")
+                lines.append("音频 \(codec)" + (hasSenc ? "（senc 有）" : ""))
             default:
                 lines.append("轨道(\(handler.isEmpty ? "?" : handler)) \(codec)")
             }
@@ -1445,6 +1591,7 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         return lines
     }
 }
+
 
 /// 软件内核控制通道：引擎在软件内核模式下把
 /// play/pause/seek/倍速/静音/截图转发给实际的内核
@@ -1763,6 +1910,7 @@ final class PlaybackEngine: ObservableObject {
     /// 并装上 item 状态观察
     private func installAVPlayer(_ request: PlaybackRequest, generation: Int) {
         releaseSoftwareProxy()
+        FFmpegDiaryLogHandler.shared.endSession()
         activeKernel = .avplayer
         softwareRequest = nil
         triedAVPlayerThisChain = true
@@ -1956,6 +2104,11 @@ final class PlaybackEngine: ObservableObject {
         softwareNotPresentedLogged = false
         softwareLastHeartbeatAt = Date.distantPast
         softwareBufferedLogged = false
+        // FFmpeg 日志桥（修复轮 8）：把 FFmpeg 的
+        // av_log 接进播放调试日记（会话随软件内核
+        // 开/关，见 SoftwarePlayerView 的日志桥）
+        FFmpegDiaryLogHandler.install()
+        FFmpegDiaryLogHandler.shared.beginSession()
         // 软件内核改走本机回环代理取流（修复轮 7）：
         // KSPlayer/FFmpeg 自有网络层在真机上打开这类
         // CDN 地址后缓冲恒 0（build 6 实证），而 App

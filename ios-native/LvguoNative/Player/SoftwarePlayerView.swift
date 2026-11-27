@@ -14,6 +14,117 @@ import UIKit
 /// 经 KSOptions.appendHeader 传给 FFmpeg
 /// （formatContext 的 headers 选项）。
 ///
+/// FFmpeg 日志桥（修复轮 8）：KSPlayer 的 MEPlayerItem
+/// 首次初始化时已用 av_log_set_callback 把 FFmpeg 的
+/// av_log 全量转发进 KSLog（av_log 级别数值与 KSPlayer
+/// 的 LogLevel 逐值对齐：error 16 / warning 24 /
+/// info 32），出口是 KSOptions.logger（LogHandler
+/// 协议，默认写系统日志）与 KSOptions.logLevel
+/// （默认 .warning）。本桥把 logger 换成自家实现并
+/// 把级别提到 .info：软件内核会话期间，av_log 转发
+/// （来源文件固定为 MEPlayerItem.swift）按「FFmpeg：」
+/// 前缀进播放调试日记——warning 及以上全量、info
+/// 每会话前 100 行封顶、verbose 及以下不收、连续
+/// 重复行折叠计数；KSPlayer 自身的 Swift 日志只收
+/// error 及以上（前缀「KSPlayer：」，解码失败多走
+/// 这条）。地址按宿主既有口径脱敏（完整地址替换成
+/// 类型@主机），单行截断 300 字。
+final class FFmpegDiaryLogHandler: LogHandler {
+    static let shared = FFmpegDiaryLogHandler()
+
+    private let lock = NSLock()
+    private var sessionActive = false
+    private var infoForwarded = 0
+    private var lastLine: String?
+    private var lastPrefix = ""
+    private var repeatCount = 0
+    private static let infoLimit = 100
+
+    private init() {}
+
+    /// 安装（幂等）：首次切软件内核时调用
+    static func install() {
+        KSOptions.logger = shared
+        KSOptions.logLevel = .info
+    }
+
+    func beginSession() {
+        lock.lock()
+        flushRepeatsLocked()
+        sessionActive = true
+        infoForwarded = 0
+        lastLine = nil
+        repeatCount = 0
+        lock.unlock()
+    }
+
+    func endSession() {
+        lock.lock()
+        flushRepeatsLocked()
+        sessionActive = false
+        lastLine = nil
+        repeatCount = 0
+        lock.unlock()
+    }
+
+    func log(
+        level: LogLevel, message: CustomStringConvertible,
+        file: String, function: String, line: UInt
+    ) {
+        // av_log 转发的调用点固定在 MEPlayerItem.swift
+        // 的 av_log_set_callback 里；其余文件是
+        // KSPlayer 自身的 Swift 日志
+        let isFFmpeg = file == "MEPlayerItem.swift"
+        let prefix: String
+        if isFFmpeg {
+            prefix = level.rawValue <= LogLevel.error.rawValue
+                ? "FFmpeg(\(level.description))" : "FFmpeg"
+        } else {
+            guard level.rawValue <= LogLevel.error.rawValue else { return }
+            prefix = "KSPlayer(\(level.description))"
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard sessionActive else { return }
+        if isFFmpeg {
+            if level == .info {
+                guard infoForwarded < Self.infoLimit else { return }
+                infoForwarded += 1
+            } else if level.rawValue > LogLevel.info.rawValue {
+                return // verbose/debug/trace 不收
+            }
+        }
+        var text = message.description
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        text = PlaybackEngine.sanitizeDiagnosticText(text)
+            .replacingOccurrences(of: "\n", with: " ")
+        if text.count > 300 {
+            text = String(text.prefix(300)) + "…"
+        }
+        let entry = "\(prefix)：\(text)"
+        if entry == lastLine {
+            repeatCount += 1
+            return
+        }
+        flushRepeatsLocked()
+        lastLine = entry
+        lastPrefix = prefix
+        DiaryStore.shared.add(entry)
+    }
+
+    /// 折叠的重复行补一行计数（须持锁调用）
+    private func flushRepeatsLocked() {
+        guard repeatCount > 0, lastLine != nil else {
+            repeatCount = 0
+            return
+        }
+        let count = repeatCount
+        repeatCount = 0
+        DiaryStore.shared.add("\(lastPrefix)：（上一条重复 \(count) 次）")
+    }
+}
+
 /// 挂载链（修复轮 6 审计，KSPlayer 2.3.4 源码核实）：
 /// KSMEPlayer 在 init 里就建好 videoOutput
 /// （默认 MetalPlayView），player.view 即它；本 App
@@ -87,6 +198,8 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         private var finished = false
         /// 首帧证据已报（每段内容一次，换址重置）
         private var firstFrameReported = false
+        /// 流信息已报（修复轮 8，每段内容一次，换址重置）
+        private var trackInfoReported = false
         /// state .error 先于 finish(error) 到达（KSPlayerLayer
         /// 先置 state 再发 finish）：先到的 .error 不抢报，
         /// 留 0.5 秒等带真错误的 finish，超时才报笼统文案
@@ -135,6 +248,7 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             currentURL = url
             finished = false
             firstFrameReported = false
+            trackInfoReported = false
             container.host(layer.player.view)
             layer.player.contentMode = SoftwarePlayerSurface.contentMode(for: fit)
             layer.player.isMuted = muted
@@ -149,6 +263,7 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
                 currentURL = url
                 finished = false
                 firstFrameReported = false
+                trackInfoReported = false
                 pendingErrorWork?.cancel()
                 layer.set(
                     url: url,
@@ -159,6 +274,7 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         }
 
         func teardown() {
+            FFmpegDiaryLogHandler.shared.endSession()
             pendingErrorWork?.cancel()
             if let engine, engine.softwareControl === self {
                 engine.softwareControl = nil
@@ -178,6 +294,7 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             }
             switch state {
             case .readyToPlay:
+                reportTrackInfoIfNeeded(layer: layer)
                 engine?.noteSoftwareReady()
             case .buffering:
                 engine?.noteSoftwareBuffering(true)
@@ -252,6 +369,42 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             guard !finished else { return }
             finished = true
             engine?.softwareKernelFailed(message: message, error: error)
+        }
+
+        /// 内核选中的流信息（修复轮 8，就绪时打一次）：
+        /// 编码名、像素格式、分辨率、帧率、码率都在
+        /// FFmpegAssetTrack 的 description 里（经
+        /// MediaPlayerTrack 协议取到）；「无视频流」
+        /// 或编码为空本身就是定性结论
+        private func reportTrackInfoIfNeeded(layer: KSPlayerLayer) {
+            guard !trackInfoReported else { return }
+            trackInfoReported = true
+            let player = layer.player
+            var parts: [String] = []
+            let videos = player.tracks(mediaType: .video)
+            if videos.isEmpty {
+                parts.append("无视频流")
+            }
+            for (index, track) in videos.enumerated() {
+                parts.append(
+                    "视频\(index)：\(track.description)"
+                        + "（\(track.isEnabled ? "已选" : "未选")）"
+                )
+            }
+            for (index, track) in player.tracks(mediaType: .audio).enumerated() {
+                parts.append(
+                    "音频\(index)：\(track.description)"
+                        + "（\(track.isEnabled ? "已选" : "未选")）"
+                )
+            }
+            let subtitles = player.tracks(mediaType: .subtitle)
+            if !subtitles.isEmpty {
+                parts.append("字幕 \(subtitles.count) 条")
+            }
+            DiaryStore.shared.add(
+                "软件内核流信息：\(parts.joined(separator: " · "))"
+                    + " · 总长 \(Int(player.duration)) 秒"
+            )
         }
 
         // MARK: SoftwareKernelControlling
