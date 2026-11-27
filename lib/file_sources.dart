@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:encrypt/encrypt.dart' as enc;
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1187,6 +1189,13 @@ class TianyiSourceClient implements FileSourceClient {
 /// 抠不到才整段当 Cookie 头发送。固定头对齐 Alist 驱动
 /// drivers/139 的 shareHeaders（hcy-cool-flag / CMS-DEVICE /
 /// x-m4c-caller / X-Yun-Api-Version / Origin）。
+/// hcy 加密请求用某把密钥没被网关接受（解密失败，或网关明文回
+/// 01000008「无法匹配密钥或未加密」）时抛出，触发换下一把候选密钥重试。
+class _HcyKeyMismatch implements Exception {
+  _HcyKeyMismatch(this.rawResponse);
+  final String rawResponse;
+}
+
 class MobileSourceClient implements FileSourceClient {
   MobileSourceClient(this.source);
   final FileSource source;
@@ -1233,6 +1242,177 @@ class MobileSourceClient implements FileSourceClient {
     };
   }
 
+  /// hcy 网关加密请求的候选固定密钥，按 OpenList drivers/139/util.go 里
+  /// `yun139EncryptedRequest` 的调用方取值：主密钥是 KEY_HEX_1 的 hex
+  /// 解码结果（thirdlogin、andAlbum 等 hcy 接口都用它，解码后是 24 字节
+  /// ASCII，走 AES-192）；备用是 share 接口的 shareAesKeyHex，即字符串
+  /// "PVGDwmcvfs1uV3d1" 的原始字节（AES-128）。探活/请求时逐个试，
+  /// 先命中的会被记住，后续请求直接用它。
+  static final _hcyKeys = <Uint8List>[
+    _hexDecode('73634235495062495331515373756c734e7253306c673d3d'),
+    Uint8List.fromList(utf8.encode('PVGDwmcvfs1uV3d1')),
+  ];
+  static int _hcyKeyIndex = 0;
+
+  static Uint8List _hexDecode(String hex) {
+    final out = Uint8List(hex.length ~/ 2);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    return out;
+  }
+
+  /// 对齐 OpenList `sortedJsonStringify`：对象键字典序递归排序、紧凑
+  /// 输出、整数不带小数点。仅一处有意偏差：源码对字符串值先试 JSON
+  /// 解析、标量解析成功会去掉引号（如把纯数字字符串写成数字），与本
+  /// 接口字段类型（parentFileId / fileId 均为字符串）不符，这里只对
+  /// 解析出对象/数组的字符串递归，标量字符串一律按字符串输出。
+  static String _sortedJsonStringify(Object? value) {
+    if (value == null) return 'null';
+    if (value is String) {
+      try {
+        final parsed = jsonDecode(value);
+        if (parsed is Map || parsed is List) {
+          return _sortedJsonStringify(parsed);
+        }
+      } catch (_) {
+        // 不是 JSON 串，按普通字符串处理。
+      }
+      return jsonEncode(value);
+    }
+    if (value is num) {
+      if (value is int) return '$value';
+      final d = value.toDouble();
+      if (d == d.truncateToDouble() && d.abs() < 1e15) return '${d.toInt()}';
+      return '$d';
+    }
+    if (value is bool) return value ? 'true' : 'false';
+    if (value is List) {
+      return '[${value.map(_sortedJsonStringify).join(',')}]';
+    }
+    if (value is Map) {
+      final keys = value.keys.map((k) => '$k').toList()..sort();
+      final pairs = keys.map(
+        (k) => '${jsonEncode(k)}:${_sortedJsonStringify(value[k])}',
+      );
+      return '{${pairs.join(',')}}';
+    }
+    return jsonEncode(value);
+  }
+
+  /// hcy 加密请求（对齐 OpenList `yun139EncryptedRequest`）：请求体先
+  /// 排序序列化，再 AES-CBC / PKCS7 加密，随机 16 字节 IV 拼在密文前
+  /// 一起 base64 作为请求体发出；响应若以 { 开头是明文 JSON（错误也
+  /// 走这条，原文透出给 [_check]），否则同样是 base64(IV+密文)，用同
+  /// 一把密钥解密后再解析。密钥不匹配时换下一把候选密钥重试。
+  Future<Map<String, dynamic>> _encryptedPost(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    _HcyKeyMismatch? lastMismatch;
+    for (var attempt = 0; attempt < _hcyKeys.length; attempt++) {
+      final keyIndex = (_hcyKeyIndex + attempt) % _hcyKeys.length;
+      try {
+        final json = await _encryptedPostWithKey(
+          path,
+          body,
+          _hcyKeys[keyIndex],
+        );
+        _hcyKeyIndex = keyIndex;
+        return json;
+      } on _HcyKeyMismatch catch (e) {
+        lastMismatch = e;
+      }
+    }
+    throw FileSourceFailure(
+      '中国移动云盘加密请求失败（原始返回：${lastMismatch?.rawResponse ?? ''}）',
+    );
+  }
+
+  Future<Map<String, dynamic>> _encryptedPostWithKey(
+    String path,
+    Map<String, dynamic> body,
+    Uint8List keyBytes,
+  ) async {
+    final plain = _sortedJsonStringify(body);
+    final random = Random.secure();
+    final ivBytes = Uint8List.fromList(
+      List<int>.generate(16, (_) => random.nextInt(256)),
+    );
+    final encrypter = enc.Encrypter(
+      enc.AES(enc.Key(keyBytes), mode: enc.AESMode.cbc, padding: 'PKCS7'),
+    );
+    final cipherBytes = encrypter
+        .encryptBytes(utf8.encode(plain), iv: enc.IV(ivBytes))
+        .bytes;
+    final payload = base64Encode(<int>[...ivBytes, ...cipherBytes]);
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final request = await client
+          .openUrl('POST', Uri.parse('$_base/$path'))
+          .timeout(const Duration(seconds: 20));
+      _headers.forEach(request.headers.set);
+      request.headers.contentType = ContentType(
+        'text',
+        'plain',
+        charset: 'utf-8',
+      );
+      request.write(payload);
+      final response = await request.close().timeout(
+        const Duration(seconds: 25),
+      );
+      final text = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 25));
+      if (response.statusCode != 200) {
+        throw FileSourceFailure(
+          '服务器返回 ${response.statusCode}：${excerptText(text)}',
+        );
+      }
+      if (text.startsWith('{')) {
+        Object? decoded;
+        try {
+          decoded = jsonDecode(text);
+        } catch (_) {
+          decoded = null;
+        }
+        if (decoded is Map) {
+          final map = Map<String, dynamic>.from(decoded);
+          if ('${map['code'] ?? ''}' == '01000008') {
+            throw _HcyKeyMismatch(excerptText(text));
+          }
+          return map;
+        }
+        throw FileSourceFailure('服务器返回了无法解析的内容：${excerptText(text)}');
+      }
+      try {
+        final raw = base64Decode(text.replaceAll(RegExp(r'\s+'), ''));
+        if (raw.length <= 16) throw const FormatException('too short');
+        final plainBytes = encrypter.decryptBytes(
+          enc.Encrypted(Uint8List.fromList(raw.sublist(16))),
+          iv: enc.IV(Uint8List.fromList(raw.sublist(0, 16))),
+        );
+        final decoded = jsonDecode(utf8.decode(plainBytes));
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+        throw const FormatException('not a json object');
+      } catch (_) {
+        throw _HcyKeyMismatch(excerptText(text));
+      }
+    } on FileSourceFailure {
+      rethrow;
+    } on _HcyKeyMismatch {
+      rethrow;
+    } on SocketException {
+      throw FileSourceFailure('连不上服务器，请检查网络');
+    } on TimeoutException {
+      throw FileSourceFailure('连接超时，请检查网络');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   void _check(Map<String, dynamic> json) {
     final ok =
         json['success'] == true || json['code'] == 0 || json['code'] == '0';
@@ -1250,17 +1430,12 @@ class MobileSourceClient implements FileSourceClient {
     final entries = <FileEntry>[];
     var page = 1;
     while (page <= 30) {
-      final json = await jsonRequest(
-        Uri.parse('$_base/hcy/file/list'),
-        method: 'POST',
-        headers: _headers,
-        body: {
-          'parentFileId': parentId,
-          'pageInfo': {'pageNum': page, 'pageSize': 100},
-          'orderBy': 'updated_at',
-          'orderDirection': 'DESC',
-        },
-      );
+      final json = await _encryptedPost('hcy/file/list', {
+        'parentFileId': parentId,
+        'pageInfo': {'pageNum': page, 'pageSize': 100},
+        'orderBy': 'updated_at',
+        'orderDirection': 'DESC',
+      });
       _check(json);
       final data = json['data'];
       final items = data is Map
@@ -1302,12 +1477,7 @@ class MobileSourceClient implements FileSourceClient {
   @override
   Future<FilePlayTarget> target(FileEntry entry) async {
     for (final endpoint in const ['hcy/file/download', 'hcy/file/getDownloadUrl']) {
-      final json = await jsonRequest(
-        Uri.parse('$_base/$endpoint'),
-        method: 'POST',
-        headers: _headers,
-        body: {'fileId': entry.href},
-      );
+      final json = await _encryptedPost(endpoint, {'fileId': entry.href});
       _check(json);
       final data = json['data'];
       String url = '';
