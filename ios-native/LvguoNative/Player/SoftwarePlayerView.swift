@@ -6,9 +6,13 @@ import UIKit
 /// 播放表面：只负责出画面与把引擎的控制指令转给内核，
 /// 控件层仍是播放页原有的那一套（引擎转发 play/pause/
 /// seek/倍速，进度与状态由内核回调写回引擎）。
-/// 凭据头经 KSOptions.appendHeader 传给 FFmpeg
-/// （formatContext 的 headers 选项），与系统内核的
-/// 资源代理是两条独立的带头路径。
+/// 取流路径（修复轮 7）：远端直链计划由引擎改走本机
+/// 回环媒体代理（内核只打开 127.0.0.1，凭据头由代理
+/// 在远端侧注入，见 PlaybackEngine.startSoftwareKernel
+/// 与 LocalFileServer 的媒体代理）；本地文件、远端
+/// 播放列表与代理不可用时的回退仍直连，此时凭据头
+/// 经 KSOptions.appendHeader 传给 FFmpeg
+/// （formatContext 的 headers 选项）。
 ///
 /// 挂载链（修复轮 6 审计，KSPlayer 2.3.4 源码核实）：
 /// KSMEPlayer 在 init 里就建好 videoOutput
@@ -88,6 +92,12 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         /// 留 0.5 秒等带真错误的 finish，超时才报笼统文案
         private var pendingErrorWork: DispatchWorkItem?
         private var windowAttachLogged = false
+        /// 暂停指令来源标记（修复轮 7）：引擎经
+        /// kernelPause 下达的暂停置位，内核状态回调
+        /// 报 paused 时消费——区分「App 指令暂停」与
+        /// 「内核自身触发的 paused」（build 6 真机出现
+        /// 状态自行变 paused 而触发者不明）
+        private var appCommandedPause = false
 
         func attach(
             container: SoftwarePlayerContainerView, request: PlaybackRequest,
@@ -162,14 +172,24 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         @MainActor
         func player(layer: KSPlayerLayer, state: KSPlayerState) {
             container?.host(layer.player.view)
-            engine?.noteSoftwareState(state.description)
+            // paused 不走通用状态行：要带触发来源（见下）
+            if state != .paused {
+                engine?.noteSoftwareState(state.description)
+            }
             switch state {
             case .readyToPlay:
                 engine?.noteSoftwareReady()
             case .buffering:
                 engine?.noteSoftwareBuffering(true)
-            case .bufferFinished, .paused:
+            case .bufferFinished:
                 engine?.noteSoftwareBuffering(false)
+            case .paused:
+                engine?.noteSoftwareBuffering(false)
+                let byApp = appCommandedPause
+                appCommandedPause = false
+                engine?.noteSoftwareState(
+                    "paused（\(byApp ? "App 指令" : "内核自身触发")）"
+                )
             case .playedToTheEnd:
                 engine?.noteSoftwareEnded()
             case .error:
@@ -237,10 +257,12 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         // MARK: SoftwareKernelControlling
 
         func kernelPlay() {
+            appCommandedPause = false
             layer?.player.play()
         }
 
         func kernelPause() {
+            appCommandedPause = true
             layer?.player.pause()
         }
 

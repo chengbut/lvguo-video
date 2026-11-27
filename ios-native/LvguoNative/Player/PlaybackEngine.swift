@@ -1122,6 +1122,11 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
     private var received = Data()
     private var totalLength: Int64 = -1
     private var status = 0
+    /// 头部/尾部两次拉取各自的 HTTP 状态（修复轮 7）：
+    /// moov 定位失败要能区分是尾部被 403 拒了还是
+    /// 真不在窗口内，旧版只留一个 status 且收尾行不带
+    private var headStatus = 0
+    private var tailStatus = 0
     private var stage = 0 // 0 = 头部，1 = 尾部
     private var finished = false
     private let url: URL
@@ -1193,6 +1198,11 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
     ) {
         if let http = response as? HTTPURLResponse {
             status = http.statusCode
+            if stage == 0 {
+                headStatus = http.statusCode
+            } else {
+                tailStatus = http.statusCode
+            }
             if let range = http.value(forHTTPHeaderField: "Content-Range"),
                let total = range.split(separator: "/").last,
                let value = Int64(total) {
@@ -1210,6 +1220,11 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         received.append(data)
     }
 
+    /// 尾部拉取状态文案：0 = 响应都没拿到（传输层失败）
+    private var tailStatusText: String {
+        tailStatus > 0 ? "状态 \(tailStatus)" : "未拿到响应"
+    }
+
     func urlSession(
         _ session: URLSession, task: URLSessionTask,
         didCompleteWithError error: Error?
@@ -1219,7 +1234,7 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
             if stage == 0 {
                 finish("结构探针：头部拉取失败（\(nsError.domain) \(nsError.code)）")
             } else {
-                finish("结构探针：\(headSummary) · 尾部拉取失败（\(nsError.domain) \(nsError.code)）")
+                finish("结构探针：\(headSummary) · 尾部拉取失败（\(tailStatusText)，\(nsError.domain) \(nsError.code)）")
             }
             return
         }
@@ -1237,7 +1252,7 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
             // moov 不在头部窗口内：总长已知且文件比头部
             // 窗口大时拉尾部再找；否则就此收尾
             guard totalLength > Int64(bytes.count) else {
-                finish("结构探针：\(parsed.summary) · moov 未在头部窗口内定位")
+                finish("结构探针：\(parsed.summary) · moov 未在头部窗口内定位（头部拉取状态 \(headStatus)，总长 \(totalLength)）")
                 return
             }
             stage = 1
@@ -1247,9 +1262,9 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
             let base = max(0, totalLength - Int64(bytes.count))
             if let parsed = Self.parseTopLevel(bytes, baseOffset: Int(base)),
                parsed.moovFound {
-                finish("结构探针：\(headSummary) · \(parsed.moovSummary)")
+                finish("结构探针：\(headSummary) · \(parsed.moovSummary)（尾部拉取\(tailStatusText)，\(bytes.count) 字节）")
             } else {
-                finish("结构探针：\(headSummary) · moov 未在尾部窗口内定位到盒头")
+                finish("结构探针：\(headSummary) · moov 未在尾部窗口内定位到盒头（尾部拉取\(tailStatusText)，\(bytes.count) 字节）")
             }
         }
     }
@@ -1568,6 +1583,12 @@ final class PlaybackEngine: ObservableObject {
     private var softwareFirstFrameSeen = false
     private var softwareNotPresentedLogged = false
     private var softwareLastHeartbeatAt = Date.distantPast
+    /// 回环媒体代理（修复轮 7）：软件内核本次打开用的
+    /// 注册 token，换打开/换内核时延迟注销（等旧表面
+    /// 拆除，避免其在途回环请求先撞 404）
+    private var softwareProxyToken: String?
+    /// 缓冲首次越过 0 已记日记（每次软件内核尝试重置）
+    private var softwareBufferedLogged = false
     /// MP4 结构探针（修复轮 6，日志级）：格式探针判定
     /// 为 MP4 时并发跑，结果只进日记、不改路由
     private var activeStructureProbe: MP4StructureProbe?
@@ -1741,6 +1762,7 @@ final class PlaybackEngine: ObservableObject {
     /// 系统内核打开：组装 AVURLAsset（带头走资源代理）
     /// 并装上 item 状态观察
     private func installAVPlayer(_ request: PlaybackRequest, generation: Int) {
+        releaseSoftwareProxy()
         activeKernel = .avplayer
         softwareRequest = nil
         triedAVPlayerThisChain = true
@@ -1928,12 +1950,45 @@ final class PlaybackEngine: ObservableObject {
         guard request.url != nil else { return }
         triedSoftwareThisChain = true
         activeKernel = .software
-        softwareRequest = request
         softwareLastStateName = ""
         softwareReadyAt = nil
         softwareFirstFrameSeen = false
         softwareNotPresentedLogged = false
         softwareLastHeartbeatAt = Date.distantPast
+        softwareBufferedLogged = false
+        // 软件内核改走本机回环代理取流（修复轮 7）：
+        // KSPlayer/FFmpeg 自有网络层在真机上打开这类
+        // CDN 地址后缓冲恒 0（build 6 实证），而 App
+        // 自有传输对同一地址完全正常——远端直链计划
+        // 一律先注册到 LocalFileServer 的媒体代理，
+        // 内核只打开 127.0.0.1，凭据头由代理在远端
+        // 侧注入，软件表面拿到的请求因此清空头。
+        // 本地文件与远端播放列表（.m3u8）不走代理：
+        // 前者无需取流，后者 FFmpeg 要按列表里的地址
+        // 自行拉分片、且它直连时凭据头是全局生效的
+        releaseSoftwareProxy()
+        var routed = request
+        if !request.isLocal, let url = request.url,
+           url.scheme == "http" || url.scheme == "https" {
+            if url.path.lowercased().hasSuffix(".m3u8") {
+                DiaryStore.shared.add(
+                    "路由：软件内核打开播放列表地址，直连取流（回环代理只覆盖直链媒体）"
+                )
+            } else if let proxy = LocalFileServer.shared.registerMediaProxy(
+                url: url, headers: request.headers,
+                sourceId: request.sourceId
+            ) {
+                softwareProxyToken = proxy.token
+                routed.url = proxy.url
+                routed.headers = [:]
+                DiaryStore.shared.add(
+                    "路由：软件内核改走本机回环代理取流（远端 \(PlaybackResourceLoader.classify(url))）"
+                )
+            } else {
+                DiaryStore.shared.add("软件内核回环代理不可用，回退直链打开")
+            }
+        }
+        softwareRequest = routed
         phase = .loading
         if !recovering {
             loadingMessage = "正在用软件内核打开"
@@ -1946,6 +2001,17 @@ final class PlaybackEngine: ObservableObject {
                   self.activeKernel == .software,
                   self.phase == .loading else { return }
             self.softwareKernelFailed("软件内核加载超时（30 秒没有开始播放）")
+        }
+    }
+
+    /// 注销本次软件内核的回环代理注册：延迟 5 秒执行，
+    /// 等旧软件表面拆除、其内核停稳，避免在途回环
+    /// 请求先撞上 404 误报失败
+    private func releaseSoftwareProxy() {
+        guard let token = softwareProxyToken else { return }
+        softwareProxyToken = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            LocalFileServer.shared.unregisterMediaProxy(token: token)
         }
     }
 
@@ -2111,6 +2177,7 @@ final class PlaybackEngine: ObservableObject {
     /// 软件内核失败后换系统内核同计划再试（表面随
     /// activeKernel 翻转被播放页 dismantle）
     private func swapToAVPlayerAfterSoftwareFailure() {
+        releaseSoftwareProxy()
         softwareRequest = nil
         activeKernel = .avplayer
         guard var current = currentRequest else { return }
@@ -2187,6 +2254,15 @@ final class PlaybackEngine: ObservableObject {
         }
         bufferedPosition = buffered
         isPlaying = playing
+        // 缓冲首次越过 0 单独记一行（修复轮 7）：build 6
+        // 的故障形态正是缓冲恒 0，这一跃迁是取流活
+        // 过来的最早证据，与恒 0 挂起一眼可分
+        if buffered > 0, !softwareBufferedLogged {
+            softwareBufferedLogged = true
+            DiaryStore.shared.add(
+                "软件内核缓冲推进：已缓冲 \(Int(buffered)) 秒（位置 \(Int(time)) / 总长 \(Int(duration))）"
+            )
+        }
         if time > lastPosition + 0.25 {
             lastPosition = time
             lastProgressAt = Date()

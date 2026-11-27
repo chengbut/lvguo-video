@@ -1075,16 +1075,28 @@ final class LocalFileServer {
     private var root: URL?
     private(set) var port: UInt16 = 0
     private let queue = DispatchQueue(label: "lvguo.localserver")
+    /// 媒体代理注册表（修复轮 7）：token → 远端地址/凭据头/来源，
+    /// 软件内核经 /proxy/<token> 打开回环地址，实际取流由
+    /// MediaProxyFetch 用宿主传输完成（见文件末尾）
+    private var proxyRegistrations: [String: MediaProxyRegistration] = [:]
+    private let proxyLock = NSLock()
+    /// 在途代理连接（连接标识 → 取流对象），防被提前释放
+    private var activeProxyFetches: [ObjectIdentifier: MediaProxyFetch] = [:]
 
     private init() {}
 
     /// 启动（已启动则直接返回基址）。root 是 downloads 目录，
     /// 播放地址形如 <base>/<jobId>/playlist.m3u8。
     func start(root: URL) -> String? {
+        self.root = root
+        return ensureStarted()
+    }
+
+    /// 只确保服务在跑（不依赖文件根目录）：媒体代理路由用
+    private func ensureStarted() -> String? {
         if let listener, listener.state == .ready, port != 0 {
             return "http://127.0.0.1:\(port)"
         }
-        self.root = root
         do {
             let parameters = NWParameters.tcp
             parameters.requiredInterfaceType = .loopback
@@ -1115,6 +1127,36 @@ final class LocalFileServer {
         return URL(string: "\(base)/\(jobId)/\(fileName)")
     }
 
+    // MARK: 媒体代理注册（修复轮 7）
+
+    /// 注册一份远端媒体给软件内核经回环打开：返回回环
+    /// 地址与 token（注销用）。服务起不来返回 nil，调用方
+    /// 回退直链。注册表只按 token 增删，在途连接持有
+    /// 注册对象本身，注销不影响已开始的取流收尾。
+    func registerMediaProxy(
+        url: URL, headers: [String: String], sourceId: String
+    ) -> (url: URL, token: String)? {
+        guard let base = ensureStarted() else { return nil }
+        let token = UUID().uuidString
+            .replacingOccurrences(of: "-", with: "").lowercased()
+        proxyLock.lock()
+        proxyRegistrations[token] = MediaProxyRegistration(
+            token: token, url: url, headers: headers, sourceId: sourceId
+        )
+        proxyLock.unlock()
+        guard let loopback = URL(string: "\(base)/proxy/\(token)") else {
+            unregisterMediaProxy(token: token)
+            return nil
+        }
+        return (loopback, token)
+    }
+
+    func unregisterMediaProxy(token: String) {
+        proxyLock.lock()
+        proxyRegistrations.removeValue(forKey: token)
+        proxyLock.unlock()
+    }
+
     private func handle(_ connection: NWConnection) {
         connection.start(queue: queue)
         receiveRequest(connection, buffer: Data())
@@ -1136,8 +1178,7 @@ final class LocalFileServer {
     }
 
     private func respond(_ connection: NWConnection, request: Data) {
-        guard let root,
-              let text = String(data: request, encoding: .utf8),
+        guard let text = String(data: request, encoding: .utf8),
               let firstLine = text.components(separatedBy: "\r\n").first else {
             connection.cancel()
             return
@@ -1147,9 +1188,33 @@ final class LocalFileServer {
             send(connection, status: "405 Method Not Allowed", body: Data())
             return
         }
+        // 请求头（小写键）：文件路由不用，代理路由要 Range
+        var requestHeaders: [String: String] = [:]
+        for line in text.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+                .lowercased()
+            let value = line[line.index(after: colon)...]
+                .trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty { requestHeaders[name] = value }
+        }
         var path = String(parts[1])
-        if let query = path.firstIndex(of: "?") {
-            path = String(path[..<query])
+        var query: String?
+        if let mark = path.firstIndex(of: "?") {
+            query = String(path[path.index(after: mark)...])
+            path = String(path[..<mark])
+        }
+        // 媒体代理路由：/proxy/<token>[/<相对子路径>]
+        if path.hasPrefix("/proxy/") {
+            handleProxy(
+                connection, path: path, query: query,
+                rangeHeader: requestHeaders["range"]
+            )
+            return
+        }
+        guard let root else {
+            send(connection, status: "404 Not Found", body: Data())
+            return
         }
         let decoded = path.removingPercentEncoding ?? path
         let relative = decoded.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -1185,5 +1250,490 @@ final class LocalFileServer {
         connection.send(content: payload, completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+
+    /// 代理路由分发：token 后无子路径 = 注册的远端地址
+    /// 本身；带子路径 = 按注册地址的目录解析（播放列表
+    /// 里的相对分片地址经回环回来时走这条）。取流对象
+    /// 由服务持有到连接收尾，客户端断开即中止取流。
+    private func handleProxy(
+        _ connection: NWConnection, path: String, query: String?,
+        rangeHeader: String?
+    ) {
+        let rest = String(path.dropFirst("/proxy/".count))
+        let token: String
+        var subpath = ""
+        if let slash = rest.firstIndex(of: "/") {
+            token = String(rest[..<slash])
+            subpath = String(rest[rest.index(after: slash)...])
+        } else {
+            token = rest
+        }
+        proxyLock.lock()
+        let registration = proxyRegistrations[token]
+        proxyLock.unlock()
+        guard let registration else {
+            send(connection, status: "404 Not Found", body: Data())
+            return
+        }
+        var remote = registration.url
+        if !subpath.isEmpty {
+            let decoded = subpath.removingPercentEncoding ?? subpath
+            if let resolved = URL(string: decoded, relativeTo: registration.url)?
+                .absoluteURL {
+                remote = resolved
+            }
+        }
+        if let query, !query.isEmpty,
+           var components = URLComponents(
+               url: remote, resolvingAgainstBaseURL: false
+           ) {
+            components.percentEncodedQuery = query
+            if let withQuery = components.url { remote = withQuery }
+        }
+        let fetch = MediaProxyFetch(
+            registration: registration, remoteURL: remote,
+            rangeHeader: rangeHeader, connection: connection
+        )
+        let key = ObjectIdentifier(connection)
+        activeProxyFetches[key] = fetch
+        fetch.onFinished = { [weak self] in
+            self?.queue.async {
+                self?.activeProxyFetches.removeValue(forKey: key)
+            }
+        }
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .cancelled, .failed:
+                fetch.abort()
+            default:
+                break
+            }
+        }
+        fetch.start()
+    }
+}
+
+// MARK: - 媒体回环代理（修复轮 7）
+
+/// 一份代理注册：远端真实地址 + 计划凭据头 + 来源 id。
+/// 软件内核（KSPlayer/FFmpeg）的自有网络层在真机上打
+/// 不开这类 CDN 地址（1.4 build 6 实证：状态走到
+/// buffering 后缓冲恒 0、一个字节都没进来，而 App 自有
+/// 传输对同一地址 Range 探针 206 正常）——改由本代理
+/// 用宿主传输取流后经回环喂给它，内核只连 127.0.0.1。
+final class MediaProxyRegistration {
+    let token: String
+    let url: URL
+    let headers: [String: String]
+    let sourceId: String
+    /// 已完成的 2xx 取流计数（日记采样用：首个 + 每 25 个记，
+    /// 其余静默，防刷满 500 条日记环）
+    var completedCount = 0
+    let lock = NSLock()
+
+    init(token: String, url: URL, headers: [String: String], sourceId: String) {
+        self.token = token
+        self.url = url
+        self.headers = headers
+        self.sourceId = sourceId
+    }
+}
+
+/// 一次回环连接的远端取流：把客户端（软件内核）的
+/// Range 透传给远端，响应流式转发回客户端。
+/// 传输与系统内核/模块桥同一套：
+/// - 凭据头（计划 headers）逐字带上，重定向时补回；
+/// - 传输变体阶梯：标准会话 → 全新临时会话 → 临时
+///   会话 + TLS 最高 1.2；连接级失败（握手/连不上/
+///   DNS/超时/连接丢失，GET 幂等）才换变体，成功
+///   变体按主机记住；
+/// - HTTP 403 退避重试：这类 CDN 对同一签名地址逐
+///   请求间歇性 403（已知特性），回客户端前先以
+///   0.8/1.5 秒退避重试 2 轮；仍 403 才把真实 403
+///   转发给内核，由引擎的失败分类进恢复阶梯重取址。
+/// 一旦开始向客户端转发字节就不再重试（字节流已出
+/// 口），中途失败直接断开连接，内核/引擎侧收尾。
+/// 全部状态只在 workQueue 上访问。
+final class MediaProxyFetch: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
+    /// 与 ModuleHostBridge.TransportVariant 同义的变体阶梯
+    private enum Variant: Int, CaseIterable {
+        case standard = 0
+        case fresh = 1
+        case freshTLS12 = 2
+    }
+
+    private static var variantByHost: [String: Int] = [:]
+    private static let variantLock = NSLock()
+
+    private let registration: MediaProxyRegistration
+    private let remoteURL: URL
+    private let rangeHeader: String?
+    private let connection: NWConnection
+    var onFinished: (() -> Void)?
+
+    private let workQueue = DispatchQueue(label: "lvguo.mediaproxy.fetch")
+    private lazy var delegateQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.underlyingQueue = workQueue
+        return queue
+    }()
+
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var variantOrder: [Variant] = []
+    private var variantIndex = 0
+    private var httpRetries = 0
+    private var pendingHTTPStatus: Int?
+    private let deadline = Date().addingTimeInterval(45)
+
+    private var committed = false
+    private var finalStatus = 0
+    private var outBuffer = Data()
+    private var sending = false
+    private var taskSuspended = false
+    private var taskDone = false
+    private var forwardedBytes: Int64 = 0
+    private var finished = false
+    private var aborted = false
+
+    init(
+        registration: MediaProxyRegistration, remoteURL: URL,
+        rangeHeader: String?, connection: NWConnection
+    ) {
+        self.registration = registration
+        self.remoteURL = remoteURL
+        self.rangeHeader = rangeHeader
+        self.connection = connection
+    }
+
+    /// 日记描述：远端地址类型@主机 + 本次 Range（不带
+    /// 路径明细与签名参数，与资源代理侧同一口径）
+    private var logDescription: String {
+        let range = rangeHeader.map { "Range \($0)" } ?? "全量"
+        return "\(PlaybackResourceLoader.classify(remoteURL)) \(range)"
+    }
+
+    func start() {
+        workQueue.async { [weak self] in
+            self?.startRound()
+        }
+    }
+
+    /// 客户端断开（内核切集/退出/换核）：静默中止
+    func abort() {
+        workQueue.async { [weak self] in
+            guard let self, !self.finished else { return }
+            self.aborted = true
+            self.task?.cancel()
+            self.session?.invalidateAndCancel()
+            self.finish()
+        }
+    }
+
+    // MARK: 尝试轮次（变体阶梯 + 403 退避）
+
+    private func startRound() {
+        guard !finished, !aborted else { return }
+        variantOrder = Self.variantOrder(for: remoteURL.host ?? "")
+        variantIndex = 0
+        startAttempt()
+    }
+
+    private static func variantOrder(for host: String) -> [Variant] {
+        variantLock.lock()
+        let preferred = variantByHost[host.lowercased()]
+        variantLock.unlock()
+        var order: [Variant] = []
+        if let preferred, let variant = Variant(rawValue: preferred) {
+            order.append(variant)
+        }
+        for variant in Variant.allCases where !order.contains(variant) {
+            order.append(variant)
+        }
+        return order
+    }
+
+    private func startAttempt() {
+        guard !finished, !aborted else { return }
+        let variant = variantOrder[variantIndex]
+        var request = URLRequest(url: remoteURL)
+        request.timeoutInterval = 20
+        for (name, value) in registration.headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        if let rangeHeader {
+            request.setValue(rangeHeader, forHTTPHeaderField: "Range")
+        }
+        let configuration: URLSessionConfiguration
+        switch variant {
+        case .standard:
+            configuration = .default
+        case .fresh:
+            configuration = .ephemeral
+        case .freshTLS12:
+            configuration = .ephemeral
+            configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+            configuration.tlsMaximumSupportedProtocolVersion = .TLSv12
+        }
+        ProxySettings.configure(
+            configuration,
+            effective: ProxySettings.effective(
+                forModule: registration.sourceId.isEmpty
+                    ? nil : registration.sourceId
+            )
+        )
+        let created = URLSession(
+            configuration: configuration, delegate: self,
+            delegateQueue: delegateQueue
+        )
+        session = created
+        let dataTask = created.dataTask(with: request)
+        task = dataTask
+        dataTask.resume()
+    }
+
+    /// 连接级失败可否换变体重试（与 ModuleHostBridge
+    /// isRetryable 同口径；媒体取流恒为 GET 幂等，
+    /// 超时/连接丢失也可换）
+    private static func isRetryable(code: Int?) -> Bool {
+        guard let code else { return false }
+        switch code {
+        case NSURLErrorSecureConnectionFailed,
+             NSURLErrorCannotConnectToHost,
+             NSURLErrorCannotFindHost,
+             NSURLErrorDNSLookupFailed,
+             NSURLErrorTimedOut,
+             NSURLErrorNetworkConnectionLost:
+            return true
+        default:
+            return false
+        }
+    }
+
+    // MARK: URLSessionDataDelegate
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard !finished, !aborted,
+              let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+        // 403 退避：先在本层重试（同一签名地址换个
+        // 时刻重取常能通），耗尽才把真实 403 转发出去
+        if http.statusCode == 403, httpRetries < 2,
+           Date() < deadline {
+            pendingHTTPStatus = 403
+            completionHandler(.cancel)
+            return
+        }
+        commit(http)
+        completionHandler(.allow)
+    }
+
+    /// 响应定版：状态行与关键头转发给客户端，之后只流式转发正文
+    private func commit(_ http: HTTPURLResponse) {
+        committed = true
+        finalStatus = http.statusCode
+        if (200...299).contains(http.statusCode) {
+            let variant = variantOrder[variantIndex]
+            let host = (remoteURL.host ?? "").lowercased()
+            Self.variantLock.lock()
+            if Self.variantByHost[host] != variant.rawValue {
+                Self.variantByHost[host] = variant.rawValue
+            }
+            Self.variantLock.unlock()
+        }
+        let phrase = HTTPURLResponse.localizedString(
+            forStatusCode: http.statusCode
+        )
+        var head = "HTTP/1.1 \(http.statusCode) \(phrase)\r\n"
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")
+            ?? "application/octet-stream"
+        head += "Content-Type: \(contentType)\r\n"
+        if let range = http.value(forHTTPHeaderField: "Content-Range") {
+            head += "Content-Range: \(range)\r\n"
+        }
+        if http.expectedContentLength >= 0 {
+            head += "Content-Length: \(http.expectedContentLength)\r\n"
+        }
+        head += "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+        outBuffer.append(Data(head.utf8))
+        pump()
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
+    ) {
+        guard !finished, !aborted, committed else { return }
+        outBuffer.append(data)
+        forwardedBytes += Int64(data.count)
+        if outBuffer.count > 1 << 20, !taskSuspended {
+            taskSuspended = true
+            dataTask.suspend()
+        }
+        pump()
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        self.session?.invalidateAndCancel()
+        self.session = nil
+        self.task = nil
+        guard !finished else { return }
+        if aborted {
+            finish()
+            return
+        }
+        // 403 退避重试：换一轮（变体顺序重排）再取
+        if let status = pendingHTTPStatus {
+            pendingHTTPStatus = nil
+            httpRetries += 1
+            let backoff: [Double] = [0.8, 1.5]
+            let delay = backoff[min(httpRetries - 1, backoff.count - 1)]
+            DiaryStore.shared.add(
+                "媒体代理：\(logDescription) → \(status)（第 \(httpRetries) 次，\(delay) 秒后退避重试）"
+            )
+            workQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.startRound()
+            }
+            return
+        }
+        if let error {
+            let nsError = error as NSError
+            if !committed {
+                let code = nsError.domain == NSURLErrorDomain
+                    ? nsError.code : nil
+                if Self.isRetryable(code: code),
+                   variantIndex + 1 < variantOrder.count,
+                   Date() < deadline {
+                    DiaryStore.shared.add(
+                        "媒体代理：\(logDescription) 传输变体 \(variantOrder[variantIndex].rawValue) 失败（\(nsError.domain) \(nsError.code)），换连接重试"
+                    )
+                    variantIndex += 1
+                    startAttempt()
+                    return
+                }
+                DiaryStore.shared.add(
+                    "媒体代理：\(logDescription) 传输失败：\(nsError.domain) \(nsError.code)"
+                )
+                sendSynthetic(status: 502)
+                return
+            }
+            if nsError.domain != NSURLErrorDomain
+                || nsError.code != NSURLErrorCancelled {
+                DiaryStore.shared.add(
+                    "媒体代理：\(logDescription) 传输中断：\(nsError.domain) \(nsError.code)（已转发 \(forwardedBytes) 字节）"
+                )
+            }
+            taskDone = true
+            maybeFinish()
+            return
+        }
+        taskDone = true
+        maybeFinish()
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // 跳转时系统会丢掉部分自定义头：把计划凭据头补回
+        // （与系统内核资源代理的跳转处理同一口径）
+        var request = request
+        for (name, value) in registration.headers
+        where request.value(forHTTPHeaderField: name) == nil {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        completionHandler(request)
+    }
+
+    // MARK: 向客户端转发（背压：缓冲过大暂停远端任务）
+
+    private func pump() {
+        guard !sending, !outBuffer.isEmpty, !finished else {
+            maybeFinish()
+            return
+        }
+        let count = min(outBuffer.count, 256 * 1024)
+        let chunk = Data(outBuffer.prefix(count))
+        outBuffer.removeFirst(count)
+        sending = true
+        connection.send(
+            content: chunk, completion: .contentProcessed { [weak self] error in
+                guard let self else { return }
+                self.workQueue.async {
+                    self.sending = false
+                    if error != nil {
+                        // 客户端已断开：中止远端取流
+                        self.aborted = true
+                        self.task?.cancel()
+                        self.session?.invalidateAndCancel()
+                        self.finish()
+                        return
+                    }
+                    if self.taskSuspended, self.outBuffer.count < 256 * 1024 {
+                        self.taskSuspended = false
+                        self.task?.resume()
+                    }
+                    self.pump()
+                }
+            }
+        )
+    }
+
+    /// 合成状态响应（远端连接级失败、连响应都没拿到时，
+    /// 给内核一个可分类的状态码而不是无声断开）
+    private func sendSynthetic(status: Int) {
+        guard !committed, !finished else {
+            finish()
+            return
+        }
+        committed = true
+        finalStatus = status
+        let phrase = HTTPURLResponse.localizedString(forStatusCode: status)
+        let head = "HTTP/1.1 \(status) \(phrase)\r\n"
+            + "Content-Length: 0\r\nConnection: close\r\n\r\n"
+        outBuffer.append(Data(head.utf8))
+        taskDone = true
+        pump()
+    }
+
+    private func maybeFinish() {
+        guard taskDone, !sending, outBuffer.isEmpty, !finished else { return }
+        if committed, finalStatus > 0 {
+            if (200...299).contains(finalStatus) {
+                registration.lock.lock()
+                registration.completedCount += 1
+                let count = registration.completedCount
+                registration.lock.unlock()
+                if count == 1 || count % 25 == 0 {
+                    DiaryStore.shared.add(
+                        "媒体代理：\(logDescription) → \(finalStatus)（第 \(count) 个，\(forwardedBytes) 字节）"
+                    )
+                }
+            } else {
+                DiaryStore.shared.add(
+                    "媒体代理：\(logDescription) → \(finalStatus)（\(forwardedBytes) 字节）"
+                )
+            }
+        }
+        finish()
+    }
+
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        connection.cancel()
+        onFinished?()
     }
 }
