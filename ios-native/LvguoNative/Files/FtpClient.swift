@@ -452,7 +452,7 @@ final class FtpConnection {
             throw FileSourceFailure("FTP 数据端口无效")
         }
         let dataConnection = NWConnection(
-            host: NWEndpoint.Host(dataHost), port: nwPort, using: tcpParameters()
+            host: NWEndpoint.Host(dataHost), port: nwPort, using: Self.tcpParameters()
         )
         let dataChannel = FtpLineChannel(connection: dataConnection)
         try await dataChannel.start()
