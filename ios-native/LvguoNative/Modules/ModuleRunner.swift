@@ -31,6 +31,10 @@ final class ModuleSharedState {
     var logs: [String] = []
     var ticketCounter = 0
     var issuedTickets = Set<Int>()
+    /// host → 上次成功的传输变体编号（ModuleHostBridge.TransportVariant），
+    /// 修复轮 3：个别站源网关对某些 TLS 协商形态不响应（握手黑洞）
+    /// 或边缘节点连接异常时，换变体重连成功后记住，下次直达。
+    var transportVariantByHost: [String: Int] = [:]
     /// host.exclusive 的跨实例串行锁（递归锁：嵌套 exclusive
     /// 时不自锁死；Go 的 channel 信号量嵌套会死锁，此处放宽）
     let exclusiveLock = NSRecursiveLock()
@@ -96,7 +100,72 @@ final class ModuleHostBridge {
 
     private enum FetchOutcome {
         case success(Data, HTTPURLResponse)
-        case failure(String)
+        /// 失败文案 + NSURLErrorDomain 错误码（非 URL 错误为 nil），
+        /// 错误码既用于 UI 透出定位，也用于判断能否换变体重试。
+        case failure(String, Int?)
+    }
+
+    /// 传输变体阶梯（修复轮 3）：同一请求依次换 URLSession
+    /// 配置重试——标准配置 → 全新临时会话（新连接、新 DNS
+    /// 选择、不复用旧连接池）→ 临时会话 + TLS 最高 1.2。
+    /// 背景：实测字节系站源网关（fqnovel/snssdk）对不带 ALPN
+    /// 的 ClientHello 直接黑洞（握手无响应直至超时），且其
+    /// DSA CDN 边缘节点对手持协商形态的容忍度不一致，真机
+    /// 表现为间歇性 NSURLErrorSecureConnectionFailed (-1200)；
+    /// Go 核心靠 ALPN 恒开 + 客户端重试 + 多地址自然绕开，
+    /// 原生在此做等价的连接级重试：只对「请求字节未送达
+    /// 服务端」的失败换变体重试（握手失败/连不上/DNS 失败
+    /// 恒可重试；超时/连接丢失只重试幂等方法），不改请求
+    /// 内容、头与顺序，总时长仍受原 timeout + 10 秒约束。
+    private enum TransportVariant: Int, CaseIterable {
+        case standard = 0
+        case fresh = 1
+        case freshTLS12 = 2
+    }
+
+    private var variantSessions: [String: URLSession] = [:]
+    private let variantSessionLock = NSLock()
+
+    private func session(for variant: TransportVariant, sameOriginOnly: Bool) -> URLSession {
+        switch variant {
+        case .standard:
+            return sameOriginOnly ? sameOriginSession : followSession
+        case .fresh, .freshTLS12:
+            let key = "\(variant.rawValue)-\(sameOriginOnly)"
+            variantSessionLock.lock()
+            defer { variantSessionLock.unlock() }
+            if let existing = variantSessions[key] { return existing }
+            let configuration = URLSessionConfiguration.ephemeral
+            if variant == .freshTLS12 {
+                configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+                configuration.tlsMaximumSupportedProtocolVersion = .TLSv12
+            }
+            let created = URLSession(
+                configuration: configuration,
+                delegate: RedirectGate(sameOriginOnly: sameOriginOnly),
+                delegateQueue: nil
+            )
+            variantSessions[key] = created
+            return created
+        }
+    }
+
+    /// 握手/连接级失败是否可换变体重试：握手失败说明请求
+    /// 字节根本没送达，非幂等方法也可安全重试；超时与连接
+    /// 丢失可能已送达，只重试 GET/HEAD。
+    private static func isRetryable(code: Int?, idempotent: Bool) -> Bool {
+        guard let code else { return false }
+        switch code {
+        case NSURLErrorSecureConnectionFailed,
+             NSURLErrorCannotConnectToHost,
+             NSURLErrorCannotFindHost,
+             NSURLErrorDNSLookupFailed:
+            return true
+        case NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost:
+            return idempotent
+        default:
+            return false
+        }
     }
 
     /// 重定向闸门，对齐 Go Fetch 的策略：
@@ -149,28 +218,92 @@ final class ModuleHostBridge {
         delegateQueue: nil
     )
 
-    private func perform(
-        _ request: URLRequest, timeout: TimeInterval, followRedirects: Bool = true
+    /// 单次请求（指定传输变体）。wait 是这次尝试的信号量上限，
+    /// 请求自身的 timeoutInterval 已由调用方按剩余预算设好。
+    private func performOnce(
+        _ request: URLRequest, variant: TransportVariant,
+        followRedirects: Bool, wait: TimeInterval
     ) -> FetchOutcome {
         let semaphore = DispatchSemaphore(value: 0)
-        var outcome: FetchOutcome = .failure("请求未完成")
-        let session = followRedirects ? followSession : sameOriginSession
+        var outcome: FetchOutcome = .failure("请求未完成", nil)
+        let session = session(for: variant, sameOriginOnly: !followRedirects)
         let task = session.dataTask(with: request) { data, response, error in
             if let error {
-                outcome = .failure(error.localizedDescription)
+                let nsError = error as NSError
+                if nsError.domain == NSURLErrorDomain {
+                    // 错误码随文案透出（如 -1200），下一张真机
+                    // 截图即可定位失败类别，不再只有一句本地化描述
+                    outcome = .failure(
+                        "\(error.localizedDescription)（\(nsError.code)）", nsError.code
+                    )
+                } else {
+                    outcome = .failure(error.localizedDescription, nil)
+                }
             } else if let http = response as? HTTPURLResponse {
                 outcome = .success(data ?? Data(), http)
             } else {
-                outcome = .failure("响应无效")
+                outcome = .failure("响应无效", nil)
             }
             semaphore.signal()
         }
         task.resume()
-        if semaphore.wait(timeout: .now() + timeout + 10) == .timedOut {
+        if semaphore.wait(timeout: .now() + max(1, wait)) == .timedOut {
             task.cancel()
-            return .failure("请求超时")
+            return .failure("请求超时", NSURLErrorTimedOut)
         }
         return outcome
+    }
+
+    /// 带传输变体阶梯的请求入口：fetch/fetchText/fetchPlaylist
+    /// 共用。总时长仍受 timeout + 10 秒约束（与旧实现一致），
+    /// 每次尝试按剩余预算收紧单次超时；成功变体按主机记住。
+    private func perform(
+        _ request: URLRequest, timeout: TimeInterval, followRedirects: Bool = true
+    ) -> FetchOutcome {
+        let host = request.url?.host?.lowercased() ?? ""
+        let method = (request.httpMethod ?? "GET").uppercased()
+        let idempotent = method == "GET" || method == "HEAD"
+        shared.lock.lock()
+        let preferred = shared.transportVariantByHost[host]
+        shared.lock.unlock()
+        var order: [TransportVariant] = []
+        if let preferred, let variant = TransportVariant(rawValue: preferred) {
+            order.append(variant)
+        }
+        for variant in TransportVariant.allCases where !order.contains(variant) {
+            order.append(variant)
+        }
+        let deadline = Date().addingTimeInterval(timeout + 10)
+        var lastOutcome: FetchOutcome = .failure("请求未完成", nil)
+        for (index, variant) in order.enumerated() {
+            let remaining = deadline.timeIntervalSinceNow
+            if index > 0, remaining < 3 { break }
+            var attempt = request
+            attempt.timeoutInterval = max(1, min(timeout, remaining))
+            let outcome = performOnce(
+                attempt, variant: variant,
+                followRedirects: followRedirects, wait: remaining
+            )
+            switch outcome {
+            case .success:
+                if variant.rawValue != preferred {
+                    shared.lock.lock()
+                    shared.transportVariantByHost[host] = variant.rawValue
+                    shared.lock.unlock()
+                }
+                return outcome
+            case .failure(_, let code):
+                lastOutcome = outcome
+                guard index + 1 < order.count,
+                      Self.isRetryable(code: code, idempotent: idempotent) else {
+                    return outcome
+                }
+                // 诊断只记主机名与错误类型，不记 URL/参数
+                appendLog("host.fetch \(host) 传输变体 \(variant.rawValue) 失败（错误码 \(code ?? 0)），换连接重试")
+                Thread.sleep(forTimeInterval: 0.4)
+            }
+        }
+        return lastOutcome
     }
 
     // MARK: - host.fetch
@@ -224,7 +357,7 @@ final class ModuleHostBridge {
         switch perform(
             request, timeout: request.timeoutInterval, followRedirects: followRedirects
         ) {
-        case .failure(let message):
+        case .failure(let message, _):
             return envelope(["error": "\(manifest.name)连接失败：\(message)"])
         case .success(let data, let response):
             let status = response.statusCode
@@ -400,7 +533,7 @@ final class ModuleHostBridge {
                 }
                 var abandonCandidate = false
                 switch perform(request, timeout: timeout) {
-                case .failure(let message):
+                case .failure(let message, _):
                     lastError = message
                 case .success(let data, let response):
                     let status = response.statusCode
@@ -463,7 +596,7 @@ final class ModuleHostBridge {
             request.setValue(referer, forHTTPHeaderField: "Referer")
         }
         switch perform(request, timeout: 30) {
-        case .failure(let message):
+        case .failure(let message, _):
             return envelope(["error": message])
         case .success(let data, let response):
             // 对齐 Go fetchMediaPlaylist：恰好 200、未被拦截、
@@ -539,7 +672,7 @@ final class ModuleHostBridge {
             request.setValue(effectiveReferer, forHTTPHeaderField: "Referer")
         }
         switch perform(request, timeout: 30) {
-        case .failure(let message):
+        case .failure(let message, _):
             return ("", "", message)
         case .success(let data, let response):
             if data.count > 4 << 20 {

@@ -308,7 +308,21 @@ struct PlayerPage: View {
                 chrome
             }
             if locked, lockPeek {
-                lockButton(peekOnly: true)
+                // 锁定态锁钮位置对齐 Flutter：竖屏页在右上角
+                // （安全区顶 + 6、右 12），横屏页在左侧居中；
+                // 旧版无定位直接落在屏幕正中，已改
+                GeometryReader { proxy in
+                    let portrait = proxy.size.height > proxy.size.width
+                    lockButton(peekOnly: true)
+                        .frame(
+                            maxWidth: .infinity, maxHeight: .infinity,
+                            alignment: portrait ? .topTrailing : .leading
+                        )
+                        .padding(.top, portrait ? proxy.safeAreaInsets.top + 6 : 0)
+                        .padding(.trailing, portrait ? 12 : 0)
+                        .padding(.leading, portrait ? 0 : proxy.safeAreaInsets.left + 10)
+                }
+                .ignoresSafeArea()
             }
             if engine.isPaused, engine.phase == .ready, !locked {
                 pausedMark
@@ -797,24 +811,48 @@ struct PlayerPage: View {
         }
     }
 
+    /// 暂停标记：竖屏对齐 Flutter 竖屏页——屏幕中央 72pt
+    /// 玻璃量级圆钮；横屏保持修复轮 2 对齐横屏页的右下
+    /// 68pt（右 20 / 底 92）。
     private var pausedMark: some View {
-        VStack {
-            Spacer()
-            HStack {
-                Spacer()
-                Button {
-                    engine.play()
-                    showControls()
-                } label: {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.white)
-                        .frame(width: 68, height: 68)
-                        .background(Color.black.opacity(0.4), in: Circle())
+        GeometryReader { proxy in
+            let portrait = proxy.size.height > proxy.size.width
+            if portrait {
+                ZStack {
+                    Button {
+                        engine.play()
+                        showControls()
+                    } label: {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.white)
+                            .frame(width: 72, height: 72)
+                            .background(Color.black.opacity(0.4), in: Circle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-                .padding(.trailing, 20)
-                .padding(.bottom, 92)
+                .frame(width: proxy.size.width, height: proxy.size.height)
+            } else {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            engine.play()
+                            showControls()
+                        } label: {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.white)
+                                .frame(width: 68, height: 68)
+                                .background(Color.black.opacity(0.4), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 20)
+                        .padding(.bottom, 92)
+                    }
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
             }
         }
         .ignoresSafeArea()
@@ -822,40 +860,50 @@ struct PlayerPage: View {
 
     @ViewBuilder
     private var badges: some View {
-        VStack {
-            if boostActive {
-                badgeCapsule("倍速播放中")
-                    .padding(.top, 64)
-            } else if let hint {
-                badgeCapsule(hint)
-                    .padding(.top, 64)
-            }
-            Spacer()
-            if streakSeconds > 0 {
-                badgeCapsule(streakDirection > 0
-                    ? "快进 \(Int(streakSeconds)) 秒"
-                    : "快退 \(Int(streakSeconds)) 秒")
-            } else if let target = dragSeekTarget {
-                badgeCapsule("\(clockText(target)) / \(clockText(engine.duration))")
-            } else if let levelBadge {
-                HStack(spacing: 10) {
-                    Image(systemName: levelBadge.icon)
-                    ProgressView(value: levelBadge.fraction)
-                        .frame(width: 120)
-                        .tint(.white)
+        GeometryReader { proxy in
+            let insets = proxy.safeAreaInsets
+            let portrait = proxy.size.height > proxy.size.width
+            // 顶部徽章位置对齐 Flutter：倍速徽章 top = 安全区
+            // 顶 + 76（旧版写死 64，与顶栏间距随设备漂移）；
+            // toast 悬在底部控件块上方（竖屏 = 安全区底 + 132）
+            let topPad = portrait ? insets.top + 76 : 64.0
+            let toastPad = portrait ? insets.bottom + 132 : 120.0
+            VStack {
+                if boostActive {
+                    badgeCapsule("倍速播放中")
+                        .padding(.top, topPad)
+                } else if let hint {
+                    badgeCapsule(hint)
+                        .padding(.top, topPad)
                 }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .glassEffect(.regular, in: Capsule())
-            } else if let episodeHint {
-                badgeCapsule(episodeHint)
+                Spacer()
+                if streakSeconds > 0 {
+                    badgeCapsule(streakDirection > 0
+                        ? "快进 \(Int(streakSeconds)) 秒"
+                        : "快退 \(Int(streakSeconds)) 秒")
+                } else if let target = dragSeekTarget {
+                    badgeCapsule("\(clockText(target)) / \(clockText(engine.duration))")
+                } else if let levelBadge {
+                    HStack(spacing: 10) {
+                        Image(systemName: levelBadge.icon)
+                        ProgressView(value: levelBadge.fraction)
+                            .frame(width: 120)
+                            .tint(.white)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .glassEffect(.regular, in: Capsule())
+                } else if let episodeHint {
+                    badgeCapsule(episodeHint)
+                }
+                Spacer()
+                if let toast {
+                    badgeCapsule(toast)
+                        .padding(.bottom, toastPad)
+                }
             }
-            Spacer()
-            if let toast {
-                badgeCapsule(toast)
-                    .padding(.bottom, 120)
-            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -872,22 +920,63 @@ struct PlayerPage: View {
 
     // MARK: 顶部栏与底部控件
 
+    /// 控件层（修复轮 3 按 Flutter 播放页逐项对位位置/安全区）：
+    /// 旧实现整层 ignoresSafeArea 后只给顶栏 10pt、底栏 10pt
+    /// 固定边距，顶栏撞灵动岛区域、底栏压在 Home 指示条上。
+    /// 现在渐变罩仍全出血（尺寸对齐 Flutter：竖屏 130/220、
+    /// 横屏 110/150），但顶/底栏本体按真实安全区落位：
+    /// 顶栏 top = 安全区顶（Flutter header 的 Positioned
+    /// top = padding.top、高 48），底栏 bottom = 安全区底。
+    /// 竖屏底部照 Flutter 竖屏页：玻璃控制块（圆角 20，
+    /// 控制行 + 进度行）+ 下方独立集数条（高 44）；横屏保持
+    /// 修复轮 2 对齐横屏页的整行工具栏。
     private var chrome: some View {
-        ZStack(alignment: .top) {
-            VStack(spacing: 0) {
-                topBar
-                Spacer()
-                bottomControls
+        GeometryReader { proxy in
+            let insets = proxy.safeAreaInsets
+            let portrait = proxy.size.height > proxy.size.width
+            ZStack(alignment: .top) {
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.45), .clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: portrait ? 130 : 110)
+                    Spacer()
+                    LinearGradient(
+                        colors: [.clear, Color.black.opacity(0.78)],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: portrait ? 220 : 150)
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+                VStack(spacing: 0) {
+                    topBar
+                    Spacer()
+                    if portrait {
+                        portraitBottomBlock
+                        portraitEpisodeStrip
+                            .padding(.top, 8)
+                    } else {
+                        bottomControls
+                    }
+                }
+                .padding(.top, insets.top)
+                .padding(.bottom, insets.bottom + 2)
+                .padding(.leading, insets.left)
+                .padding(.trailing, insets.right)
+
+                lockButton(peekOnly: false)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    .padding(.leading, insets.left + 10)
             }
-            lockButton(peekOnly: false)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                .padding(.leading, 10)
         }
         .ignoresSafeArea()
     }
 
     private var topBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Button {
                 saveProgressNow()
                 engine.pause()
@@ -936,7 +1025,6 @@ struct PlayerPage: View {
             .buttonStyle(.glass)
         }
         .padding(.horizontal, 12)
-        .padding(.top, 10)
     }
 
     private static func wallClock(_ date: Date) -> String {
@@ -945,20 +1033,153 @@ struct PlayerPage: View {
         return formatter.string(from: date)
     }
 
+    /// 横屏底部控件：进度行 + 整行工具栏（对齐 Flutter 横屏页）。
+    /// 渐变罩与安全区边距已上移到 chrome 统一处理，这里只剩
+    /// 控件本体（旧版自带 200pt 渐变 + 底 10pt 是与 chrome
+    /// 重复且压 Home 指示条的根源之一）。
     private var bottomControls: some View {
-        ZStack(alignment: .bottom) {
-            LinearGradient(
-                colors: [.clear, Color.black.opacity(0.78)],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: 200)
-            .allowsHitTesting(false)
-            VStack(spacing: 2) {
-                sliderRow
-                toolbar
+        VStack(spacing: 2) {
+            sliderRow
+            toolbar
+        }
+        .padding(.horizontal, 12)
+    }
+
+    /// 竖屏底部玻璃控制块（对齐 Flutter 竖屏页 _controlBlock：
+    /// 圆角 20 玻璃、内边距 12/4、控制行 + 进度行）。控制行
+    /// 只放高频项（上下集/播放/时间/倍速/选集），清晰度与
+    /// 画面比例在设置面板、定时与小窗在下方集数条——不再像
+    /// 旧版把十个控件挤一行（用户反馈「布局不合理」的主因）。
+    private var portraitBottomBlock: some View {
+        VStack(spacing: 2) {
+            portraitToolbar
+            sliderRow
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
+        .padding(.horizontal, 12)
+    }
+
+    private var portraitToolbar: some View {
+        HStack(spacing: 4) {
+            if let session {
+                Button {
+                    Task { await switchEpisode(previous: true) }
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                        .frame(width: 40, height: 44)
+                }
+                .disabled(!session.canPrevious || switching)
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 10)
+            Button {
+                engine.togglePlayPause()
+                showControls()
+            } label: {
+                Image(systemName: engine.isPaused ? "play.fill" : "pause.fill")
+                    .font(.system(size: 28))
+                    .frame(width: 48, height: 44)
+            }
+            if let session {
+                Button {
+                    Task { await switchEpisode(previous: false) }
+                } label: {
+                    Image(systemName: "forward.end.fill")
+                        .frame(width: 40, height: 44)
+                }
+                .disabled(!session.canNext || switching)
+            }
+            Text("\(clockText(displayPosition)) / \(clockText(engine.duration))")
+                .font(.system(size: 13).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.86))
+                .padding(.leading, 8)
+            Spacer()
+            Menu {
+                ForEach(Self.speedOptions, id: \.self) { speed in
+                    Button {
+                        engine.playbackRate = Float(speed)
+                        settings.speed = speed
+                        if !engine.isPaused { engine.play() }
+                    } label: {
+                        if speed == settings.speed {
+                            Label(speedLabel(speed), systemImage: "checkmark")
+                        } else {
+                            Text(speedLabel(speed))
+                        }
+                    }
+                }
+            } label: {
+                Text(speedLabel(settings.speed))
+                    .font(.subheadline.weight(.bold))
+                    .frame(height: 44)
+                    .padding(.horizontal, 6)
+            }
+            if session?.onSelectEpisode != nil {
+                Button {
+                    showEpisodes = true
+                } label: {
+                    Image(systemName: "list.number")
+                        .frame(width: 40, height: 44)
+                }
+            }
+        }
+        .foregroundStyle(.white)
+        .buttonStyle(.plain)
+    }
+
+    /// 竖屏集数条（对齐 Flutter 竖屏页 _episodeStrip：独立于
+    /// 控制块、挂在安全区底上方）：左选集入口（带当前集），
+    /// 右定时停止与小窗（从旧整行工具栏挪来）。
+    private var portraitEpisodeStrip: some View {
+        HStack(spacing: 8) {
+            if let session, session.onSelectEpisode != nil {
+                Button {
+                    showEpisodes = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "list.number")
+                        Text(episodeStripTitle)
+                            .lineLimit(1)
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .frame(height: 44)
+                }
+            }
+            Spacer()
+            sleepMenu
+            if pipBridge.isPossible {
+                Button {
+                    pipBridge.start()
+                } label: {
+                    Image(systemName: "pip.enter")
+                        .frame(width: 40, height: 44)
+                }
+            }
+        }
+        .foregroundStyle(.white)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+    }
+
+    private var episodeStripTitle: String {
+        guard let session,
+              session.episodeLabels.indices.contains(session.index) else {
+            return "选集"
+        }
+        return "选集 · 第 \(session.episodeLabels[session.index]) 集"
+    }
+
+    /// 定时停止菜单（横屏工具栏与竖屏集数条共用）
+    private var sleepMenu: some View {
+        Menu {
+            Button("关闭") { applySleep(.off) }
+            Button("播完本集") { applySleep(.episodeEnd) }
+            ForEach([15, 30, 60, 90], id: \.self) { minutes in
+                Button("\(minutes) 分钟") { applySleep(.minutes(minutes)) }
+            }
+        } label: {
+            Image(systemName: sleepOption == .off ? "moon" : "moon.zzz.fill")
+                .frame(width: 40, height: 48)
         }
     }
 
@@ -1101,16 +1322,7 @@ struct PlayerPage: View {
                         .frame(width: 40, height: 48)
                 }
             }
-            Menu {
-                Button("关闭") { applySleep(.off) }
-                Button("播完本集") { applySleep(.episodeEnd) }
-                ForEach([15, 30, 60, 90], id: \.self) { minutes in
-                    Button("\(minutes) 分钟") { applySleep(.minutes(minutes)) }
-                }
-            } label: {
-                Image(systemName: sleepOption == .off ? "moon" : "moon.zzz.fill")
-                    .frame(width: 40, height: 48)
-            }
+            sleepMenu
             if pipBridge.isPossible {
                 Button {
                     pipBridge.start()

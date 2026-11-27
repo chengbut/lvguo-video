@@ -23,6 +23,7 @@ struct DramaDetailView: View {
     @State private var showPlayer = false
     @State private var downloadMode = false
     @State private var selectedGroup = 0
+    @State private var errorExpanded = false
 
     /// 头部展示的剧目：detail() 的结果优先，但封面/标题/总集数/
     /// 简介在 detail 里为空时回落到列表页传进来的 item——
@@ -47,7 +48,7 @@ struct DramaDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 if let errorText {
-                    notice(errorText, isError: true)
+                    errorNotice(errorText)
                 }
                 if let message {
                     notice(message, isError: false)
@@ -64,12 +65,17 @@ struct DramaDetailView: View {
         }
         .navigationTitle(displayDrama.title)
         .navigationBarTitleDisplayMode(.inline)
+        // 全屏 push（对齐 Flutter：详情页在壳外全屏呈现）：
+        // 隐藏底部 tab bar，否则详情页底部胶囊会与 tab bar
+        // 双层叠加（真机 1.2 截图实证）
+        .toolbar(.hidden, for: .tabBar)
         .safeAreaInset(edge: .bottom) {
             if !chapters.isEmpty {
                 bottomCapsule
             }
         }
         .task { await loadDetail() }
+        .onChange(of: errorText) { _, _ in errorExpanded = false }
         .fullScreenCover(isPresented: $showPlayer) {
             if let playRequest {
                 PlayerPage(request: playRequest, session: playSession)
@@ -87,6 +93,59 @@ struct DramaDetailView: View {
                 .regular.tint(isError ? .red.opacity(0.08) : .green.opacity(0.08)),
                 in: RoundedRectangle(cornerRadius: 16)
             )
+    }
+
+    /// 错误卡（修复轮 3 改可折叠）：模块取流失败会把整条
+    /// 尝试链拼成一段长文（签名/App/网页/官网各路径），默认
+    /// 只显示首个失败原因，点「展开全文」看完整原文——展开
+    /// 后是原文一字不删，透出原则不变。
+    private func errorNotice(_ text: String) -> some View {
+        let summary = Self.errorSummary(text)
+        let collapsible = summary != text
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(errorExpanded || !collapsible ? text : summary)
+                .font(.footnote)
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if collapsible {
+                Button {
+                    errorExpanded.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(errorExpanded ? "收起" : "展开全文")
+                        Image(systemName: errorExpanded ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .glassEffect(
+            .regular.tint(.red.opacity(0.08)),
+            in: RoundedRectangle(cornerRadius: 16)
+        )
+    }
+
+    /// 摘要 = 首个失败原因：优先第一行；单行长文取第一个
+    /// 「；」之前的段落（模块错误链正是以「；」拼接各路径）；
+    /// 段落仍过长时截到 90 字（仅折叠态的显示截断，展开
+    /// 全文不受影响）。
+    static func errorSummary(_ text: String) -> String {
+        let firstLine = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .first.map(String.init) ?? text
+        var summary = firstLine
+        if summary.count > 90,
+           let cut = summary.firstIndex(of: "；"),
+           cut != summary.startIndex {
+            summary = String(summary[..<cut])
+        }
+        if summary.count > 90 {
+            summary = String(summary.prefix(90)) + "…"
+        }
+        return summary
     }
 
     private var header: some View {
