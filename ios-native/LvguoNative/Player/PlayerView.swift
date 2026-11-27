@@ -300,6 +300,26 @@ struct PlayerPage: View {
         scrubValue ?? dragSeekTarget ?? engine.currentTime
     }
 
+    /// 真实 window 安全区（修复轮 6）：chrome 的
+    /// GeometryReader 自带 ignoresSafeArea，其
+    /// proxy.safeAreaInsets 恒为 0——1.4 真机竖屏顶栏
+    /// 贴到状态栏上、底部选集条压住 Home 指示条正是
+    /// 这个根因。顶栏、底部控件块、选集条与徽章的
+    /// 定位一律改读 UIKit key window 的 safeAreaInsets
+    /// （不经 SwiftUI 安全区传播，恒为设备真实值；
+    /// 取不到窗口时回退为 0，与旧行为一致不崩）
+    private var windowSafeInsets: EdgeInsets {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive }
+            ?? scenes.first
+        let ui = scene?.keyWindow?.safeAreaInsets ?? .zero
+        return EdgeInsets(
+            top: ui.top, leading: ui.left,
+            bottom: ui.bottom, trailing: ui.right
+        )
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -349,9 +369,9 @@ struct PlayerPage: View {
                             maxWidth: .infinity, maxHeight: .infinity,
                             alignment: portrait ? .topTrailing : .leading
                         )
-                        .padding(.top, portrait ? proxy.safeAreaInsets.top + 6 : 0)
+                        .padding(.top, portrait ? windowSafeInsets.top + 6 : 0)
                         .padding(.trailing, portrait ? 12 : 0)
-                        .padding(.leading, portrait ? 0 : proxy.safeAreaInsets.leading + 10)
+                        .padding(.leading, portrait ? 0 : windowSafeInsets.leading + 10)
                 }
                 .ignoresSafeArea()
             }
@@ -407,6 +427,7 @@ struct PlayerPage: View {
         }
         .onAppear(perform: start)
         .onDisappear {
+            engine.notePlayerPageExited()
             if settings.keepScreenAwake {
                 UIApplication.shared.isIdleTimerDisabled = false
             }
@@ -917,7 +938,7 @@ struct PlayerPage: View {
     @ViewBuilder
     private var badges: some View {
         GeometryReader { proxy in
-            let insets = proxy.safeAreaInsets
+            let insets = windowSafeInsets
             let portrait = proxy.size.height > proxy.size.width
             // 顶部徽章位置对齐 Flutter：倍速徽章 top = 安全区
             // 顶 + 76（旧版写死 64，与顶栏间距随设备漂移）；
@@ -988,7 +1009,10 @@ struct PlayerPage: View {
     /// 修复轮 2 对齐横屏页的整行工具栏。
     private var chrome: some View {
         GeometryReader { proxy in
-            let insets = proxy.safeAreaInsets
+            // 注意：本 GeometryReader 自带 ignoresSafeArea，
+            // proxy.safeAreaInsets 恒为 0，定位只能用
+            // windowSafeInsets（UIKit key window，修复轮 6）
+            let insets = windowSafeInsets
             let portrait = proxy.size.height > proxy.size.width
             ZStack(alignment: .top) {
                 VStack(spacing: 0) {

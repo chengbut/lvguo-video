@@ -19,7 +19,9 @@ enum PlaybackKernel: String {
 /// kernel-memory.json（与 settings.json 同目录）。
 /// 记忆键以来源（模块）id 为主，来源为空时用主机名。
 /// 「播成功」的判定在引擎侧：进入 ready 且播放位置
-/// 确实推进过，不是「打开没报错」就算数。
+/// 确实推进过，不是「打开没报错」就算数；软件内核
+/// 再加首帧渲染证据与视图上屏校验（修复轮 6，其
+/// 位置是墙钟推算、与渲染无关，曾出现假阳性）。
 /// 诊断页可查看与清除（方便排查路由是否符合预期）。
 final class KernelMemoryStore: ObservableObject {
     static let shared = KernelMemoryStore()

@@ -264,6 +264,102 @@ AVFoundation -11829 / -11828 / -11853，或错误链带
   AVPlayer 的媒体选项组，软件内核下为空（KSPlayer
   自身的字幕渲染不在本页控件范围内）。
 
+## 修复轮 6（2026-11-27）：软件内核可观测 + 失败闭环 + 黑屏审计 + 安全区定位（1.4 build 6）
+
+真机证据（1.4 build 5）：17:10 一集系统内核格式拒收 →
+换软件内核 → 日记记「软件内核播成功，已记住」；用户
+实际全程黑屏，后面三集同样黑屏且日记无成功无失败行
+（约 40 秒后用户手动换集）。逐项审计结论：
+
+### 黑屏审计（第一优先级）
+
+- **假阳性机制（已证实）**：MEPlayerItem 的
+  currentPlaybackTime = mainClock().time - startTime，
+  是墙钟推算，与帧渲染完全无关；旧「播成功」判定只看
+  ready + 位置推进，于是解码时钟一走就记了成功、还
+  写了内核记忆，后续集集按记忆直奔软件内核黑屏。
+- **挂载链（KSPlayer 2.3.4 源码核实）**：KSMEPlayer 在
+  init 即建好 videoOutput（默认 MetalPlayView），
+  player.view 即它；本 App 强制 KSMEPlayer 且关二线
+  切换，player 实例不换、渲染视图恒为同一实例。
+  旧 host() 仅 frame + autoresizing 挂一次（容器首帧
+  bounds 为零时挂入）、无约束、无入窗复核、无上屏
+  证据采集——视图是否真进 window、frame 是否非零，
+  App 侧一无所知。**改**：约束钉满容器；容器入窗时
+  复核挂载并记一行视图状态；每次状态变化仍复核。
+- **错误被吞（已证实）**：KSPlayerLayer 先置
+  state .error、随后才发 finish(error)；旧 coordinator
+  去重让先到的 .error 抢报，finish 里的真错误
+  （KSPlayerErrorDomain + 底层 AVError）被丢弃。
+  **改**：.error 先延迟 0.5 秒等 finish 的真错误，
+  等不到才报笼统文案。
+- **成功判定改严**：软件内核记「播成功」/ 写内核
+  记忆必须同时满足——进入 ready、位置越过起点 1 秒、
+  首帧已渲染（MetalPlayView.pixelBuffer 非空，即
+  渲染视图真拿到过解码帧）、视图在 window 内且
+  frame 非零且未隐藏。就绪 5 秒后仍不满足上屏条件
+  时记「软件内核在播但画面未上屏（视图状态：…）」
+  并触发一次强制重挂自愈。首帧时刻另记一行视图
+  状态（window/frame/hidden/父视图链）。
+
+### 软件内核全程落盘（与系统内核侧同格式）
+
+状态变化逐条记（连续重复去重）：`软件内核状态：
+preparing / readyToPlay / buffering / bufferFinished
+/ paused / playedToTheEnd / error`；失败记错误全文：
+`播放器错误[软件]：KSPlayerErrorDomain code 2` +
+userInfo 逐行（含底层 AVError 的 FFmpeg 原始码与
+av_strerror 文本，地址脱敏）；每 10 秒一行心跳
+（位置/总长/缓冲/已上屏或未上屏）；入窗一行视图
+状态；用户退出播放页记一行当时状态（内核/阶段/
+位置），把「没等完」与「真失败」区分开。
+
+### 软件内核失败进闭环
+
+失败先分类：错误全文里正则辨认 `Server returned
+(\d{3})` → HTTP 类；NSURLError 域或超时/连接类
+文本 → 网络类；Invalid data / moov not found /
+decoder not found 等或 KSPlayer 码 5/9/17 → 格式类；
+其余未分类。接法：HTTP/网络类不换内核（这类 CDN
+的签名地址逐请求被拒是已知特性，同一地址换内核
+同样被拒），走原恢复阶梯重新取址（退避 0.8/1.5/
+2.5/4/6 秒、预算 6 次/3 刷新沿用），阶梯重开时按
+记忆/探针重新路由；加载超时（30 秒）与无推进
+卡死（20 秒）按网络类同样进阶梯；格式类才换另
+一内核；未分类沿旧行为（没试过系统内核先换它）；
+双内核都败或预算耗尽才落失败页，失败页呈现软件
+内核的真实错误原文。
+
+### MP4 结构探针（日志级，不改路由）
+
+格式探针判定 MP4 后并发跑：先拉头部 64KB 解析
+顶层盒子（ftyp 主品牌 + 兼容品牌列表）；moov 不在
+头部时按 Content-Range 总长拉尾部 128KB 定位；
+解析 trak（hdlr 定轨道、stsd 首条目给编码类型、
+视频条目带宽高）。日记样例：`结构探针：ftyp 主品牌
+isom · 兼容 isom/iso2/avc1/mp41 · moov 在头部
+（偏移 40）· 视频 avc1 1280×720 · 音频 mp4a`。
+专为解释 -12848 在品牌/编码/盒子哪一层拒收、给
+后续对齐轮留档；拉取或解析失败只记一行结论。
+
+### 播放页安全区定位（用户截图追加）
+
+竖屏顶栏贴状态栏、底部选集条压 Home 指示条的根因：
+chrome 的 GeometryReader 自带 ignoresSafeArea，其
+proxy.safeAreaInsets 恒为 0，旧版 padding 实际为
+0/2pt。**改**：顶栏、底部控件块、选集条、徽章与
+锁钮的定位一律改读 UIKit key window 的
+safeAreaInsets（windowSafeInsets 助手，不经
+SwiftUI 安全区传播、恒为设备真实值），GeometryReader
+只保留取尺寸/判横竖屏的职责。
+
+**待真机验（build 6）**：点第 134 集，预期日记出现
+「软件视图已入窗 → 软件内核状态序列 → 软件内核
+首帧已渲染（视图状态：…）→ 路由：软件内核播成功」
+且画面真出画；若仍黑屏，日记会有「在播但画面未
+上屏」行或状态序列停在哪一步的实据。竖屏播放页
+顶栏应落在状态栏下方、选集条在 Home 指示条上方。
+
 ## 全量对齐表（2026-11-27 修复轮 5 结束时状态）
 
 状态含义：**已对齐** = 与 Flutter 版行为一致；**本轮补齐** = 本轮

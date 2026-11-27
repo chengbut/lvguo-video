@@ -1102,6 +1102,335 @@ final class MediaFormatProbe: NSObject, URLSessionDataDelegate {
     }
 }
 
+// MARK: - MP4 结构探针
+
+/// MP4 结构探针（修复轮 6，日志级）：格式探针判定
+/// 为 MP4 后，分段拉取解析盒子结构——ftyp 主品牌/
+/// 兼容品牌、moov 位置、各轨道 stsd 首条目的编码
+/// 类型与视频分辨率——解释 AVPlayer 在盒子/编码层
+/// 拒收（-12848）的深层原因、给后续对齐轮留档。
+/// 本轮只记日记，不据此改路由。
+/// 步骤：先拉头部 64KB 解析顶层盒子；moov 盒头不在
+/// 头部（或在头部但盒身被截断）时，按 Content-Range
+/// 总长拉尾部 128KB 再定位解析。任一步失败只记一行
+/// 结论，绝不阻断播放。
+final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
+    private static let headBytes = 65536
+    private static let tailBytes = 131072
+
+    private var session: URLSession?
+    private var received = Data()
+    private var totalLength: Int64 = -1
+    private var status = 0
+    private var stage = 0 // 0 = 头部，1 = 尾部
+    private var finished = false
+    private let url: URL
+    private let headers: [String: String]
+    private let sourceId: String
+    private let completion: (String) -> Void
+    private var headSummary = ""
+
+    private init(
+        url: URL, headers: [String: String], sourceId: String,
+        completion: @escaping (String) -> Void
+    ) {
+        self.url = url
+        self.headers = headers
+        self.sourceId = sourceId
+        self.completion = completion
+    }
+
+    static func start(
+        url: URL, headers: [String: String], sourceId: String,
+        completion: @escaping (String) -> Void
+    ) -> MP4StructureProbe {
+        let probe = MP4StructureProbe(
+            url: url, headers: headers, sourceId: sourceId,
+            completion: completion
+        )
+        probe.fetch(range: "bytes=0-\(headBytes - 1)")
+        return probe
+    }
+
+    private func fetch(range: String) {
+        session?.finishTasksAndInvalidate()
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        request.setValue(range, forHTTPHeaderField: "Range")
+        let configuration = URLSessionConfiguration.ephemeral
+        ProxySettings.configure(
+            configuration,
+            effective: ProxySettings.effective(
+                forModule: sourceId.isEmpty ? nil : sourceId
+            )
+        )
+        received = Data()
+        let session = URLSession(
+            configuration: configuration, delegate: self, delegateQueue: nil
+        )
+        self.session = session
+        session.dataTask(with: request).resume()
+    }
+
+    private func finish(_ line: String) {
+        guard !finished else { return }
+        finished = true
+        session?.invalidateAndCancel()
+        session = nil
+        let completion = self.completion
+        DispatchQueue.main.async { completion(line) }
+    }
+
+    // MARK: URLSessionDataDelegate
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        if let http = response as? HTTPURLResponse {
+            status = http.statusCode
+            if let range = http.value(forHTTPHeaderField: "Content-Range"),
+               let total = range.split(separator: "/").last,
+               let value = Int64(total) {
+                totalLength = value
+            } else if http.statusCode == 200 {
+                totalLength = http.expectedContentLength
+            }
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
+    ) {
+        received.append(data)
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            let nsError = error as NSError
+            if stage == 0 {
+                finish("结构探针：头部拉取失败（\(nsError.domain) \(nsError.code)）")
+            } else {
+                finish("结构探针：\(headSummary) · 尾部拉取失败（\(nsError.domain) \(nsError.code)）")
+            }
+            return
+        }
+        let bytes = [UInt8](received)
+        if stage == 0 {
+            guard let parsed = Self.parseTopLevel(bytes, baseOffset: 0) else {
+                finish("结构探针：头部未见 ftyp（状态 \(status)，\(bytes.count) 字节）")
+                return
+            }
+            headSummary = parsed.summary
+            if parsed.moovParsed {
+                finish("结构探针：\(parsed.summary)")
+                return
+            }
+            // moov 不在头部窗口内：总长已知且文件比头部
+            // 窗口大时拉尾部再找；否则就此收尾
+            guard totalLength > Int64(bytes.count) else {
+                finish("结构探针：\(parsed.summary) · moov 未在头部窗口内定位")
+                return
+            }
+            stage = 1
+            let start = max(0, totalLength - Int64(Self.tailBytes))
+            fetch(range: "bytes=\(start)-\(totalLength - 1)")
+        } else {
+            let base = max(0, totalLength - Int64(bytes.count))
+            if let parsed = Self.parseTopLevel(bytes, baseOffset: Int(base)),
+               parsed.moovFound {
+                finish("结构探针：\(headSummary) · \(parsed.moovSummary)")
+            } else {
+                finish("结构探针：\(headSummary) · moov 未在尾部窗口内定位到盒头")
+            }
+        }
+    }
+
+    // MARK: 盒子解析（纯函数，只读字节）
+
+    private struct TopLevel {
+        var summary = ""
+        var moovFound = false
+        var moovParsed = false
+        var moovSummary = ""
+    }
+
+    private struct Box {
+        var type: String
+        var start: Int // 盒头在整个文件中的偏移
+        var size: Int // 含盒头的总长（解析范围内截断时为窗口剩余）
+        var header: Int // 盒头长（8 或 16）
+        var truncated: Bool
+    }
+
+    private static func u16(_ bytes: [UInt8], _ offset: Int) -> Int {
+        guard offset >= 0, offset + 2 <= bytes.count else { return 0 }
+        return Int(bytes[offset]) << 8 | Int(bytes[offset + 1])
+    }
+
+    private static func u32(_ bytes: [UInt8], _ offset: Int) -> Int {
+        guard offset >= 0, offset + 4 <= bytes.count else { return 0 }
+        return Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16
+            | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3])
+    }
+
+    private static func u64(_ bytes: [UInt8], _ offset: Int) -> Int {
+        let hi = u32(bytes, offset)
+        let lo = u32(bytes, offset + 4)
+        return hi << 32 | lo
+    }
+
+    private static func typeName(_ bytes: [UInt8], _ offset: Int) -> String {
+        guard offset >= 0, offset + 4 <= bytes.count else { return "" }
+        return String(bytes: bytes[offset..<(offset + 4)], encoding: .ascii) ?? ""
+    }
+
+    /// 扫描一段字节里的顶层盒子（from/to 是字节数组下标）
+    private static func scanBoxes(
+        _ bytes: [UInt8], from: Int, to: Int, baseOffset: Int
+    ) -> [Box] {
+        var boxes: [Box] = []
+        var cursor = from
+        while cursor + 8 <= to {
+            var size = u32(bytes, cursor)
+            let type = typeName(bytes, cursor + 4)
+            var header = 8
+            if size == 1 {
+                size = u64(bytes, cursor + 8)
+                header = 16
+            } else if size == 0 {
+                size = to - cursor
+            }
+            guard size >= header, !type.isEmpty else { break }
+            let available = to - cursor
+            boxes.append(Box(
+                type: type, start: baseOffset + cursor,
+                size: min(size, available), header: header,
+                truncated: size > available
+            ))
+            if size > available { break }
+            cursor += size
+        }
+        return boxes
+    }
+
+    private static func parseTopLevel(
+        _ bytes: [UInt8], baseOffset: Int
+    ) -> TopLevel? {
+        let boxes = scanBoxes(bytes, from: 0, to: bytes.count, baseOffset: baseOffset)
+        guard let ftyp = boxes.first, ftyp.type == "ftyp" else { return nil }
+        var result = TopLevel()
+        // ftyp 内容：主品牌(4) + 次版本(4) + 兼容品牌(每 4)
+        let contentStart = ftyp.start - baseOffset + ftyp.header
+        let contentEnd = ftyp.start - baseOffset + ftyp.size
+        var brands: [String] = []
+        if contentStart + 4 <= bytes.count {
+            brands.append("主品牌 \(typeName(bytes, contentStart))")
+        }
+        var compatibles: [String] = []
+        var cursor = contentStart + 8
+        while cursor + 4 <= contentEnd, cursor + 4 <= bytes.count {
+            let brand = typeName(bytes, cursor)
+            if !brand.isEmpty { compatibles.append(brand) }
+            cursor += 4
+        }
+        if !compatibles.isEmpty {
+            brands.append("兼容 \(compatibles.joined(separator: "/"))")
+        }
+        result.summary = "ftyp \(brands.joined(separator: " · "))"
+        guard let moov = boxes.first(where: { $0.type == "moov" }) else {
+            return result
+        }
+        result.moovFound = true
+        let moovLocal = moov.start - baseOffset
+        let location = baseOffset == 0 ? "头部" : "尾部"
+        if moov.truncated {
+            result.moovSummary = "moov 在\(location)（偏移 \(moov.start)，盒身超出窗口未完整解析）"
+            return result
+        }
+        let tracks = parseMoov(
+            bytes, from: moovLocal + moov.header,
+            to: moovLocal + moov.size, baseOffset: baseOffset
+        )
+        result.moovParsed = true
+        result.moovSummary = "moov 在\(location)（偏移 \(moov.start)）"
+            + (tracks.isEmpty ? "" : " · \(tracks.joined(separator: " · "))")
+        result.summary += " · \(result.moovSummary)"
+        return result
+    }
+
+    /// 解析 moov 内的 trak：hdlr 定轨道类型，stsd 首
+    /// 条目给编码类型，视频条目另带宽高
+    private static func parseMoov(
+        _ bytes: [UInt8], from: Int, to: Int, baseOffset: Int
+    ) -> [String] {
+        var lines: [String] = []
+        for trak in scanBoxes(bytes, from: from, to: to, baseOffset: baseOffset)
+        where trak.type == "trak" && !trak.truncated {
+            let trakStart = trak.start - baseOffset
+            guard let mdia = scanBoxes(
+                bytes, from: trakStart + trak.header,
+                to: trakStart + trak.size, baseOffset: baseOffset
+            ).first(where: { $0.type == "mdia" && !$0.truncated }) else { continue }
+            let mdiaStart = mdia.start - baseOffset
+            let mdiaChildren = scanBoxes(
+                bytes, from: mdiaStart + mdia.header,
+                to: mdiaStart + mdia.size, baseOffset: baseOffset
+            )
+            var handler = ""
+            if let hdlr = mdiaChildren.first(where: { $0.type == "hdlr" }) {
+                // hdlr 内容：版本/标志(4) + pre_defined(4) + handler(4)
+                let at = hdlr.start - baseOffset + hdlr.header + 8
+                handler = typeName(bytes, at)
+            }
+            guard let minf = mdiaChildren.first(
+                where: { $0.type == "minf" && !$0.truncated }
+            ) else { continue }
+            let minfStart = minf.start - baseOffset
+            guard let stbl = scanBoxes(
+                bytes, from: minfStart + minf.header,
+                to: minfStart + minf.size, baseOffset: baseOffset
+            ).first(where: { $0.type == "stbl" && !$0.truncated }) else { continue }
+            let stblStart = stbl.start - baseOffset
+            guard let stsd = scanBoxes(
+                bytes, from: stblStart + stbl.header,
+                to: stblStart + stbl.size, baseOffset: baseOffset
+            ).first(where: { $0.type == "stsd" }) else { continue }
+            // stsd 内容：版本/标志(4) + 条目数(4) + 条目
+            // （条目：长(4) + 类型(4) + 内容）
+            let entryAt = stsd.start - baseOffset + stsd.header + 8
+            guard entryAt + 8 <= bytes.count else { continue }
+            let codec = typeName(bytes, entryAt + 4)
+            switch handler {
+            case "vide":
+                // 视觉样本条目：宽在条目头 +32、高 +34
+                var line = "视频 \(codec)"
+                if entryAt + 36 <= bytes.count {
+                    let width = u16(bytes, entryAt + 32)
+                    let height = u16(bytes, entryAt + 34)
+                    if width > 0, height > 0 {
+                        line += " \(width)×\(height)"
+                    }
+                }
+                lines.append(line)
+            case "soun":
+                lines.append("音频 \(codec)")
+            default:
+                lines.append("轨道(\(handler.isEmpty ? "?" : handler)) \(codec)")
+            }
+        }
+        return lines
+    }
+}
+
 /// 软件内核控制通道：引擎在软件内核模式下把
 /// play/pause/seek/倍速/静音/截图转发给实际的内核
 /// 表面（SoftwarePlayerView 装载时注册，卸载时注销），
@@ -1113,6 +1442,15 @@ protocol SoftwareKernelControlling: AnyObject {
     func kernelSetRate(_ rate: Float)
     func kernelSetMuted(_ muted: Bool)
     func kernelSnapshot() async -> CGImage?
+    /// 首帧是否已真正渲染（渲染视图拿到过解码帧；
+    /// 位置推进是墙钟推算、与渲染无关，不能单独作数）
+    func kernelHasRenderedFrame() -> Bool
+    /// 渲染视图是否已上屏（在 window 内、frame 非零、未隐藏）
+    func kernelIsPresented() -> Bool
+    /// 视图状态一句话（window/frame/hidden/父链），供日记取证
+    func kernelViewStateDescription() -> String
+    /// 强制重挂渲染视图（在播但未上屏时的一次自愈）
+    func kernelRehost()
 }
 
 // MARK: - 播放引擎
@@ -1222,6 +1560,17 @@ final class PlaybackEngine: ObservableObject {
     private var triedAVPlayerThisChain = false
     private var chainSuccessRecorded = false
     private var lastProgressCallbackAt = Date.distantPast
+    // 软件内核可观测（修复轮 6）：状态日志去重、就绪
+    // 时刻、首帧证据、未上屏标记、心跳节流；每次软件
+    // 内核尝试（startSoftwareKernel）重置
+    private var softwareLastStateName = ""
+    private var softwareReadyAt: Date?
+    private var softwareFirstFrameSeen = false
+    private var softwareNotPresentedLogged = false
+    private var softwareLastHeartbeatAt = Date.distantPast
+    /// MP4 结构探针（修复轮 6，日志级）：格式探针判定
+    /// 为 MP4 时并发跑，结果只进日记、不改路由
+    private var activeStructureProbe: MP4StructureProbe?
     private var itemStatusObservation: NSKeyValueObservation?
     private var presentationObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
@@ -1329,6 +1678,18 @@ final class PlaybackEngine: ObservableObject {
                 if let verdict {
                     self.probeVerdict = verdict
                     DiaryStore.shared.add(verdict.diaryLine)
+                    // MP4 结构探针（修复轮 6）：解析 ftyp
+                    // 品牌 / moov 位置 / 轨道编码，解释
+                    // 系统内核 -12848 拒收的深层原因；
+                    // 只记日记，不据此改路由
+                    if verdict.container == "MP4", let probeURL = request.url {
+                        self.activeStructureProbe = MP4StructureProbe.start(
+                            url: probeURL, headers: request.headers,
+                            sourceId: request.sourceId
+                        ) { line in
+                            DiaryStore.shared.add(line)
+                        }
+                    }
                     // 探针晚于最终失败到达时，补进失败页
                     if self.phase == .failed,
                        !self.failureText.contains("格式探针") {
@@ -1568,6 +1929,11 @@ final class PlaybackEngine: ObservableObject {
         triedSoftwareThisChain = true
         activeKernel = .software
         softwareRequest = request
+        softwareLastStateName = ""
+        softwareReadyAt = nil
+        softwareFirstFrameSeen = false
+        softwareNotPresentedLogged = false
+        softwareLastHeartbeatAt = Date.distantPast
         phase = .loading
         if !recovering {
             loadingMessage = "正在用软件内核打开"
@@ -1583,25 +1949,195 @@ final class PlaybackEngine: ObservableObject {
         }
     }
 
-    /// 软件内核失败（表面 coordinator 回调）：本链还没
-    /// 试过系统内核 → 同计划换系统内核再试；两边都
-    /// 失败 → 走原失败流程（格式类按确认计数收口）
+    /// 软件内核失败分类（修复轮 6）：错误对象全文里
+    /// 辨认——FFmpeg 的 HTTP 错误经 av_strerror 给出
+    /// 「Server returned 403 Forbidden (access denied)」
+    /// 类原文（底层 AVError 的 message），挂在
+    /// KSPlayerErrorDomain 错误的 NSUnderlyingErrorKey 上
+    enum SoftwareFailureKind: Equatable {
+        case http(Int)
+        case network
+        case format
+        case other
+
+        var diaryText: String {
+            switch self {
+            case .http(let code): return "HTTP \(code)"
+            case .network: return "网络类"
+            case .format: return "格式类"
+            case .other: return "未分类"
+            }
+        }
+    }
+
+    static func classifySoftwareFailure(
+        error: NSError?, message: String
+    ) -> SoftwareFailureKind {
+        var texts: [String] = [message]
+        var domains: [String] = []
+        var topDomain = ""
+        var topCode = 0
+        var current = error
+        var isTop = true
+        while let item = current {
+            domains.append(item.domain)
+            if isTop {
+                topDomain = item.domain
+                topCode = item.code
+                isTop = false
+            }
+            texts.append(item.localizedDescription)
+            if let underlying = item.userInfo[NSUnderlyingErrorKey] as? NSError {
+                current = underlying
+            } else if let underlying = item.userInfo[NSUnderlyingErrorKey] {
+                // AVError 等非 NSError 底层错误：描述里
+                // 带 FFmpeg 原始码与 av_strerror 文本
+                texts.append(String(describing: underlying))
+                current = nil
+            } else {
+                current = nil
+            }
+        }
+        let joined = texts.joined(separator: " ").lowercased()
+        if let regex = try? NSRegularExpression(
+            pattern: "server returned\\s+(\\d{3})"
+        ), let match = regex.firstMatch(
+            in: joined, range: NSRange(joined.startIndex..., in: joined)
+        ), let range = Range(match.range(at: 1), in: joined),
+           let code = Int(joined[range]) {
+            return .http(code)
+        }
+        if domains.contains(NSURLErrorDomain)
+            || joined.contains("timed out") || joined.contains("timeout")
+            || joined.contains("connection") || joined.contains("network")
+            || joined.contains("unreachable") || joined.contains("could not resolve")
+            || joined.contains("nodename") || joined.contains("offline") {
+            return .network
+        }
+        if joined.contains("invalid data") || joined.contains("moov atom not found")
+            || joined.contains("decoder not found")
+            || joined.contains("demuxer not found")
+            || joined.contains("could not find codec")
+            || joined.contains("unsupported") {
+            return .format
+        }
+        // KSPlayerErrorDomain 的码：5 = formatFindStreamInfo、
+        // 9 = codecContextFindDecoder、17 = videoTracksUnplayable
+        if topDomain.contains("KSPlayer"), [5, 9, 17].contains(topCode) {
+            return .format
+        }
+        return .other
+    }
+
+    /// 软件内核错误的完整原文（失败页呈现用）：
+    /// 域/码/描述 + 底层错误（含 FFmpeg 原始码与文本）
+    static func softwareErrorText(_ error: NSError) -> String {
+        var text = "\(error.domain) code \(error.code)：\(error.localizedDescription)"
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] {
+            text += "（底层：\(sanitizedDiagnosticValue(underlying))）"
+        }
+        return text
+    }
+
+    /// 软件内核失败的错误全文落盘（与系统内核侧
+    /// logItemDiagnostics 同格式，地址脱敏）
+    private func logSoftwareError(_ error: NSError) {
+        DiaryStore.shared.add(
+            "播放器错误[软件]：\(error.domain) code \(error.code)"
+        )
+        for (key, value) in error.userInfo.sorted(by: { $0.key < $1.key }) {
+            if key == NSLocalizedDescriptionKey { continue }
+            DiaryStore.shared.add(
+                "  \(key) = \(Self.sanitizedDiagnosticValue(value))"
+            )
+        }
+    }
+
+    /// 软件内核失败（无错误对象的看门狗路径）：超时与
+    /// 卡死按网络类处理——重新取址是唯一可用的解法，
+    /// 且受恢复预算约束不会无限重试
     func softwareKernelFailed(_ message: String) {
+        softwareKernelFailed(message: message, error: nil, forcedKind: .network)
+    }
+
+    /// 软件内核失败（coordinator 回调，带错误对象）：
+    /// 先分类再进与系统内核相同的闭环（修复轮 6）：
+    /// HTTP/网络类——这类 CDN 的签名地址逐请求被拒是
+    /// 已知特性，同一地址换内核同样被拒，不换内核，
+    /// 走恢复阶梯重新取址（退避与预算沿用）；格式类
+    /// 才换另一个内核；未分类沿旧行为（没试过系统
+    /// 内核先换它）；双内核都败或预算耗尽才落失败
+    /// 页，失败页呈现软件内核的真实错误原文
+    func softwareKernelFailed(message: String, error: NSError?) {
+        softwareKernelFailed(message: message, error: error, forcedKind: nil)
+    }
+
+    private func softwareKernelFailed(
+        message: String, error: NSError?, forcedKind: SoftwareFailureKind?
+    ) {
         guard activeKernel == .software else { return }
-        DiaryStore.shared.add("软件内核失败：\(message)")
+        let kind = forcedKind
+            ?? Self.classifySoftwareFailure(error: error, message: message)
+        DiaryStore.shared.add("软件内核失败（\(kind.diaryText)）：\(message)")
+        if let error {
+            logSoftwareError(error)
+        }
+        let fullText = error.map { Self.softwareErrorText($0) } ?? message
+        switch kind {
+        case .http, .network:
+            handleFailure(
+                reason: "open_exception", raw: fullText, formatFatal: false
+            )
+        case .format:
+            if !triedAVPlayerThisChain {
+                swapToAVPlayerAfterSoftwareFailure()
+            } else {
+                handleFailure(
+                    reason: "open_exception", raw: fullText, formatFatal: true
+                )
+            }
+        case .other:
+            if !triedAVPlayerThisChain {
+                swapToAVPlayerAfterSoftwareFailure()
+            } else {
+                handleFailure(
+                    reason: "open_exception", raw: fullText,
+                    formatFatal: chainFormatFatal
+                )
+            }
+        }
+    }
+
+    /// 软件内核失败后换系统内核同计划再试（表面随
+    /// activeKernel 翻转被播放页 dismantle）
+    private func swapToAVPlayerAfterSoftwareFailure() {
         softwareRequest = nil
         activeKernel = .avplayer
-        if !triedAVPlayerThisChain, var current = currentRequest {
-            DiaryStore.shared.add("路由：软件内核失败，换系统内核")
-            if currentTime > 1 {
-                current.startPosition = currentTime
-            }
-            installAVPlayer(current, generation: loadGeneration)
-            return
+        guard var current = currentRequest else { return }
+        DiaryStore.shared.add("路由：软件内核失败，换系统内核")
+        if currentTime > 1 {
+            current.startPosition = currentTime
         }
-        handleFailure(
-            reason: "open_exception", raw: message,
-            formatFatal: chainFormatFatal
+        installAVPlayer(current, generation: loadGeneration)
+    }
+
+    /// 软件内核状态变化（coordinator 转发 KSPlayerState
+    /// 的 description）：全程进日记（修复轮 6），连续
+    /// 重复状态去重，避免 buffering 抖动刷满日记环
+    func noteSoftwareState(_ name: String) {
+        guard activeKernel == .software else { return }
+        guard name != softwareLastStateName else { return }
+        softwareLastStateName = name
+        DiaryStore.shared.add("软件内核状态：\(name)")
+    }
+
+    /// 软件内核首帧已渲染（coordinator 以渲染视图
+    /// 拿到解码帧为准）：记一行视图状态作上屏证据
+    func noteSoftwareFirstFrame() {
+        guard activeKernel == .software, !softwareFirstFrameSeen else { return }
+        softwareFirstFrameSeen = true
+        DiaryStore.shared.add(
+            "软件内核首帧已渲染（视图状态：\(softwareControl?.kernelViewStateDescription() ?? "无视图")）"
         )
     }
 
@@ -1610,6 +2146,9 @@ final class PlaybackEngine: ObservableObject {
     /// recordChainSuccessIfNeeded）
     func noteSoftwareReady() {
         guard activeKernel == .software else { return }
+        if softwareReadyAt == nil {
+            softwareReadyAt = Date()
+        }
         phase = .ready
         isStalled = false
     }
@@ -1653,6 +2192,31 @@ final class PlaybackEngine: ObservableObject {
             lastProgressAt = Date()
         }
         recordChainSuccessIfNeeded(kernel: .software, position: time)
+        // 呈现检查（修复轮 6）：已就绪 5 秒后仍未满足
+        // 上屏条件（首帧已渲染 + 视图在 window 内且
+        // frame 非零）→ 明确记「在播但画面未上屏」并
+        // 触发一次重挂自愈，与「真失败」区分开
+        if phase == .ready, !softwareNotPresentedLogged,
+           let readyAt = softwareReadyAt,
+           Date().timeIntervalSince(readyAt) > 5,
+           !(softwareFirstFrameSeen
+             && (softwareControl?.kernelIsPresented() ?? false)) {
+            softwareNotPresentedLogged = true
+            DiaryStore.shared.add(
+                "软件内核在播但画面未上屏（视图状态：\(softwareControl?.kernelViewStateDescription() ?? "无视图")）"
+            )
+            softwareControl?.kernelRehost()
+        }
+        // 心跳（每 10 秒一行）：软件内核不再是黑箱，
+        // 挂起时能看到位置停在哪、呈现状态如何
+        if Date().timeIntervalSince(softwareLastHeartbeatAt) > 10 {
+            softwareLastHeartbeatAt = Date()
+            let presented = softwareFirstFrameSeen
+                && (softwareControl?.kernelIsPresented() ?? false)
+            DiaryStore.shared.add(
+                "软件内核心跳：位置 \(Int(time)) / 总长 \(Int(duration)) · 缓冲 \(Int(buffered)) · \(presented ? "已上屏" : "未上屏")"
+            )
+        }
         if Date().timeIntervalSince(lastProgressCallbackAt) > 5 {
             lastProgressCallbackAt = Date()
             onProgress?(currentTime, self.duration)
@@ -1674,13 +2238,22 @@ final class PlaybackEngine: ObservableObject {
 
     /// 「播成功」的统一判定：进入 ready 且播放位置已
     /// 越过起始位置 1 秒以上（不是打开没报错就算数）。
-    /// 命中后把内核按来源记住（变化才落盘与记日记）
+    /// 命中后把内核按来源记住（变化才落盘与记日记）。
+    /// 软件内核再加严（修复轮 6）：其位置是墙钟推算
+    /// （MEPlayerItem.currentPlaybackTime = 时钟 - 起始
+    /// 时刻，与帧渲染无关），1.4 真机出现过「记了播
+    /// 成功、画面全黑」的假阳性——必须同时有首帧
+    /// 渲染证据且渲染视图真在 window 内、frame 非零
     private func recordChainSuccessIfNeeded(
         kernel: PlaybackKernel, position: Double
     ) {
         guard !chainSuccessRecorded, phase == .ready,
               let request = currentRequest else { return }
         guard position > request.startPosition + 1 else { return }
+        if kernel == .software {
+            guard softwareFirstFrameSeen,
+                  softwareControl?.kernelIsPresented() ?? false else { return }
+        }
         chainSuccessRecorded = true
         if KernelMemoryStore.shared.record(kernel, for: request) {
             DiaryStore.shared.add(
@@ -1969,6 +2542,23 @@ final class PlaybackEngine: ObservableObject {
         }
         failureText = text
         DiaryStore.shared.add("播放失败：\(text)")
+    }
+
+    /// 用户退出播放页（播放页 onDisappear 调用）：
+    /// 把「没等完就退出」与「真失败」在日记里区分开
+    /// （修复轮 6：1.4 真机三集无成功无失败行，事后
+    /// 无法判断是挂起还是用户提前退出）
+    func notePlayerPageExited() {
+        let phaseText: String
+        switch phase {
+        case .idle: phaseText = "idle"
+        case .loading: phaseText = "loading"
+        case .ready: phaseText = "ready"
+        case .failed: phaseText = "failed"
+        }
+        DiaryStore.shared.add(
+            "用户退出播放页（当时状态：\(activeKernel.displayName) · 阶段 \(phaseText) · 位置 \(Int(currentTime)) / 总长 \(Int(duration))）"
+        )
     }
 
     /// 手动重试：清恢复预算，重新走取址（没有取址器时重开当前请求）
