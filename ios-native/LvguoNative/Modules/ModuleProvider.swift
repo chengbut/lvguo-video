@@ -117,7 +117,21 @@ struct ModuleProvider {
             ? " · 凭据 [无]"
             : " · 凭据 [\(credentialKeys.sorted().joined(separator: ", "))]"
         DiaryStore.shared.add(line)
-        // 疑似解密相关字段名：子串匹配（key/kid/drm/
+        // 已知密钥字段（修复轮 10 已按老版口径接线）：
+        // cencKey / decryptionKey 是计划自带密钥的正
+        // 规字段，单独记一行——仍然只记名，值只由
+        // MediaPlan 解析在内存里使用
+        let knownKeyFields = ["cencKey", "decryptionKey"]
+        let presentKnown = knownKeyFields.filter {
+            outerKeys.contains($0) || variantKeys.contains($0)
+                || credentialKeys.contains($0)
+        }
+        if !presentKnown.isEmpty {
+            DiaryStore.shared.add(
+                "计划字段审计：含计划自带密钥字段 [\(presentKnown.joined(separator: ", "))]（值不记录，随所选变体使用）"
+            )
+        }
+        // 其余疑似解密相关字段名：子串匹配（key/kid/drm/
         // pssh/license/decrypt/cenc/widevine/fairplay），
         // 命中只说明「有这个名字」，不取其值
         let needles = [
@@ -126,7 +140,8 @@ struct ModuleProvider {
         ]
         let allNames = outerKeys + variantKeys.sorted() + credentialKeys.sorted()
         let suspects = Array(Set(allNames.filter { name in
-            needles.contains { name.lowercased().contains($0) }
+            !knownKeyFields.contains(name)
+                && needles.contains { name.lowercased().contains($0) }
         })).sorted()
         if !suspects.isEmpty {
             DiaryStore.shared.add(

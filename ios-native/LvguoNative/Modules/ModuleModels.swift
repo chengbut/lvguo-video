@@ -238,6 +238,12 @@ struct MediaVariant {
     var playlistText: String = ""
     var headers: [String: String] = [:]
     var durationMs: Int64 = 0
+    /// 计划自带的 CENC 解密密钥（对应 Go jsMedia 的
+    /// cencKey 字段，老版经它解开 encv/enca 流），已
+    /// 归一化成 FFmpeg decryption_key 用的 hex 串。
+    /// 红线：只在内存里流转——绝不落盘、绝不进日记
+    /// 与失败页，日记只记「有/无」。
+    var decryptionKeyHex: String = ""
 
     var isPlayable: Bool { !url.isEmpty || !playlistText.isEmpty }
 }
@@ -253,9 +259,55 @@ struct MediaPlan {
     /// 模块只回了内嵌播放列表文本、没有 URL 时非空（经本地代理播放）
     var playlistText: String = ""
     var durationMs: Int64 = 0
+    /// 所选变体自带的 CENC 密钥（hex；红线同 MediaVariant）
+    var decryptionKeyHex: String = ""
     var variants: [MediaVariant] = []
 
     var isPlayable: Bool { !url.isEmpty || !playlistText.isEmpty }
+
+    /// 计划自带的 CENC 密钥 → hex 串（修复轮 10，对齐
+    /// 老版链路：Go jsMedia.cencKey 是 []byte，JSON 形
+    /// 态为 base64 串；Go 转 hex 后经 mpv 的
+    /// demuxer-lavf-o decryption_key 传给 FFmpeg mov
+    /// 解复用器）。只接受能严格解出的 16 字节：32 位
+    /// hex 串、base64 串、字节数组；其余一律当无密钥。
+    /// 返回值只在内存流转，绝不写日记/落盘。
+    private static func cencKeyHex(from value: Any?) -> String {
+        func hexString(_ bytes: [UInt8]) -> String? {
+            bytes.count == 16
+                ? bytes.map { String(format: "%02x", $0) }.joined()
+                : nil
+        }
+        switch value {
+        case let text as String:
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.count == 32, trimmed.allSatisfy({ $0.isHexDigit }) {
+                var bytes: [UInt8] = []
+                var index = trimmed.startIndex
+                while index < trimmed.endIndex {
+                    let next = trimmed.index(index, offsetBy: 2)
+                    guard let byte = UInt8(trimmed[index..<next], radix: 16)
+                    else { return "" }
+                    bytes.append(byte)
+                    index = next
+                }
+                if let result = hexString(bytes) { return result }
+            }
+            if let data = Data(base64Encoded: trimmed) {
+                return hexString([UInt8](data)) ?? ""
+            }
+            return ""
+        case let array as [Any]:
+            var bytes: [UInt8] = []
+            for item in array {
+                guard let number = item as? NSNumber else { return "" }
+                bytes.append(UInt8(truncating: number))
+            }
+            return hexString(bytes) ?? ""
+        default:
+            return ""
+        }
+    }
 
     /// 一个媒体字典（外层或某个变体）→ 变体：凭据展开成请求头
     private static func variant(
@@ -268,11 +320,22 @@ struct MediaPlan {
         if JSON.dictString(source["referer"]).isEmpty, let fallback {
             source["referer"] = fallback["referer"]
         }
+        if source["cencKey"] == nil, let fallback {
+            source["cencKey"] = fallback["cencKey"]
+        }
         var variant = MediaVariant()
         variant.quality = JSON.dictInt(source["quality"])
         variant.url = JSON.dictString(source["url"])
         variant.playlistText = JSON.dictString(source["playlist"])
         variant.durationMs = JSON.dictInt64(source["durationMs"])
+        // 密钥随变体（老版 Go 同口径：nativePlan.Key 取
+        // 所选那条线路自己的 CENCKey）；变体缺时已按
+        // 上面的回落取外层，decryptionKey 是计划级
+        // hex 形态的兜底字段名
+        variant.decryptionKeyHex = cencKeyHex(from: source["cencKey"])
+        if variant.decryptionKeyHex.isEmpty {
+            variant.decryptionKeyHex = cencKeyHex(from: source["decryptionKey"])
+        }
         var referer = JSON.dictString(source["referer"])
         if let credentials = MediaCredentials.parse(source["credentials"]) {
             if !credentials.cookie.isEmpty {
@@ -314,6 +377,7 @@ struct MediaPlan {
         plan.quality = effective.quality
         plan.durationMs = effective.durationMs
         plan.headers = effective.headers
+        plan.decryptionKeyHex = effective.decryptionKeyHex
         if plan.variants.isEmpty {
             plan.variants = [outer]
         }

@@ -480,7 +480,8 @@ struct DramaDetailView: View {
                 quality: variant.quality,
                 url: URL(string: variant.url),
                 playlistText: variant.playlistText.isEmpty ? nil : variant.playlistText,
-                headers: variant.headers
+                headers: variant.headers,
+                decryptionKeyHex: variant.decryptionKeyHex
             )
         }
         return PlaybackRequest(
@@ -492,7 +493,8 @@ struct DramaDetailView: View {
             variants: variants,
             quality: plan.quality,
             sourceId: provider.manifest.id,
-            expectedDuration: Double(plan.durationMs) / 1000
+            expectedDuration: Double(plan.durationMs) / 1000,
+            decryptionKeyHex: plan.decryptionKeyHex
         )
     }
 

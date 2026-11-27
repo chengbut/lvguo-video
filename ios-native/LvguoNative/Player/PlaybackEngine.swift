@@ -12,6 +12,9 @@ struct PlaybackVariant {
     var url: URL? = nil
     var playlistText: String? = nil
     var headers: [String: String] = [:]
+    /// 该变体自带的 CENC 密钥（hex；只在内存流转，
+    /// 绝不进日记/失败页，口径见 MediaVariant）
+    var decryptionKeyHex: String = ""
 
     var label: String { quality > 0 ? "\(quality)P" : "默认" }
 
@@ -38,6 +41,10 @@ struct PlaybackRequest {
     var sourceId: String = ""
     /// 计划声明的时长（秒，模块 durationMs）：用于识别「提前结束」
     var expectedDuration: Double = 0
+    /// 当前所选变体自带的 CENC 密钥（hex；只在内存
+    /// 流转，绝不进日记/失败页）：有值时加密流固定
+    /// 走软件内核并经 FFmpeg decryption_key 传入
+    var decryptionKeyHex: String = ""
 
     var isPlayable: Bool { url != nil || playlistText != nil }
 
@@ -48,6 +55,7 @@ struct PlaybackRequest {
         copy.playlistText = variant.playlistText
         copy.headers = variant.headers
         copy.quality = variant.quality
+        copy.decryptionKeyHex = variant.decryptionKeyHex
         return copy
     }
 }
@@ -2015,6 +2023,17 @@ final class PlaybackEngine: ObservableObject {
         auditCoversChosen = auditTargets.contains {
             $0.isSelected && $0.url != nil && $0.url == request.url
         }
+        // 选流依据一行（修复轮 10）：与老版 Go 核心
+        // nativePlaybackChoices 对照后的结论——默认
+        // 规则一致（可播变体按画质降序、取最高，密钥
+        // 随所选变体），差异只在老版另有「用户指定画
+        // 质时过滤到该画质」一档，原生播放侧暂无此
+        // 偏好项，默认路径两边等价
+        if let selected = auditTargets.first(where: { $0.isSelected }) {
+            DiaryStore.shared.add(
+                "变体选择：#\(selected.number) \(selected.label)（与老版一致的选流规则：可播变体中画质最高）"
+            )
+        }
         // 直链计划：并发发一次 16 字节格式探针（不阻断
         // 播放），结果进日记；失败定性与失败页摘要用它
         activeProbe = nil
@@ -2109,6 +2128,20 @@ final class PlaybackEngine: ObservableObject {
     /// 选前同一口径）。
     private func openWithRouting(_ request: PlaybackRequest, generation: Int) {
         currentRequest = request
+        // 计划自带密钥（修复轮 10）：系统内核没有
+        // CENC 解密口，带密钥的计划固定走软件内核
+        // （密钥经 FFmpeg decryption_key 传入，见
+        // SoftwarePlayerSurface.makeOptions）——优先
+        // 级高于内核记忆，与老版「密钥随所选变体、
+        // 播放器必带钥打开」同一条链路
+        if !request.decryptionKeyHex.isEmpty, request.url != nil,
+           !request.isLocal {
+            DiaryStore.shared.add(
+                "路由：计划自带密钥，加密流固定走软件内核（系统内核无 CENC 解密口）"
+            )
+            startSoftwareKernel(request, generation: generation)
+            return
+        }
         let memoryKernel = KernelMemoryStore.shared.kernel(for: request)
         if let memoryKernel {
             DiaryStore.shared.add(
@@ -2134,6 +2167,8 @@ final class PlaybackEngine: ObservableObject {
         var playlistText: String?
         var headers: [String: String]
         var isSelected: Bool
+        /// 该变体是否自带 CENC 密钥（只记有无，绝不记值）
+        var hasKey: Bool
         /// 改选时 withVariant 的原材料；隐含目标为 nil
         var variant: PlaybackVariant?
     }
@@ -2171,6 +2206,7 @@ final class PlaybackEngine: ObservableObject {
                 playlistText: variant.playlistText,
                 headers: variant.headers,
                 isSelected: selected,
+                hasKey: !variant.decryptionKeyHex.isEmpty,
                 variant: variant
             ))
         }
@@ -2182,6 +2218,7 @@ final class PlaybackEngine: ObservableObject {
                 playlistText: nil,
                 headers: request.headers,
                 isSelected: true,
+                hasKey: !request.decryptionKeyHex.isEmpty,
                 variant: nil
             ), at: 0)
             for index in targets.indices {
@@ -2230,6 +2267,8 @@ final class PlaybackEngine: ObservableObject {
         case .encrypted(let scheme, let hasDefaultKID):
             if !scheme.isEmpty { tracks.append("方案 \(scheme)") }
             tracks.append(hasDefaultKID ? "默认 KID 有" : "默认 KID 无")
+            // 密钥只记存在性（修复轮 10 红线）
+            if target.hasKey { tracks.append("计划自带密钥：有") }
             return "\(head) → 加密（\(tracks.joined(separator: " · "))）"
         case .plaintext:
             return "\(head) → 明文（\(tracks.joined(separator: " · "))）"
@@ -2308,6 +2347,11 @@ final class PlaybackEngine: ObservableObject {
     /// 如实失败（不进恢复阶梯：重取地址只会再拿到
     /// 同一批加密变体）。整体 12 秒未出结论按原
     /// 计划打开，迟到的结论只落审计行、不再改选。
+    /// 修复轮 10 的优先级调整：所选变体自带密钥时
+    /// 排在明文优先之前（不改选，路由层固定软件内
+    /// 核带钥打开）；所选无密钥、无明文时再改选自
+    /// 带密钥的加密变体；「全部加密不可解」只在无
+    /// 任何变体带密钥时成立。
     private func runVariantGate(
         targets: [VariantAuditTarget], selected: VariantAuditTarget,
         request: PlaybackRequest, generation: Int
@@ -2343,6 +2387,16 @@ final class PlaybackEngine: ObservableObject {
                 decide(nil, false)
                 return
             }
+            // 所选变体自带密钥（修复轮 10）：不改选，
+            // 按原计划打开——路由层会固定走软件内核
+            // 并把密钥经 decryption_key 传入（老版同
+            // 一条链路：选流规则决定选哪条，密钥随
+            // 所选变体走）。明文优先只是所选无密钥时
+            // 的兜底，排在它后面
+            if selected.hasKey {
+                decide(nil, false)
+                return
+            }
             let urlTargets = targets.filter { Self.isHTTP($0.url) }
             let plaintext = urlTargets
                 .sorted(by: { $0.number < $1.number })
@@ -2363,6 +2417,30 @@ final class PlaybackEngine: ObservableObject {
                 decide(switched, false)
                 return
             }
+            // 无明文变体时再退一步：改选自带密钥的
+            // 加密变体（软件内核带钥打开）
+            let keyed = urlTargets
+                .sorted(by: { $0.number < $1.number })
+                .first { target in
+                    guard target.hasKey, target.variant != nil else {
+                        return false
+                    }
+                    if case .encrypted = verdicts[target.number] ?? .unknown("") {
+                        return true
+                    }
+                    return false
+                }
+            if let keyed, let variant = keyed.variant {
+                DiaryStore.shared.add(
+                    "变体 #\(selected.number) \(selected.label) 为加密流且无自带密钥，改选自带密钥的变体 #\(keyed.number) \(keyed.label)"
+                )
+                var switched = request.withVariant(variant)
+                if self.currentTime > 1 {
+                    switched.startPosition = self.currentTime
+                }
+                decide(switched, false)
+                return
+            }
             let hasPlaylistFallback = targets.contains {
                 $0.url == nil && $0.playlistText != nil
             }
@@ -2372,7 +2450,10 @@ final class PlaybackEngine: ObservableObject {
                 }
                 return false
             }
-            decide(nil, allEncrypted && !hasPlaylistFallback)
+            // 全部加密「不可解」的定性只在没有任何
+            // 变体自带密钥时成立
+            let anyKeyed = urlTargets.contains { $0.hasKey }
+            decide(nil, allEncrypted && !anyKeyed && !hasPlaylistFallback)
         }
     }
 
@@ -2612,6 +2693,11 @@ final class PlaybackEngine: ObservableObject {
             }
         }
         softwareRequest = routed
+        // 密钥使用只记存在性（修复轮 10 红线）：值经
+        // makeOptions 进 FFmpeg 选项字典，不经过这里
+        if !routed.decryptionKeyHex.isEmpty {
+            DiaryStore.shared.add("计划自带密钥：有，已使用（随软件内核打开传入）")
+        }
         phase = .loading
         if !recovering {
             loadingMessage = "正在用软件内核打开"

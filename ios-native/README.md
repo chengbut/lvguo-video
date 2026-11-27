@@ -561,6 +561,27 @@ input into NAL units」正是把加密样本当明文
 直接是如实文案。字段审计若报出疑似解密字段
 名，只报存在、等定夺，不在本轮使用。
 
+## 修复轮 10（2026-11-27）：计划自带密钥接线 + 选流规则对照（1.4 build 10）
+
+新事实（用户 2026-11-27 19:14 亲口确认）：同一集在老版 Flutter 2.0.4 现在就能播，且模块计划里自带钥匙。代码对照（老版 `~/workspace/guoapp-lvguo`）把链路定死：
+
+- **密钥链路（老版）**：模块 resolveMedia 返回的媒体字典带 `cencKey` 字段（Go `jsMedia.CENCKey []byte`，JSON 形态为 base64 串），**每条变体各带各的**；Go 核心 `nativeOpenPlayback` 把所选线路的 CENCKey 转 hex 写进扁平计划的 `decryptionKey`；Dart `PlaybackPlan.decryptionKey` 透传；mpv 打开时经 `demuxer-lavf-o` 带上 `decryption_key=<hex>`——即 FFmpeg mov 解复用器的标准解密选项。原生移植的漏点：`MediaPlan.parse` 从来没读 `cencKey`，密钥在解析层就被丢掉，两个内核都只能把加密样本当明文解——这才是 build 8 满屏 NAL 红字与系统内核 -12848 的完整解释（轮 9 的「无密钥不可解」只对了一半：钥匙一直在计划里，是宿主没接）。
+- **选流规则对照**：老版 Go `nativePlaybackChoices`——候选 = 外层 + 全部变体（仅 http(s)、按 地址+Referer+双钥 去重），**按画质稳定降序**，用户在播放偏好里指定了画质且该画质存在时先过滤到该画质，默认开第 0 条（最高画质），恢复「下一条线路」按同序递增。原生 `MediaPlan.parse` 默认规则同为「可播变体中画质最高」，**默认路径两边等价**（原生选到变体 9 不是选错，是选中了加密的那条且没带钥）。差异仅一处：老版的「指定画质过滤」一档原生播放侧暂无对应偏好项，本轮只记差异、不新增设置项。
+- **三条规则的关系**：选流规则（老版口径）决定「选哪条」；密钥随所选变体走、带钥打开（本轮接线，优先级最高）；明文优先（轮 9）只是所选变体**无密钥**时的兜底。优先级：所选带钥 → 原样带钥打开（软件内核）；所选无钥且加密 → 改选明文变体；无明文 → 改选自带密钥的加密变体；全加密且无任何密钥 → 如实失败。
+
+本轮实现（全部宿主通用行为，不碰模块文件/module-config/签名逻辑；密钥只从模块计划数据里取）：
+
+- **解析**（Modules/ModuleModels.swift）：`MediaVariant`/`MediaPlan` 新增 `decryptionKeyHex`；`variant(from:)` 读 `cencKey`（变体缺时回落外层，同凭据口径；`decryptionKey` hex 串作兜底字段名），经 `cencKeyHex` 归一化——只接受能严格解出的 16 字节（32 位 hex 串 / base64 串 / 字节数组），与 Go 的 `[]byte` JSON 解码 + hex 转写等价。
+- **传递**：`DramaDetailView.requestFromPlan` 把密钥写进 `PlaybackVariant`/`PlaybackRequest`（`withVariant` 改选时随新变体走）。
+- **路由**（Player/PlaybackEngine.swift `openWithRouting`）：请求带密钥且非本地 → 固定走软件内核（记日记「路由：计划自带密钥，加密流固定走软件内核（系统内核无 CENC 解密口）」），优先级高于内核记忆；`startSoftwareKernel` 落一行「计划自带密钥：有，已使用（随软件内核打开传入）」。
+- **注入**（Player/SoftwarePlayerView.swift `makeOptions`）：`KSOptions.formatContextOptions["decryption_key"] = <hex>`——KSPlayer 2.3.4 的 MEPlayerItem 把 formatContextOptions 原样喂给 `avformat_open_input`，与 mpv 的 demuxer-lavf-o 同一选项。回环代理路径下内核打开的是代理地址、字节流不变，解密照常生效。
+- **门控调整**（轮 9 的 `runVariantGate`）：所选加密但自带密钥 → 不改选、按原计划开；全加密失败定性新增「无任何变体带密钥」前提；审计行对带钥的加密变体追加「计划自带密钥：有」。
+- **选流依据日志**：load() 落一行「变体选择：#N 标注（与老版一致的选流规则：可播变体中画质最高）」。
+- **字段审计调整**（Modules/ModuleProvider.swift）：`cencKey`/`decryptionKey` 列为已知密钥字段，单独记「含计划自带密钥字段 […]（值不记录，随所选变体使用）」；其余疑似字段维持只报存在、不使用。
+- **红线**：密钥值绝不进日记、失败页、落盘文件；日记只记「有/无/已使用」。本轮未覆盖：下载侧的 CENC 处理（老版下载转码带 `-decryption_key`，原生下载链路未接，后续轮次处理）。
+
+待真机验：装 build 10 播同一集——预期日记出现「计划字段审计：含计划自带密钥字段 [cencKey]」→「变体审计：#N … → 加密（… · 计划自带密钥：有）」→「路由：计划自带密钥，加密流固定走软件内核」→「计划自带密钥：有，已使用」，且出画有声。若仍无画，看 FFmpeg 行是否还报 NAL 错误（报 = 密钥形态与预期不符，把审计行与字段审计行发回）。
+
 ## 全量对齐表（2026-11-27 修复轮 5 结束时状态）
 
 状态含义：**已对齐** = 与 Flutter 版行为一致；**本轮补齐** = 本轮

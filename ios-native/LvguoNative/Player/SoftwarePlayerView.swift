@@ -226,6 +226,15 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         let options = KSOptions()
         // 凭据头（Referer/User-Agent/Cookie 等）整体透传
         options.appendHeader(request.headers)
+        // 计划自带 CENC 密钥（修复轮 10）：经 KSPlayer
+        // 的 formatContextOptions 进 avformat_open_input
+        // 的选项字典，即 FFmpeg mov 解复用器的标准
+        // decryption_key 选项——与老版 mpv 的
+        // demuxer-lavf-o decryption_key= 同一口子。
+        // 红线：值只进选项字典，绝不进日记/失败页
+        if !request.decryptionKeyHex.isEmpty {
+            options.formatContextOptions["decryption_key"] = request.decryptionKeyHex
+        }
         if request.startPosition > 0 {
             options.startPlayTime = request.startPosition
         }
