@@ -320,7 +320,7 @@ struct PlayerPage: View {
                         )
                         .padding(.top, portrait ? proxy.safeAreaInsets.top + 6 : 0)
                         .padding(.trailing, portrait ? 12 : 0)
-                        .padding(.leading, portrait ? 0 : proxy.safeAreaInsets.left + 10)
+                        .padding(.leading, portrait ? 0 : proxy.safeAreaInsets.leading + 10)
                 }
                 .ignoresSafeArea()
             }
@@ -827,7 +827,7 @@ struct PlayerPage: View {
                             .font(.system(size: 34))
                             .foregroundStyle(.white)
                             .frame(width: 72, height: 72)
-                            .background(Color.black.opacity(0.4), in: Circle())
+                            .glassEffect(.regular, in: Circle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -845,7 +845,7 @@ struct PlayerPage: View {
                                 .font(.system(size: 28))
                                 .foregroundStyle(.white)
                                 .frame(width: 68, height: 68)
-                                .background(Color.black.opacity(0.4), in: Circle())
+                                .glassEffect(.regular, in: Circle())
                         }
                         .buttonStyle(.plain)
                         .padding(.trailing, 20)
@@ -964,12 +964,12 @@ struct PlayerPage: View {
                 }
                 .padding(.top, insets.top)
                 .padding(.bottom, insets.bottom + 2)
-                .padding(.leading, insets.left)
-                .padding(.trailing, insets.right)
+                .padding(.leading, insets.leading)
+                .padding(.trailing, insets.trailing)
 
                 lockButton(peekOnly: false)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    .padding(.leading, insets.left + 10)
+                    .padding(.leading, insets.leading + 10)
             }
         }
         .ignoresSafeArea()
@@ -1159,6 +1159,8 @@ struct PlayerPage: View {
         .foregroundStyle(.white)
         .buttonStyle(.plain)
         .padding(.horizontal, 16)
+        .glassEffect(.regular, in: Capsule())
+        .padding(.horizontal, 12)
     }
 
     private var episodeStripTitle: String {
@@ -1582,6 +1584,7 @@ struct PlaybackSettingsSheet: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
             .navigationTitle("播放设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1590,6 +1593,10 @@ struct PlaybackSettingsSheet: View {
                 }
             }
         }
+        // 设置 sheet 背景用原生液态玻璃材质（用户 2026-11-27
+        // 定：能用原生液态玻璃的地方要用），List 自带底色已
+        // 在上方 scrollContentBackground(.hidden) 让出
+        .presentationBackground(.ultraThinMaterial)
         .onChange(of: eqBrightness) { _, _ in applyEQ() }
         .onChange(of: eqContrast) { _, _ in applyEQ() }
         .onChange(of: eqSaturation) { _, _ in applyEQ() }
@@ -1685,5 +1692,6 @@ struct EpisodeGridSheet: View {
                 }
             }
         }
+        .presentationBackground(.ultraThinMaterial)
     }
 }
