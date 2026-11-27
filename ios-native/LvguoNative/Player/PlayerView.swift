@@ -846,6 +846,9 @@ struct PlayerPage: View {
                     dismiss()
                 }
                 .buttonStyle(.glass)
+                Text(AppVersion.display)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.45))
             }
             .padding(24)
         }

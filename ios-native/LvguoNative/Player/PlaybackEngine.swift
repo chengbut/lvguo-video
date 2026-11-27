@@ -84,11 +84,60 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         var response: HTTPURLResponse?
     }
 
+    /// 流式加载的逐任务状态：Range 透传、服务器忽略 Range 时
+    /// 的丢字节对齐、播放列表正文嗅探（#EXTM3U）缓冲。
+    private struct StreamingState {
+        var request: AVAssetResourceLoadingRequest
+        var entry: Entry
+        var key: String
+        var response: HTTPURLResponse?
+        /// 本任务实际发出的 Range 起点（0 = 没发 Range）
+        var requestedFrom: Int64 = 0
+        /// 服务器对 Range 请求回 200 时要丢弃的响应前缀字节数
+        var skipBytes: Int64 = 0
+        /// 嗅探缓冲：判定是否播放列表前先攒住、不回数据
+        var sniffBuffer = Data()
+        var sniffDecided = false
+        /// 已回给播放器的字节数（诊断计数）
+        var respondedBytes: Int64 = 0
+    }
+
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
-    private var pending: [Int: AVAssetResourceLoadingRequest] = [:]
-    private var pendingEntry: [Int: Entry] = [:]
+    private var pending: [Int: StreamingState] = [:]
     private var wholeLoads: [Int: WholeLoad] = [:]
+    /// 改写时记录的子资源角色（key → 改写后地址 → 角色），
+    /// 供子请求诊断日志标注密钥/初始化段/媒体组等路径类型
+    private var roles: [String: [String: String]] = [:]
+    /// 分片成功计数（按 key）：日志采样，避免刷满日记
+    private var segmentOKCounts: [String: Int] = [:]
+
+    /// 播放列表的内容类型：必须是系统注册的 UTI
+    /// （UTType(filenameExtension:"m3u8") = com.apple.mpegurl）。
+    /// 此前写死 "public.m3u8" 不是注册 UTI，AVPlayer 无法据此
+    /// 认定资产是播放列表，是 Cannot Open 的头号嫌疑。
+    static let playlistContentType =
+        UTType(filenameExtension: "m3u8")?.identifier ?? "com.apple.mpegurl"
+
+    /// 诊断用地址分类：只给路径类型与主机名，
+    /// 不带路径明细、查询与签名参数。
+    static func classify(_ url: URL?) -> String {
+        guard let url else { return "无地址" }
+        let host = url.host ?? "?"
+        let kind: String
+        switch url.pathExtension.lowercased() {
+        case "m3u8": kind = "播放列表"
+        case "ts": kind = "分片TS"
+        case "m4s": kind = "分片fMP4"
+        case "mp4", "m4v", "mov": kind = "媒体文件"
+        case "aac", "mp3": kind = "音频"
+        case "vtt": kind = "字幕"
+        case "key": kind = "密钥"
+        case "": kind = "无扩展名资源"
+        default: kind = "其他(\(url.pathExtension.lowercased()))"
+        }
+        return "\(kind)@\(host)"
+    }
 
     /// 播放请求走的会话：带资源设置里的代理（模块单独设置
     /// 优先，其次全局）。代理 generation 或来源变化时重建，
@@ -131,7 +180,21 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
     func unregister(_ key: String) {
         lock.lock()
         entries.removeValue(forKey: key)
+        roles.removeValue(forKey: key)
+        segmentOKCounts.removeValue(forKey: key)
         lock.unlock()
+    }
+
+    /// 子请求诊断描述：真实地址的类型/主机 + 改写时记录的角色
+    private func requestDescription(key: String, wrapped: URL?, real: URL?) -> String {
+        var text = Self.classify(real)
+        lock.lock()
+        let role = wrapped.flatMap { roles[key]?[$0.absoluteString] }
+        lock.unlock()
+        if let role {
+            text += "（\(role)）"
+        }
+        return text
     }
 
     /// URL 的已编码路径/查询（经 URLComponents 取，
@@ -204,10 +267,9 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         didCancel loadingRequest: AVAssetResourceLoadingRequest
     ) {
         lock.lock()
-        var taskId = pending.first(where: { $0.value === loadingRequest })?.key
+        var taskId = pending.first(where: { $0.value.request === loadingRequest })?.key
         if let found = taskId {
             pending.removeValue(forKey: found)
-            pendingEntry.removeValue(forKey: found)
         }
         if taskId == nil {
             taskId = wholeLoads.first(where: { $0.value.request === loadingRequest })?.key
@@ -234,12 +296,15 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         _ text: String, entry: Entry, key: String,
         request: AVAssetResourceLoadingRequest
     ) {
-        let rewritten = Self.rewritePlaylist(
+        let rewritten = rewritePlaylist(
             text, responseURL: entry.baseURL, key: key, entry: entry
         )
-        let data = Data(rewritten.utf8)
+        DiaryStore.shared.add(
+            "子请求 播放列表文本 → 本地合成（\(rewritten.summary)）"
+        )
+        let data = Data(rewritten.text.utf8)
         if let info = request.contentInformationRequest {
-            info.contentType = "public.m3u8"
+            info.contentType = Self.playlistContentType
             info.contentLength = Int64(data.count)
             info.isByteRangeAccessSupported = false
         }
@@ -266,11 +331,17 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         for (name, value) in entry.headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
+        // Range 必须按 requestedOffset 发：新数据请求的
+        // currentOffset 一开始就等于 requestedOffset，旧写法
+        // 判 currentOffset == 0 导致偏移请求从不带 Range、
+        // 整段数据被塞到错误偏移上，资产直接损坏打不开。
+        var requestedFrom: Int64 = 0
         if let dataRequest = loadingRequest.dataRequest,
            !dataRequest.requestsAllDataToEndOfResource {
             let start = dataRequest.requestedOffset
             let length = dataRequest.requestedLength
-            if dataRequest.currentOffset == 0, start > 0 || length > 0 {
+            if start > 0 || length > 0 {
+                requestedFrom = start
                 if length > 0 {
                     request.setValue("bytes=\(start)-\(start + Int64(length) - 1)", forHTTPHeaderField: "Range")
                 } else {
@@ -280,8 +351,10 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         }
         let task = session.dataTask(with: request)
         lock.lock()
-        pending[task.taskIdentifier] = loadingRequest
-        pendingEntry[task.taskIdentifier] = entry
+        pending[task.taskIdentifier] = StreamingState(
+            request: loadingRequest, entry: entry, key: key,
+            requestedFrom: requestedFrom
+        )
         lock.unlock()
         task.resume()
     }
@@ -340,10 +413,10 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
         lock.lock()
-        let streaming = pending[dataTask.taskIdentifier]
+        let state = pending[dataTask.taskIdentifier]
         let whole = wholeLoads[dataTask.taskIdentifier]
         lock.unlock()
-        guard streaming != nil || whole != nil else {
+        guard state != nil || whole != nil else {
             completionHandler(.cancel)
             return
         }
@@ -351,59 +424,75 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
            !(200...299).contains(http.statusCode) {
             completionHandler(.cancel)
             lock.lock()
-            let failedStreaming = pending.removeValue(forKey: dataTask.taskIdentifier)
-            pendingEntry.removeValue(forKey: dataTask.taskIdentifier)
+            let failedState = pending.removeValue(forKey: dataTask.taskIdentifier)
             let failedWhole = wholeLoads.removeValue(forKey: dataTask.taskIdentifier)
             lock.unlock()
-            (failedStreaming ?? failedWhole?.request)?.finishLoading(with: NSError(
+            if let failedState {
+                DiaryStore.shared.add(
+                    "子请求 \(requestDescription(key: failedState.key, wrapped: failedState.request.request.url, real: response.url)) → HTTP \(http.statusCode)（失败）"
+                )
+            } else if let failedWhole {
+                DiaryStore.shared.add(
+                    "子请求 \(requestDescription(key: failedWhole.key, wrapped: failedWhole.request.request.url, real: response.url)) → HTTP \(http.statusCode)（失败）"
+                )
+            }
+            (failedState?.request ?? failedWhole?.request)?.finishLoading(with: NSError(
                 domain: "LvguoPlayback", code: http.statusCode,
                 userInfo: [NSLocalizedDescriptionKey: "媒体请求失败（HTTP \(http.statusCode)）"]
             ))
             return
         }
-        if let whole = whole {
+        if whole != nil {
             // 整表加载：先记下响应（最终地址是改写的解析基准），数据收齐后再回内容信息
             lock.lock()
             wholeLoads[dataTask.taskIdentifier]?.response = response as? HTTPURLResponse
             lock.unlock()
-            _ = whole
             completionHandler(.allow)
             return
+        }
+        guard var state, let http = response as? HTTPURLResponse else {
+            completionHandler(.allow)
+            return
+        }
+        state.response = http
+        // 服务器没理会 Range（回 200 而非 206）：喂数据时先
+        // 丢掉 requestedFrom 个字节，把偏移对齐回去，否则
+        // 播放器拿到错位字节流、资产打不开
+        if state.requestedFrom > 0, http.statusCode == 200 {
+            state.skipBytes = state.requestedFrom
         }
         // 流式任务收到播放列表响应（无 .m3u8 后缀的列表地址）：
-        // 此时数据还没开始流，转成整表模式以便改写地址
-        if let streaming,
-           let http = response as? HTTPURLResponse {
-            let mime = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
-                .lowercased()
-            if mime.contains("mpegurl") || mime.contains("m3u8") {
-                lock.lock()
-                pending.removeValue(forKey: dataTask.taskIdentifier)
-                let entry = pendingEntry.removeValue(forKey: dataTask.taskIdentifier)
-                if let entry {
-                    wholeLoads[dataTask.taskIdentifier] = WholeLoad(
-                        request: streaming, entry: entry,
-                        key: dataTask.originalRequest?.url?.host ?? "",
-                        response: http
-                    )
-                }
-                lock.unlock()
-                completionHandler(.allow)
-                return
-            }
-        }
-        guard let loadingRequest = streaming,
-              let info = loadingRequest.contentInformationRequest,
-              let http = response as? HTTPURLResponse else {
+        // 此时数据还没开始流，转成整表模式以便改写地址。
+        // 只对整表 200 转，206 分段的列表走正文嗅探后重拉整表。
+        let mime = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
+            .lowercased()
+        if http.statusCode == 200,
+           mime.contains("mpegurl") || mime.contains("m3u8") {
+            lock.lock()
+            pending.removeValue(forKey: dataTask.taskIdentifier)
+            wholeLoads[dataTask.taskIdentifier] = WholeLoad(
+                request: state.request, entry: state.entry,
+                key: state.key, response: http
+            )
+            lock.unlock()
             completionHandler(.allow)
             return
         }
-        let mime = http.value(forHTTPHeaderField: "Content-Type")?
+        lock.lock()
+        pending[dataTask.taskIdentifier] = state
+        lock.unlock()
+        guard let info = state.request.contentInformationRequest else {
+            completionHandler(.allow)
+            return
+        }
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")?
             .split(separator: ";").first.map(String.init) ?? ""
-        if let type = UTType(mimeType: mime.trimmingCharacters(in: .whitespaces)) {
+        if let type = UTType(mimeType: contentType.trimmingCharacters(in: .whitespaces)) {
             info.contentType = type.identifier
         }
-        var length: Int64 = http.expectedContentLength
+        // 内容长度必须如实：206 时 expectedContentLength 只是
+        // 本段长度，全长只认 Content-Range 的总数部分
+        var length: Int64 = http.statusCode == 200 ? http.expectedContentLength : -1
         var byteRangeSupported = false
         if let range = http.value(forHTTPHeaderField: "Content-Range"),
            let total = range.split(separator: "/").last, let value = Int64(total) {
@@ -417,58 +506,240 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         completionHandler(.allow)
     }
 
+    /// 正文嗅探：去掉 BOM 与空白后是否已能判定为播放列表。
+    /// true = 是列表；false = 确定不是；nil = 字节还不够判定
+    private static func sniffPlaylist(_ data: Data) -> Bool? {
+        var bytes = [UInt8](data.prefix(32))
+        if bytes.count >= 3, bytes[0] == 0xEF, bytes[1] == 0xBB, bytes[2] == 0xBF {
+            bytes.removeFirst(3)
+        }
+        var index = 0
+        while index < bytes.count,
+              bytes[index] == 0x20 || bytes[index] == 0x09
+                || bytes[index] == 0x0A || bytes[index] == 0x0D {
+            index += 1
+        }
+        let magic = [UInt8]("#EXTM3U".utf8)
+        var matched = 0
+        while index < bytes.count, matched < magic.count {
+            guard bytes[index] == magic[matched] else { return false }
+            index += 1
+            matched += 1
+        }
+        return matched == magic.count ? true : nil
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
-        let streaming = pending[dataTask.taskIdentifier]
         let isWhole = wholeLoads[dataTask.taskIdentifier] != nil
         if isWhole {
             wholeLoads[dataTask.taskIdentifier]?.data.append(data)
         }
+        var state = pending[dataTask.taskIdentifier]
         lock.unlock()
         if isWhole { return }
-        guard let streaming, let dataRequest = streaming.dataRequest else { return }
-        dataRequest.respond(with: data)
+        guard var state else { return }
+
+        var chunk = data
+        if !state.sniffDecided {
+            state.sniffBuffer.append(chunk)
+            let verdict = Self.sniffPlaylist(state.sniffBuffer)
+            if verdict == nil, state.sniffBuffer.count < 4096 {
+                // 还判不了：先攒着，等下一块数据
+                lock.lock()
+                pending[dataTask.taskIdentifier] = state
+                lock.unlock()
+                return
+            }
+            if verdict == true {
+                if state.response?.statusCode == 200 {
+                    // 播放列表被当普通资源流式发来（地址无 .m3u8
+                    // 后缀且 Content-Type 含糊，这类 CDN 常见）：
+                    // 转整表模式收齐、改写地址后再回，否则列表
+                    // 里的子地址绕开代理或根本不被认成列表，
+                    // 资产直接 Cannot Open
+                    lock.lock()
+                    pending.removeValue(forKey: dataTask.taskIdentifier)
+                    wholeLoads[dataTask.taskIdentifier] = WholeLoad(
+                        request: state.request, entry: state.entry,
+                        key: state.key, data: state.sniffBuffer,
+                        response: state.response
+                    )
+                    lock.unlock()
+                    DiaryStore.shared.add(
+                        "子请求 \(requestDescription(key: state.key, wrapped: state.request.request.url, real: state.response?.url)) 正文嗅探为播放列表，转整表改写"
+                    )
+                } else {
+                    // 206 分段只拿到列表一截：取消本任务，
+                    // 以整表方式重拉同一资源请求
+                    let loadingRequest = state.request
+                    let entry = state.entry
+                    let key = state.key
+                    let wrapped = state.request.request.url
+                    lock.lock()
+                    pending.removeValue(forKey: dataTask.taskIdentifier)
+                    lock.unlock()
+                    DiaryStore.shared.add(
+                        "子请求 \(requestDescription(key: key, wrapped: wrapped, real: state.response?.url)) 分段响应嗅探为播放列表，改整表重拉"
+                    )
+                    dataTask.cancel()
+                    if let wrapped {
+                        startWholeLoad(
+                            url: wrapped, entry: entry, key: key,
+                            loadingRequest: loadingRequest
+                        )
+                    }
+                }
+                return
+            }
+            // 确定不是列表：把嗅探缓冲整段按流式回放
+            state.sniffDecided = true
+            chunk = state.sniffBuffer
+            state.sniffBuffer = Data()
+        }
+        if state.skipBytes > 0 {
+            let drop = min(Int64(chunk.count), state.skipBytes)
+            state.skipBytes -= drop
+            if drop > 0 {
+                chunk = chunk.subdata(in: Int(drop)..<chunk.count)
+            }
+        }
+        if !chunk.isEmpty, let dataRequest = state.request.dataRequest {
+            dataRequest.respond(with: chunk)
+            state.respondedBytes += Int64(chunk.count)
+        }
+        lock.lock()
+        pending[dataTask.taskIdentifier] = state
+        lock.unlock()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.lock()
-        let streaming = pending.removeValue(forKey: task.taskIdentifier)
-        pendingEntry.removeValue(forKey: task.taskIdentifier)
+        let state = pending.removeValue(forKey: task.taskIdentifier)
         let whole = wholeLoads.removeValue(forKey: task.taskIdentifier)
         lock.unlock()
         if let whole {
             finishWholeLoad(whole, response: task.response, error: error)
             return
         }
-        guard let streaming else { return }
+        guard let state else { return }
+        let loadingRequest = state.request
         if let error {
-            streaming.finishLoading(with: error)
+            let nsError = error as NSError
+            if nsError.domain != NSURLErrorDomain || nsError.code != NSURLErrorCancelled {
+                DiaryStore.shared.add(
+                    "子请求 \(requestDescription(key: state.key, wrapped: loadingRequest.request.url, real: task.originalRequest?.url)) 传输失败：\(nsError.domain) \(nsError.code)"
+                )
+            }
+            loadingRequest.finishLoading(with: error)
             return
         }
-        streaming.finishLoading()
+        // 嗅探没凑够字节任务就结束了（极短正文）：最后判定一次
+        if !state.sniffDecided, !state.sniffBuffer.isEmpty {
+            if Self.sniffPlaylist(state.sniffBuffer) == true {
+                finishWholeLoad(
+                    WholeLoad(
+                        request: loadingRequest, entry: state.entry,
+                        key: state.key, data: state.sniffBuffer,
+                        response: state.response
+                    ),
+                    response: task.response, error: nil
+                )
+                return
+            }
+            var chunk = state.sniffBuffer
+            if state.skipBytes > 0 {
+                let drop = min(Int64(chunk.count), state.skipBytes)
+                chunk = chunk.subdata(in: Int(drop)..<chunk.count)
+            }
+            if !chunk.isEmpty {
+                loadingRequest.dataRequest?.respond(with: chunk)
+            }
+        }
+        logStreamingCompletion(state, response: task.response)
+        loadingRequest.finishLoading()
+    }
+
+    /// 流式子请求完成日志：分片只记首个与每 25 个，
+    /// 其余类型逐个记，避免刷满 500 条日记环
+    private func logStreamingCompletion(_ state: StreamingState, response: URLResponse?) {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let description = requestDescription(
+            key: state.key, wrapped: state.request.request.url,
+            real: response?.url
+        )
+        if description.hasPrefix("分片") {
+            lock.lock()
+            let count = (segmentOKCounts[state.key] ?? 0) + 1
+            segmentOKCounts[state.key] = count
+            lock.unlock()
+            if count == 1 || count % 25 == 0 {
+                DiaryStore.shared.add(
+                    "子请求 \(description) → \(status)（第 \(count) 个分片，\(state.respondedBytes) 字节）"
+                )
+            }
+        } else {
+            DiaryStore.shared.add(
+                "子请求 \(description) → \(status)（\(state.respondedBytes) 字节）"
+            )
+        }
     }
 
     /// 整表加载收尾：改写地址 → 回内容信息（长度按改写后字节数）→ 回数据
     private func finishWholeLoad(_ whole: WholeLoad, response: URLResponse?, error: Error?) {
         let loadingRequest = whole.request
         if let error {
+            let nsError = error as NSError
+            if nsError.domain != NSURLErrorDomain || nsError.code != NSURLErrorCancelled {
+                DiaryStore.shared.add(
+                    "子请求 \(requestDescription(key: whole.key, wrapped: loadingRequest.request.url, real: whole.response?.url)) 传输失败：\(nsError.domain) \(nsError.code)"
+                )
+            }
             loadingRequest.finishLoading(with: error)
             return
         }
         guard let text = String(data: whole.data, encoding: .utf8) else {
+            // 解不开文本：把头两字节记下来（如 1F8B = 未被
+            // URLSession 解压的 gzip 残留），下次一眼定位
+            let magic = whole.data.prefix(2)
+                .map { String(format: "%02X", $0) }.joined()
+            DiaryStore.shared.add(
+                "子请求 \(requestDescription(key: whole.key, wrapped: loadingRequest.request.url, real: whole.response?.url)) 播放列表不是文本（头字节 \(magic)，\(whole.data.count) 字节）"
+            )
             loadingRequest.finishLoading(with: NSError(
                 domain: "LvguoPlayback", code: -5,
                 userInfo: [NSLocalizedDescriptionKey: "播放列表不是文本"]
             ))
             return
         }
+        // 内容校验（对齐 Go fetchMediaPlaylist）：200 回个
+        // HTML 错误页时正文不是 #EXTM3U 开头，旧写法照样改写
+        // 交给播放器，结果就是一句 Cannot Open；这里直接报明
+        let trimmed = text
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("#EXTM3U") else {
+            DiaryStore.shared.add(
+                "子请求 \(requestDescription(key: whole.key, wrapped: loadingRequest.request.url, real: whole.response?.url)) 播放列表内容无效（非 #EXTM3U 开头，前 40 字：\(Self.sanitizeDiagnosticText(String(trimmed.prefix(40))))）"
+            )
+            loadingRequest.finishLoading(with: NSError(
+                domain: "LvguoPlayback", code: -6,
+                userInfo: [NSLocalizedDescriptionKey: "站源未返回有效的播放列表，链接可能已失效"]
+            ))
+            return
+        }
         let finalURL = whole.response?.url ?? response?.url
-        let rewritten = Self.rewritePlaylist(
+        let rewritten = rewritePlaylist(
             text, responseURL: finalURL, key: whole.key, entry: whole.entry
         )
-        let data = Data(rewritten.utf8)
+        let status = whole.response?.statusCode
+            ?? (response as? HTTPURLResponse)?.statusCode ?? 0
+        DiaryStore.shared.add(
+            "子请求 \(requestDescription(key: whole.key, wrapped: loadingRequest.request.url, real: finalURL)) → \(status)，已改写（\(rewritten.summary)）"
+        )
+        let data = Data(rewritten.text.utf8)
         if let info = loadingRequest.contentInformationRequest {
-            info.contentType = "public.m3u8"
+            info.contentType = Self.playlistContentType
             info.contentLength = Int64(data.count)
             info.isByteRangeAccessSupported = false
         }
@@ -491,7 +762,7 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
     ) {
         // 跳转时系统会丢掉部分自定义头：把资源头重新贴回去
         lock.lock()
-        let entry = pendingEntry[task.taskIdentifier]
+        let entry = pending[task.taskIdentifier]?.entry
             ?? wholeLoads[task.taskIdentifier]?.entry
         lock.unlock()
         var request = request
@@ -509,52 +780,119 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
     /// 相对地址先对响应真实地址解析（对齐 Go NativeURL），
     /// 同源的走 /<path> 形态，跨源的走 /_ext/<base64url> 形态，
     /// 保证所有子请求都回到 delegate 并带上资源头。
-    static func rewritePlaylist(
+    /// 返回改写后文本与诊断摘要（子地址构成、是否加密、
+    /// 分片容器）；每个子地址的角色同时记进 roles，
+    /// 供后续子请求日志标注密钥/初始化段/媒体组/变体。
+    /// 覆盖面：独立行地址 + 任意标签的 URI="..." 属性
+    /// （EXT-X-KEY / EXT-X-MAP / EXT-X-MEDIA / EXT-X-PART 等
+    /// 都走同一条改写路径，漏改任一都会让该子请求绕开
+    /// 代理裸奔、进而 Cannot Open）。
+    func rewritePlaylist(
         _ text: String, responseURL: URL?, key: String, entry: Entry
-    ) -> String {
+    ) -> (text: String, summary: String) {
         let base = responseURL ?? entry.baseURL
-        func wrap(_ raw: String) -> String {
+        var wrappedRoles: [String: String] = [:]
+        var counts = (total: 0, keys: 0, maps: 0, medias: 0, variants: 0)
+        var hasEncryptionKey = false
+        var container = ""
+        var isMaster = false
+        func wrap(_ raw: String, role: String) -> String {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return raw }
-            if trimmed.hasPrefix("\(scheme)://") { return trimmed }
+            if trimmed.hasPrefix("\(Self.scheme)://") { return trimmed }
             let resolved = base.flatMap { URL(string: trimmed, relativeTo: $0)?.absoluteURL }
                 ?? URL(string: trimmed)
             guard let resolved else { return raw }
+            let wrapped: String
             if let base, resolved.scheme == base.scheme, resolved.host == base.host,
                resolved.port == base.port {
                 var components = URLComponents()
-                components.scheme = scheme
+                components.scheme = Self.scheme
                 components.host = key
-                let path = encodedPath(of: resolved)
+                let path = Self.encodedPath(of: resolved)
                 components.percentEncodedPath = path.isEmpty ? "/" : path
-                components.percentEncodedQuery = encodedQuery(of: resolved)
-                return components.url?.absoluteString ?? raw
+                components.percentEncodedQuery = Self.encodedQuery(of: resolved)
+                wrapped = components.url?.absoluteString ?? raw
+            } else {
+                let encoded = Data(resolved.absoluteString.utf8).base64URLEncodedString()
+                wrapped = "\(Self.scheme)://\(key)/_ext/\(encoded)"
             }
-            let encoded = Data(resolved.absoluteString.utf8).base64URLEncodedString()
-            return "\(scheme)://\(key)/_ext/\(encoded)"
+            if wrapped != raw {
+                wrappedRoles[wrapped] = role
+                counts.total += 1
+                switch role {
+                case "密钥": counts.keys += 1
+                case "初始化段": counts.maps += 1
+                case "媒体组": counts.medias += 1
+                case "变体列表": counts.variants += 1
+                default: break
+                }
+                if container.isEmpty {
+                    switch resolved.pathExtension.lowercased() {
+                    case "ts": container = "TS"
+                    case "m4s", "mp4": container = "fMP4"
+                    default: break
+                    }
+                }
+            }
+            return wrapped
         }
         var output: [String] = []
+        var previousWasStreamInf = false
         for rawLine in text.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("#") {
+                if line.hasPrefix("#EXT-X-STREAM-INF") { isMaster = true }
+                if line.hasPrefix("#EXT-X-KEY") || line.hasPrefix("#EXT-X-SESSION-KEY"),
+                   !line.contains("METHOD=NONE") {
+                    hasEncryptionKey = true
+                }
                 if let range = line.range(of: "URI=\"") {
                     let rest = line[range.upperBound...]
                     if let end = rest.firstIndex(of: "\"") {
                         let uri = String(rest[..<end])
                         let head = String(line[..<range.upperBound])
                         let tail = String(rest[end...])
-                        output.append(head + wrap(uri) + tail)
+                        let role: String
+                        if line.hasPrefix("#EXT-X-KEY") || line.hasPrefix("#EXT-X-SESSION-KEY") {
+                            role = "密钥"
+                        } else if line.hasPrefix("#EXT-X-MAP") {
+                            role = "初始化段"
+                        } else if line.hasPrefix("#EXT-X-MEDIA") {
+                            role = "媒体组"
+                        } else if line.hasPrefix("#EXT-X-PART") {
+                            role = "分片"
+                        } else {
+                            role = "标签资源"
+                        }
+                        output.append(head + wrap(uri, role: role) + tail)
+                        previousWasStreamInf = false
                         continue
                     }
                 }
                 output.append(rawLine)
+                previousWasStreamInf = line.hasPrefix("#EXT-X-STREAM-INF")
             } else if line.isEmpty {
                 output.append(rawLine)
             } else {
-                output.append(wrap(line))
+                output.append(wrap(line, role: previousWasStreamInf ? "变体列表" : "子资源"))
+                previousWasStreamInf = false
             }
         }
-        return output.joined(separator: "\n")
+        lock.lock()
+        var existing = roles[key] ?? [:]
+        existing.merge(wrappedRoles) { _, new in new }
+        roles[key] = existing
+        lock.unlock()
+        var summaryParts = ["子地址 \(counts.total)"]
+        if counts.variants > 0 { summaryParts.append("变体 \(counts.variants)") }
+        if counts.keys > 0 { summaryParts.append("密钥 \(counts.keys)") }
+        if counts.maps > 0 { summaryParts.append("初始化段 \(counts.maps)") }
+        if counts.medias > 0 { summaryParts.append("媒体组 \(counts.medias)") }
+        summaryParts.append(hasEncryptionKey ? "含加密KEY" : "无加密KEY")
+        if isMaster { summaryParts.append("主列表") }
+        if !container.isEmpty { summaryParts.append("分片容器 \(container)") }
+        return (output.joined(separator: "\n"), summaryParts.joined(separator: " · "))
     }
 }
 
@@ -654,6 +992,11 @@ final class PlaybackEngine: ObservableObject {
     @Published private(set) var abB: Double?
 
     private var loaderKey: String?
+    /// 本次 load 是否走了资源代理、是否已试过直连兜底，
+    /// 以及代理路径的失败原文（最终报错时与直连错误合并呈现）
+    private var currentLoadUsedProxy = false
+    private var triedDirectFallback = false
+    private var proxyFailureRaw = ""
     private var itemStatusObservation: NSKeyValueObservation?
     private var presentationObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
@@ -734,10 +1077,15 @@ final class PlaybackEngine: ObservableObject {
             resourceLoader.unregister(loaderKey)
             self.loaderKey = nil
         }
+        triedDirectFallback = false
+        proxyFailureRaw = ""
+        currentLoadUsedProxy = false
+        DiaryStore.shared.add("播放计划：\(Self.planSummary(request))")
 
         let asset: AVURLAsset
         let needsProxy = !request.headers.isEmpty || request.playlistText != nil
         if needsProxy, request.isPlayable {
+            currentLoadUsedProxy = true
             let key = resourceLoader.register(PlaybackResourceLoader.Entry(
                 baseURL: request.url,
                 headers: request.headers,
@@ -761,6 +1109,11 @@ final class PlaybackEngine: ObservableObject {
             return
         }
 
+        installItem(asset: asset, generation: generation)
+    }
+
+    /// 建 AVPlayerItem 并装上状态观察（首载与直连兜底共用）
+    private func installItem(asset: AVURLAsset, generation: Int) {
         let item = AVPlayerItem(asset: asset)
         applyVideoEQ(to: item)
         itemStatusObservation = item.observe(\AVPlayerItem.status, options: [.new]) { [weak self] item, _ in
@@ -787,7 +1140,27 @@ final class PlaybackEngine: ObservableObject {
                     }
                 case .failed:
                     let raw = Self.rawErrorText(item)
-                    self.handleFailure(reason: "open_exception", raw: raw)
+                    self.logItemDiagnostics(
+                        item, stage: self.triedDirectFallback ? "直连" : "代理"
+                    )
+                    if self.currentLoadUsedProxy, !self.triedDirectFallback,
+                       let request = self.currentRequest,
+                       request.url != nil, !request.isLocal {
+                        // 打开失败兜底（恢复阶梯新增一档）：绕开
+                        // 资源代理，AVURLAsset 带 headers 直连再
+                        // 试一次；直连也失败才进恢复预算
+                        self.triedDirectFallback = true
+                        self.proxyFailureRaw = raw
+                        DiaryStore.shared.add("代理打开失败，改走直链+请求头重试：\(raw)")
+                        self.installDirectFallback(generation: generation)
+                    } else if !self.proxyFailureRaw.isEmpty {
+                        self.handleFailure(
+                            reason: "open_exception",
+                            raw: "代理打开失败：\(self.proxyFailureRaw)；直连打开失败：\(raw)"
+                        )
+                    } else {
+                        self.handleFailure(reason: "open_exception", raw: raw)
+                    }
                 default:
                     break
                 }
@@ -812,6 +1185,112 @@ final class PlaybackEngine: ObservableObject {
             text += "（\(comment)）"
         }
         return text
+    }
+
+    /// 直连兜底：绕开资源代理，AVURLAsset 带 headers 直接打开。
+    /// 凭据头只作用于首个请求，对直链文件与简单源有效；同时
+    /// 它也是对照实验——直连能开，问题就锁定在代理层。
+    private func installDirectFallback(generation: Int) {
+        guard let request = currentRequest, let url = request.url else { return }
+        var options: [String: Any] = [:]
+        if !request.headers.isEmpty {
+            options[AVURLAssetHTTPHeaderFieldsKey] = request.headers
+        }
+        let asset = AVURLAsset(url: url, options: options)
+        phase = .loading
+        installItem(asset: asset, generation: generation)
+    }
+
+    /// 播放计划摘要（诊断用）：类型/主机/变体数/加密与
+    /// 凭据头的名字，不含地址明细与任何头的值
+    static func planSummary(_ request: PlaybackRequest) -> String {
+        var parts: [String] = []
+        parts.append(request.playlistText != nil ? "类型 播放列表文本" : "类型 直链")
+        parts.append("主机 \(request.url?.host ?? "无")")
+        parts.append("变体 \(max(request.variants.count, 1))")
+        if let text = request.playlistText {
+            let encrypted = text.contains("#EXT-X-KEY")
+                && !text.contains("METHOD=NONE")
+            parts.append(encrypted ? "含加密KEY" : "无加密KEY")
+        }
+        parts.append(request.headers.isEmpty
+            ? "凭据头 无"
+            : "凭据头 \(request.headers.keys.sorted().joined(separator: "/"))")
+        if request.isLocal { parts.append("本地文件") }
+        if request.expectedDuration > 0 {
+            parts.append("声明时长 \(Int(request.expectedDuration))s")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// 播放失败的底层诊断落盘：NSError 全量（地址脱敏）、
+    /// errorLog 事件列表、accessLog 末条。此前日记只有一句
+    /// Cannot Open，无法判断断在哪一层，这轮补齐。
+    private func logItemDiagnostics(_ item: AVPlayerItem, stage: String) {
+        if let error = item.error as NSError? {
+            DiaryStore.shared.add(
+                "播放器错误[\(stage)]：\(error.domain) code \(error.code)"
+            )
+            for (key, value) in error.userInfo.sorted(by: { $0.key < $1.key }) {
+                if key == NSLocalizedDescriptionKey { continue }
+                DiaryStore.shared.add(
+                    "  \(key) = \(Self.sanitizedDiagnosticValue(value))"
+                )
+            }
+        }
+        if let events = item.errorLog()?.events, !events.isEmpty {
+            DiaryStore.shared.add("错误日志（共 \(events.count) 条，记最近 8 条）：")
+            for event in events.suffix(8) {
+                let uri = PlaybackResourceLoader.classify(
+                    event.URI.flatMap { URL(string: $0) }
+                )
+                var line = "  \(uri) 服务器 \(event.serverAddress ?? "-")"
+                    + " HTTP \(event.errorStatusCode)"
+                    + " \(event.errorDomain) \(event.errorCode)"
+                if let comment = event.errorComment, !comment.isEmpty {
+                    line += " \(Self.sanitizeDiagnosticText(comment))"
+                }
+                DiaryStore.shared.add(line)
+            }
+        }
+        if let access = item.accessLog()?.events.last {
+            DiaryStore.shared.add(
+                "访问日志末条：HTTP \(access.errorStatusCode) \(access.errorDomain) \(access.errorCode)，已下载 \(access.numberOfBytesTransferred) 字节"
+            )
+        }
+    }
+
+    private static func sanitizedDiagnosticValue(_ value: Any) -> String {
+        if let error = value as? NSError {
+            return "\(error.domain) code \(error.code)"
+        }
+        let text = sanitizeDiagnosticText(String(describing: value))
+        return text.count > 200 ? String(text.prefix(200)) + "…" : text
+    }
+
+    private static let diagnosticURLPattern = try? NSRegularExpression(
+        pattern: "https?://[^\\s\"'<>]+"
+    )
+
+    /// 把文本里的完整地址替换成「类型@主机」，避免把带
+    /// 签名参数的地址写进日记
+    static func sanitizeDiagnosticText(_ text: String) -> String {
+        guard let diagnosticURLPattern else { return text }
+        var result = ""
+        var lastEnd = text.startIndex
+        diagnosticURLPattern.enumerateMatches(
+            in: text, range: NSRange(text.startIndex..., in: text)
+        ) { match, _, _ in
+            guard let match,
+                  let range = Range(match.range, in: text) else { return }
+            result += text[lastEnd..<range.lowerBound]
+            result += PlaybackResourceLoader.classify(
+                URL(string: String(text[range]))
+            )
+            lastEnd = range.upperBound
+        }
+        result += text[lastEnd...]
+        return result
     }
 
     /// 加载看门狗：30 秒没就绪且毫无进度 → 超时失败，不许无限转圈
@@ -904,6 +1383,11 @@ final class PlaybackEngine: ObservableObject {
         intentToPlay = false
         player.pause()
         phase = .failed
+        if let item = player.currentItem, item.error == nil {
+            // 超时/卡死类失败没有 item.error，补记错误日志事件，
+            // 否则日记里同样只剩一句症状文案
+            logItemDiagnostics(item, stage: "未打开")
+        }
         let symptom: String
         switch reason {
         case "position_stalled_20s": symptom = "画面长时间没有进度"

@@ -1,5 +1,16 @@
 import Foundation
 
+/// 应用版本号（设置/诊断/日记/失败页共用）：避免旧包截图
+/// 被误判成新包的问题复现——每张问题截图都自带版本。
+enum AppVersion {
+    static var display: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "绿果视频原生版 \(version)（build \(build)）"
+    }
+}
+
 /// 播放调试日记，对齐 Flutter DiaryService：内存环形日志
 /// （上限 500 条，条目格式 [HH:mm:ss.S] 消息），应用事件、
 /// 模块日志、播放与下载失败都汇到这里，诊断页可查看、

@@ -1093,6 +1093,9 @@ struct PlaybackDiaryView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
+                    Text(AppVersion.display)
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.secondary)
                     if diary.entries.isEmpty {
                         Text("暂无记录")
                             .foregroundStyle(.secondary)
