@@ -1249,8 +1249,7 @@ final class PlaybackEngine: ObservableObject {
                 let server = event.serverAddress ?? "-"
                 let status = event.errorStatusCode
                 let domain = event.errorDomain
-                let code = event.errorCode
-                var line = "  \(uri) 服务器 \(server) HTTP \(status) \(domain) \(code)"
+                var line = "  \(uri) 服务器 \(server) HTTP \(status) \(domain)"
                 if let comment = event.errorComment, !comment.isEmpty {
                     line += " \(Self.sanitizeDiagnosticText(comment))"
                 }
