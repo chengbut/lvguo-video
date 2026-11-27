@@ -938,6 +938,7 @@ private struct ProxyAddressEditor: View {
 struct DiagnosticsView: View {
     @EnvironmentObject private var moduleStore: ModuleStore
     @EnvironmentObject private var downloadManager: DownloadManager
+    @ObservedObject private var kernelMemory = KernelMemoryStore.shared
 
     @State private var exportURL: URL?
     @State private var showImporter = false
@@ -984,6 +985,42 @@ struct DiagnosticsView: View {
                     value: "共 \(downloadManager.jobs.count) 个 · 进行中 "
                         + "\(downloadManager.jobs.filter { $0.state == "downloading" || $0.state == "converting" }.count) 个"
                 )
+            }
+            GlassSettingsCard {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("内核记忆")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if !kernelMemory.entries.isEmpty {
+                            Button("清除") {
+                                kernelMemory.clearAll()
+                            }
+                            .font(.subheadline)
+                        }
+                    }
+                    Text("每个来源上次播成功用的内核，下次播放优先用它；播不起来会自动换另一个并更新记忆")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if kernelMemory.displayEntries.isEmpty {
+                        Text("暂无记录")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(kernelMemory.displayEntries, id: \.key) { entry in
+                            HStack {
+                                Text(entry.source)
+                                    .font(.subheadline)
+                                Spacer()
+                                Text(entry.kernel.displayName)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
             GlassSettingsCard {
                 NavigationLink {

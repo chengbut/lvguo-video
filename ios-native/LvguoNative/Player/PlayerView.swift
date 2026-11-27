@@ -303,13 +303,26 @@ struct PlayerPage: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            PlayerLayerView(
-                player: engine.player,
-                fit: fit,
-                videoSize: engine.presentationSize,
-                pipBridge: pipBridge
-            )
-            .ignoresSafeArea()
+            if engine.activeKernel == .software,
+               let softwareRequest = engine.softwareRequest {
+                // 软件内核表面：只出画面，控件仍走本页
+                // 原有的一套（引擎转发到内核）
+                SoftwarePlayerSurface(
+                    request: softwareRequest,
+                    engine: engine,
+                    fit: fit,
+                    muted: engine.player.isMuted
+                )
+                .ignoresSafeArea()
+            } else {
+                PlayerLayerView(
+                    player: engine.player,
+                    fit: fit,
+                    videoSize: engine.presentationSize,
+                    pipBridge: pipBridge
+                )
+                .ignoresSafeArea()
+            }
 
             // 弹幕层在画面之上、手势层之下（弹幕不吃手势）；
             // 无弹幕数据源或开关关闭时自身不渲染
@@ -364,7 +377,7 @@ struct PlayerPage: View {
                 eqSaturation: $eqSaturation,
                 sleepLabel: sleepSectionLabel,
                 sleepSelection: sleepSelection,
-                pipPossible: pipBridge.isPossible,
+                pipPossible: pipBridge.isPossible && engine.activeKernel == .avplayer,
                 onSpeed: { speed in
                     engine.playbackRate = Float(speed)
                     settings.speed = speed
@@ -404,7 +417,7 @@ struct PlayerPage: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .background,
                settings.autoPictureInPicture,
-               !engine.isPaused, pipBridge.isPossible {
+               !engine.isPaused, pipBridge.isPossible, engine.activeKernel == .avplayer {
                 pipBridge.start()
             }
         }
@@ -638,9 +651,9 @@ struct PlayerPage: View {
                 pressing: { pressing in
                     if !locked, engine.phase == .ready, !engine.isPaused {
                         boostActive = pressing
-                        engine.player.rate = pressing
+                        engine.applyTransientRate(pressing
                             ? Float(settings.boostSpeed)
-                            : engine.playbackRate
+                            : engine.playbackRate)
                         if pressing { showControls() }
                     }
                 },
@@ -1048,7 +1061,7 @@ struct PlayerPage: View {
                         .foregroundStyle(.white.opacity(0.9))
                 }
             }
-            if pipBridge.isPossible {
+            if pipBridge.isPossible, engine.activeKernel == .avplayer {
                 Button {
                     pipBridge.start()
                 } label: {
@@ -1190,7 +1203,7 @@ struct PlayerPage: View {
             }
             Spacer()
             sleepMenu
-            if pipBridge.isPossible {
+            if pipBridge.isPossible, engine.activeKernel == .avplayer {
                 Button {
                     pipBridge.start()
                 } label: {
@@ -1368,7 +1381,7 @@ struct PlayerPage: View {
                 }
             }
             sleepMenu
-            if pipBridge.isPossible {
+            if pipBridge.isPossible, engine.activeKernel == .avplayer {
                 Button {
                     pipBridge.start()
                 } label: {

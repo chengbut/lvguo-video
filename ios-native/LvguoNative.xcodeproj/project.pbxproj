@@ -20,11 +20,16 @@
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
+/* Begin PBXBuildFile section */
+		AA00000000000000000000C3 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000000C2 /* KSPlayer */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		AA00000000000000000000A3 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA00000000000000000000C3 /* KSPlayer in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -66,6 +71,9 @@
 				AA00000000000000000000A2 /* LvguoNative */,
 			);
 			name = LvguoNative;
+			packageProductDependencies = (
+				AA00000000000000000000C2 /* KSPlayer */,
+			);
 			productName = LvguoNative;
 			productReference = AA00000000000000000000A1 /* LvguoNative.app */;
 			productType = "com.apple.product-type.application";
@@ -93,6 +101,9 @@
 				Base,
 			);
 			mainGroup = AA00000000000000000000A4;
+			packageReferences = (
+				AA00000000000000000000C1 /* XCRemoteSwiftPackageReference "KSPlayer" */,
+			);
 			productRefGroup = AA00000000000000000000A5 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -145,7 +156,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "绿果视频";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -157,7 +168,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.lvguo.video;
@@ -174,7 +185,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "绿果视频";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -186,7 +197,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.lvguo.video;
@@ -219,6 +230,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA00000000000000000000C1 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.3.4;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA00000000000000000000C2 /* KSPlayer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00000000000000000000C1 /* XCRemoteSwiftPackageReference "KSPlayer" */;
+			productName = KSPlayer;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AA00000000000000000000B0 /* Project object */;
 }

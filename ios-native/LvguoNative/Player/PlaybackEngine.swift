@@ -1102,6 +1102,19 @@ final class MediaFormatProbe: NSObject, URLSessionDataDelegate {
     }
 }
 
+/// 软件内核控制通道：引擎在软件内核模式下把
+/// play/pause/seek/倍速/静音/截图转发给实际的内核
+/// 表面（SoftwarePlayerView 装载时注册，卸载时注销），
+/// 播放页原有的控件层因此对两个内核都成立。
+protocol SoftwareKernelControlling: AnyObject {
+    func kernelPlay()
+    func kernelPause()
+    func kernelSeek(to seconds: Double)
+    func kernelSetRate(_ rate: Float)
+    func kernelSetMuted(_ muted: Bool)
+    func kernelSnapshot() async -> CGImage?
+}
+
 // MARK: - 播放引擎
 
 /// AVPlayer 播放引擎。恢复策略对齐 Flutter 版 playback_recovery：
@@ -1199,6 +1212,16 @@ final class PlaybackEngine: ObservableObject {
     /// 本轮失败链中已确认的格式类定性（代理/直连任一
     /// 路径命中即成立，最终报错按格式类呈现）
     private var chainFormatFatal = false
+    /// 双内核路由状态：当前活动内核与软件内核的请求
+    /// （播放页据此换表面）；本链试过哪个内核、是否
+    /// 已确认播成功并写过内核记忆，都在这里记账
+    @Published private(set) var activeKernel: PlaybackKernel = .avplayer
+    @Published private(set) var softwareRequest: PlaybackRequest?
+    weak var softwareControl: SoftwareKernelControlling?
+    private var triedSoftwareThisChain = false
+    private var triedAVPlayerThisChain = false
+    private var chainSuccessRecorded = false
+    private var lastProgressCallbackAt = Date.distantPast
     private var itemStatusObservation: NSKeyValueObservation?
     private var presentationObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
@@ -1276,6 +1299,9 @@ final class PlaybackEngine: ObservableObject {
             formatFailureRetries = 0
             chainFormatFatal = false
             probeVerdict = nil
+            triedSoftwareThisChain = false
+            triedAVPlayerThisChain = false
+            chainSuccessRecorded = false
         }
         inRecoveryChain = false
         if !recovering {
@@ -1308,12 +1334,55 @@ final class PlaybackEngine: ObservableObject {
                        !self.failureText.contains("格式探针") {
                         self.failureText += "\n\(verdict.pageLine)"
                     }
+                    // 探针分流（只作首次定性：该来源没有
+                    // 内核记忆、本链还没试过软件内核时）：
+                    // 判定容器不受支持就不等系统内核失败，
+                    // 直接切软件内核，省一轮注定失败的尝试
+                    if verdict.support == .unsupported,
+                       self.activeKernel == .avplayer,
+                       self.phase != .ready,
+                       !self.triedSoftwareThisChain,
+                       KernelMemoryStore.shared.kernel(for: request) == nil,
+                       let current = self.currentRequest,
+                       current.url != nil {
+                        DiaryStore.shared.add(
+                            "路由：探针判定 \(verdict.container) 不受系统内核支持，切软件内核"
+                        )
+                        var routed = current
+                        if self.currentTime > 1 {
+                            routed.startPosition = self.currentTime
+                        }
+                        self.startSoftwareKernel(routed, generation: generation)
+                    }
                 } else {
                     DiaryStore.shared.add("格式探针：失败（未拿到文件头）")
                 }
             }
         }
 
+        // 双内核路由：有记忆先用记忆的内核；没记忆先走
+        // 系统内核，探针分流与失败换内核在后续环节处理。
+        // 只有播放列表文本、没有地址的计划进不了软件
+        // 内核（KSPlayer 需要真实地址），固定系统内核
+        let memoryKernel = KernelMemoryStore.shared.kernel(for: request)
+        if let memoryKernel {
+            DiaryStore.shared.add(
+                "路由：来源已记住\(memoryKernel.displayName)，优先使用"
+            )
+        }
+        if memoryKernel == .software, request.url != nil {
+            startSoftwareKernel(request, generation: generation)
+            return
+        }
+        installAVPlayer(request, generation: generation)
+    }
+
+    /// 系统内核打开：组装 AVURLAsset（带头走资源代理）
+    /// 并装上 item 状态观察
+    private func installAVPlayer(_ request: PlaybackRequest, generation: Int) {
+        activeKernel = .avplayer
+        softwareRequest = nil
+        triedAVPlayerThisChain = true
         let asset: AVURLAsset
         let needsProxy = !request.headers.isEmpty || request.playlistText != nil
         if needsProxy, request.isPlayable {
@@ -1382,6 +1451,19 @@ final class PlaybackEngine: ObservableObject {
                     ) || self.failureIsFormatFatal
                     if formatFatal {
                         self.chainFormatFatal = true
+                    }
+                    if formatFatal, !self.triedSoftwareThisChain,
+                       let request = self.currentRequest, request.url != nil {
+                        // 系统内核格式拒收且软件内核还没
+                        // 试过：直连兜底对同一文件必然同
+                        // 错，跳过它，直接换软件内核
+                        DiaryStore.shared.add("路由：系统内核格式拒收，换软件内核")
+                        var routed = request
+                        if self.currentTime > 1 {
+                            routed.startPosition = self.currentTime
+                        }
+                        self.startSoftwareKernel(routed, generation: generation)
+                        return
                     }
                     if self.currentLoadUsedProxy, !self.triedDirectFallback,
                        let request = self.currentRequest,
@@ -1474,6 +1556,137 @@ final class PlaybackEngine: ObservableObject {
         let asset = AVURLAsset(url: url, options: options)
         phase = .loading
         installItem(asset: asset, generation: generation)
+    }
+
+    // MARK: 软件内核（双内核路由）
+
+    /// 切到软件内核打开：停掉系统内核的 item 防双声，
+    /// 播放页按 softwareRequest 换上软件内核表面。
+    /// 30 秒没就绪按软件内核失败处理（看门狗）
+    private func startSoftwareKernel(_ request: PlaybackRequest, generation: Int) {
+        guard request.url != nil else { return }
+        triedSoftwareThisChain = true
+        activeKernel = .software
+        softwareRequest = request
+        phase = .loading
+        if !recovering {
+            loadingMessage = "正在用软件内核打开"
+        }
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self,
+                  generation == self.loadGeneration,
+                  self.activeKernel == .software,
+                  self.phase == .loading else { return }
+            self.softwareKernelFailed("软件内核加载超时（30 秒没有开始播放）")
+        }
+    }
+
+    /// 软件内核失败（表面 coordinator 回调）：本链还没
+    /// 试过系统内核 → 同计划换系统内核再试；两边都
+    /// 失败 → 走原失败流程（格式类按确认计数收口）
+    func softwareKernelFailed(_ message: String) {
+        guard activeKernel == .software else { return }
+        DiaryStore.shared.add("软件内核失败：\(message)")
+        softwareRequest = nil
+        activeKernel = .avplayer
+        if !triedAVPlayerThisChain, var current = currentRequest {
+            DiaryStore.shared.add("路由：软件内核失败，换系统内核")
+            if currentTime > 1 {
+                current.startPosition = currentTime
+            }
+            installAVPlayer(current, generation: loadGeneration)
+            return
+        }
+        handleFailure(
+            reason: "open_exception", raw: message,
+            formatFatal: chainFormatFatal
+        )
+    }
+
+    /// 软件内核已就绪（出画面前一步）：置 ready，
+    /// 真正的「播成功」要等位置推进后才记（见
+    /// recordChainSuccessIfNeeded）
+    func noteSoftwareReady() {
+        guard activeKernel == .software else { return }
+        phase = .ready
+        isStalled = false
+    }
+
+    func noteSoftwareBuffering(_ buffering: Bool) {
+        guard activeKernel == .software else { return }
+        isStalled = buffering && intentToPlay
+    }
+
+    /// 软件内核播放结束：与系统内核同一套收尾
+    /// （进度落盘 + 连播回调由播放页的接线处理）
+    func noteSoftwareEnded() {
+        guard activeKernel == .software else { return }
+        if duration > 0 {
+            onProgress?(duration, duration)
+        }
+        let expected = currentRequest?.expectedDuration ?? 0
+        if expected > 0, duration > 0, expected - currentTime > 30,
+           phase != .failed {
+            handleFailure(reason: "early_completion", raw: lastRawError)
+            return
+        }
+        onEnded?()
+    }
+
+    /// 软件内核进度回调（约每秒一次）：写回引擎状态，
+    /// 顺带做成功判定、进度落盘节流、片尾/A-B 检查
+    /// 与卡顿看门狗（与系统内核 tick 同口径）
+    func noteSoftwareProgress(
+        time: Double, duration: Double, buffered: Double, playing: Bool
+    ) {
+        guard activeKernel == .software else { return }
+        currentTime = time
+        if duration.isFinite, duration > 0 {
+            self.duration = duration
+        }
+        bufferedPosition = buffered
+        isPlaying = playing
+        if time > lastPosition + 0.25 {
+            lastPosition = time
+            lastProgressAt = Date()
+        }
+        recordChainSuccessIfNeeded(kernel: .software, position: time)
+        if Date().timeIntervalSince(lastProgressCallbackAt) > 5 {
+            lastProgressCallbackAt = Date()
+            onProgress?(currentTime, self.duration)
+        }
+        if outroThreshold > 0, !outroFired,
+           self.duration > 0, self.duration - time <= outroThreshold, time > 0 {
+            outroFired = true
+            onOutroReached?()
+        }
+        if let a = abA, let b = abB, time >= b {
+            seek(to: a)
+        }
+        if intentToPlay, phase == .ready,
+           Date().timeIntervalSince(lastProgressAt) > 20 {
+            lastProgressAt = Date()
+            softwareKernelFailed("软件内核画面长时间没有进度")
+        }
+    }
+
+    /// 「播成功」的统一判定：进入 ready 且播放位置已
+    /// 越过起始位置 1 秒以上（不是打开没报错就算数）。
+    /// 命中后把内核按来源记住（变化才落盘与记日记）
+    private func recordChainSuccessIfNeeded(
+        kernel: PlaybackKernel, position: Double
+    ) {
+        guard !chainSuccessRecorded, phase == .ready,
+              let request = currentRequest else { return }
+        guard position > request.startPosition + 1 else { return }
+        chainSuccessRecorded = true
+        if KernelMemoryStore.shared.record(kernel, for: request) {
+            DiaryStore.shared.add(
+                "路由：\(kernel.displayName)播成功，已记住（来源 \(KernelMemoryStore.displaySource(forKey: KernelMemoryStore.key(for: request)))）"
+            )
+        }
     }
 
     /// 播放计划摘要（诊断用）：类型/主机/变体数/加密与
@@ -1589,11 +1802,23 @@ final class PlaybackEngine: ObservableObject {
 
     func play() {
         intentToPlay = true
+        if activeKernel == .software {
+            softwareControl?.kernelPlay()
+            softwareControl?.kernelSetRate(playbackRate)
+            isPlaying = true
+            return
+        }
         player.rate = playbackRate
     }
 
     func pause() {
         intentToPlay = false
+        if activeKernel == .software {
+            softwareControl?.kernelPause()
+            isPlaying = false
+            onProgress?(currentTime, duration)
+            return
+        }
         player.pause()
         onProgress?(currentTime, duration)
     }
@@ -1601,6 +1826,11 @@ final class PlaybackEngine: ObservableObject {
     func seek(to seconds: Double) {
         let target = max(0, seconds)
         lastProgressAt = Date()
+        if activeKernel == .software {
+            currentTime = target
+            softwareControl?.kernelSeek(to: target)
+            return
+        }
         player.seek(
             to: CMTime(seconds: target, preferredTimescale: 600),
             toleranceBefore: .zero,
@@ -1608,7 +1838,21 @@ final class PlaybackEngine: ObservableObject {
         )
     }
 
+    /// 长按倍速的临时速率：只改当前内核的实际速率，
+    /// 不动 playbackRate（松手后由调用方恢复为常速值）
+    func applyTransientRate(_ rate: Float) {
+        if activeKernel == .software {
+            softwareControl?.kernelSetRate(rate)
+        } else {
+            player.rate = rate
+        }
+    }
+
     func togglePlayPause() {
+        if activeKernel == .software {
+            if isPlaying { pause() } else { play() }
+            return
+        }
         if player.timeControlStatus == .playing || intentToPlay && isStalled {
             pause()
         } else {
@@ -1758,6 +2002,10 @@ final class PlaybackEngine: ObservableObject {
     // MARK: 周期 tick（进度 / 缓冲 / 网速 / 卡顿看门狗 / 片尾 / A-B）
 
     private func tick(_ time: CMTime) {
+        // 软件内核模式下系统内核无 item，周期观察者
+        // 仍会以 0 时刻回调：直接返回，避免覆盖软件
+        // 内核写回的进度（其进度走 noteSoftwareProgress）
+        guard activeKernel == .avplayer else { return }
         let position = time.seconds.isFinite ? time.seconds : 0
         currentTime = position
         if let item = player.currentItem {
@@ -1782,6 +2030,7 @@ final class PlaybackEngine: ObservableObject {
             lastPosition = position
             lastProgressAt = Date()
         }
+        recordChainSuccessIfNeeded(kernel: .avplayer, position: position)
         if intentToPlay, phase == .ready, !recovering,
            Date().timeIntervalSince(lastProgressAt) > 20 {
             lastProgressAt = Date()
@@ -1911,6 +2160,14 @@ final class PlaybackEngine: ObservableObject {
 
     /// 保存当前帧到应用文件（对齐 Flutter 截图：成功回路径，失败抛错）
     func captureScreenshot() async throws -> String {
+        if activeKernel == .software {
+            // 软件内核：取内核的当前帧接口（FFmpeg 解码帧）
+            guard let image = await softwareControl?.kernelSnapshot() else {
+                throw NSError(domain: "LvguoPlayback", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "当前没有在播的画面"])
+            }
+            return try Self.saveScreenshotPNG(UIImage(cgImage: image))
+        }
         guard let item = player.currentItem else {
             throw NSError(domain: "LvguoPlayback", code: -3,
                           userInfo: [NSLocalizedDescriptionKey: "当前没有在播的画面"])
@@ -1922,8 +2179,11 @@ final class PlaybackEngine: ObservableObject {
         let result = try await generator.image(
             at: CMTime(seconds: currentTime, preferredTimescale: 600)
         )
-        let image = result.image
-        guard let data = UIImage(cgImage: image).pngData() else {
+        return try Self.saveScreenshotPNG(UIImage(cgImage: result.image))
+    }
+
+    private static func saveScreenshotPNG(_ image: UIImage) throws -> String {
+        guard let data = image.pngData() else {
             throw NSError(domain: "LvguoPlayback", code: -4,
                           userInfo: [NSLocalizedDescriptionKey: "截图编码失败"])
         }
