@@ -95,6 +95,10 @@ final class SettingsStore: ObservableObject {
     @Published var autoPictureInPicture: Bool { didSet { save() } }
     @Published var boostSpeed: Double { didSet { save() } }
     @Published var videoFit: String { didSet { save() } }
+    /// 自动画中画默认开的一次性迁移标记（修复轮 13）：
+    /// 随 save() 一起落盘；缺失时把 autoPictureInPicture
+    /// 强制置 true 一次并写标记，之后以用户设置为准
+    private var autoPipDefaultV2Applied: Bool
 
     private let file: URL
     private var loading = true
@@ -116,12 +120,28 @@ final class SettingsStore: ObservableObject {
         showClock = dict["showClock"] == nil ? true : JSON.dictBool(dict["showClock"])
         showNetworkSpeed = dict["showNetworkSpeed"] == nil ? true : JSON.dictBool(dict["showNetworkSpeed"])
         // 修复轮 12 用户拍板：自动画中画默认开（仅键缺失时生效，已存设置不受影响）
-        autoPictureInPicture = dict["autoPictureInPicture"] == nil ? true : JSON.dictBool(dict["autoPictureInPicture"])
+        // 修复轮 13 一次性迁移：1.6 的「默认开」对从 1.5 覆盖
+        // 安装、已存过 autoPictureInPicture=false 的用户不生效
+        // （键已存在、走的不是缺省分支）——迁移标记缺失时
+        // 强制置 true 一次并立即落盘写标记；标记在时以用户
+        // 后来改的设置为准，不再干预
+        let pipMigrationApplied = dict["autoPipDefaultV2Applied"] != nil
+        autoPipDefaultV2Applied = pipMigrationApplied
+        if pipMigrationApplied {
+            autoPictureInPicture = dict["autoPictureInPicture"] == nil ? true : JSON.dictBool(dict["autoPictureInPicture"])
+        } else {
+            autoPictureInPicture = true
+            autoPipDefaultV2Applied = true
+        }
         let storedBoost = (dict["boostSpeed"] as? NSNumber)?.doubleValue ?? 2.0
         boostSpeed = storedBoost > 0 ? storedBoost : 2.0
         let storedFit = JSON.dictString(dict["videoFit"])
         videoFit = VideoFitMode(rawValue: storedFit) != nil ? storedFit : VideoFitMode.auto.rawValue
         loading = false
+        if !pipMigrationApplied {
+            // 迁移结果（值 + 标记）立即落盘，保证「只强制一次」
+            save()
+        }
     }
 
     private func save() {
@@ -140,6 +160,7 @@ final class SettingsStore: ObservableObject {
             "showClock": showClock,
             "showNetworkSpeed": showNetworkSpeed,
             "autoPictureInPicture": autoPictureInPicture,
+            "autoPipDefaultV2Applied": autoPipDefaultV2Applied,
             "boostSpeed": boostSpeed,
             "videoFit": videoFit,
         ], to: file)

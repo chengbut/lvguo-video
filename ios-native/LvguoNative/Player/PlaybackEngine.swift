@@ -1240,6 +1240,16 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
     private var totalLength: Int64 = -1
     private var status = 0
     private var finished = false
+    /// 本步已收字节到上限、主动停下载（云盘修复）：
+    /// 服务器无视 Range 回 200 全量时，旧版要把整个
+    /// 文件收进内存才收尾——云盘大文件直接把内存
+    /// 与带宽吃爆、还和播放器抢同一条链路
+    private var capReached = false
+    /// 本步字节上限：盒头步进只需文件头一带（8MB
+    /// 足够扫盒链与多数 moov）；拉 moov 步按
+    /// moovFetchCap 加余量（正常 206 响应本就
+    /// 不超过它，上限只对 200 全量响应起作用）
+    private var fetchCap = 8 * 1024 * 1024
     private var selfRetain: MP4StructureProbe?
     private let url: URL
     private let headers: [String: String]
@@ -1283,6 +1293,12 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
     }
 
     private func fetch(range: String) {
+        // 已收尾/已取消的不再起新请求（防取消与步进
+        // 收尾并发时又挂一轮下载）
+        guard !finished else { return }
+        fetchCap = mode == 1
+            ? Self.moovFetchCap + 262_144 : 8 * 1024 * 1024
+        capReached = false
         session?.finishTasksAndInvalidate()
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
@@ -1315,6 +1331,18 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
             completion(findings)
             self.selfRetain = nil
         }
+    }
+
+    /// 外部取消（云盘修复）：新一次播放开始时引擎把
+    /// 上一轮的审计探针全部作废——停下载、不回调
+    /// 结论（结论在引擎侧本就按 generation 丢弃，
+    /// 这里连网络与内存占用一并止住）
+    func cancel() {
+        guard !finished else { return }
+        finished = true
+        session?.invalidateAndCancel()
+        session = nil
+        selfRetain = nil
     }
 
     /// 失败收尾：只有日记行与一句简短原因（审计行用）
@@ -1355,12 +1383,27 @@ final class MP4StructureProbe: NSObject, URLSessionDataDelegate {
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {
         received.append(data)
+        if received.count >= fetchCap {
+            // 字节到顶：停掉这一步的下载，按已到数据
+            // 在 didComplete 里收尾（取消回调会带
+            // NSURLErrorCancelled，靠 capReached 区分）
+            capReached = true
+            dataTask.cancel()
+        }
     }
 
     func urlSession(
         _ session: URLSession, task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
+        if capReached {
+            if mode == 0 {
+                handleHeader()
+            } else {
+                handleMoov()
+            }
+            return
+        }
         if let error {
             let nsError = error as NSError
             if mode == 0 {
@@ -1913,6 +1956,10 @@ final class PlaybackEngine: ObservableObject {
     /// MP4 结构探针（修复轮 6，日志级）：格式探针判定
     /// 为 MP4 时并发跑，结果只进日记、不改路由
     private var activeStructureProbe: MP4StructureProbe?
+    /// 变体审计探针登记（云盘修复）：审计探针自持、
+    /// 原先无人登记，新一次 load 开始时统一 cancel，
+    /// 避免恢复重开一轮就多挂一轮远端下载
+    private var auditProbes: [MP4StructureProbe] = []
     /// 变体审计（修复轮 9）：本次 load 的审计目标是否
     /// 已覆盖所选地址——覆盖时格式探针完成回调不再
     /// 单独起结构探针（审计探针的完整结构行会落盘，
@@ -1978,6 +2025,13 @@ final class PlaybackEngine: ObservableObject {
     func load(_ request: PlaybackRequest, autoplay: Bool = true, isSwitch: Bool = false) {
         loadGeneration += 1
         let generation = loadGeneration
+        // 上一轮的变体审计探针全部作废（云盘修复）：
+        // 它们自持且不随播放切换自动停，恢复重开一轮
+        // 就多挂一轮远端下载，与播放器抢带宽
+        for probe in auditProbes {
+            probe.cancel()
+        }
+        auditProbes.removeAll()
         intentToPlay = autoplay
         currentRequest = request
         pendingStartPosition = request.startPosition
@@ -2337,10 +2391,13 @@ final class PlaybackEngine: ObservableObject {
                 }
                 remaining -= 1
                 if remaining == 0 {
+                    self.auditProbes.removeAll()
                     completion?(verdicts)
                 }
             }
-            _ = probe // 探针自持至结论送达（见 MP4StructureProbe.start）
+            // 探针自持至结论送达（见 MP4StructureProbe.start）；
+            // 引擎另登记一份，新一次 load 时统一作废
+            auditProbes.append(probe)
         }
     }
 
@@ -2509,10 +2566,14 @@ final class PlaybackEngine: ObservableObject {
                 switch item.status {
                 case .readyToPlay:
                     self.phase = .ready
-                    self.recoveryAttempts = 0
-                    self.recoveryRefreshes = 0
-                    self.formatFailureRetries = 0
-                    self.chainFormatFatal = false
+                    // 恢复预算不在这里清零（云盘修复）：
+                    // 「打开成功」不等于「播得动」——地址
+                    // 能开却撑不住播放时（ready 后立刻
+                    // FailedToPlayToEnd），旧版在这里清零
+                    // 会让恢复阶梯每轮都从满预算重来、
+                    // 永远到不了失败页，黑屏无限循环。
+                    // 预算改到 recordChainSuccessIfNeeded
+                    // 里、位置真推进后才清
                     self.refreshTracks(item)
                     if self.pendingStartPosition > 1 {
                         let target = self.pendingStartPosition
@@ -3055,6 +3116,15 @@ final class PlaybackEngine: ObservableObject {
                   softwareControl?.kernelIsPresented() ?? false else { return }
         }
         chainSuccessRecorded = true
+        // 真播出进度才清恢复预算（云盘修复）：与上面的
+        // 成功判定同一口径（位置越过起始点 1 秒、软件
+        // 内核另有首帧与上屏证据）。旧版在 item
+        // readyToPlay 时无条件清零，能开不能播的地址
+        // 会让恢复阶梯无限重来
+        recoveryAttempts = 0
+        recoveryRefreshes = 0
+        formatFailureRetries = 0
+        chainFormatFatal = false
         if KernelMemoryStore.shared.record(kernel, for: request) {
             DiaryStore.shared.add(
                 "路由：\(kernel.displayName)播成功，已记住（来源 \(KernelMemoryStore.displaySource(forKey: KernelMemoryStore.key(for: request)))）"
@@ -3260,6 +3330,26 @@ final class PlaybackEngine: ObservableObject {
             return
         }
         guard recoveryAttempts < 6, onRecover != nil else {
+            // 恢复预算耗尽仍没打开、软件内核还没试过：
+            // 先换软件内核同计划再试一次（云盘修复）。
+            // 云盘直链这类地址系统内核打不开时，旧版
+            // Flutter 靠 FFmpeg 系播放器打开，原生这边
+            // 对应的就是软件内核；此前只有格式类失败
+            // 才换内核，普通打开失败把 6 次刷新全花在
+            // 同一个注定打不开的内核上。双内核都败才
+            // 落失败页，与软件内核侧的闭环口径一致。
+            // 本地文件不走此路（失败与内核无关）
+            if activeKernel == .avplayer, !triedSoftwareThisChain,
+               let current = currentRequest, current.url != nil,
+               !current.isLocal {
+                DiaryStore.shared.add("路由：系统内核多次打开失败，换软件内核再试")
+                var routed = current
+                if currentTime > 1 {
+                    routed.startPosition = currentTime
+                }
+                startSoftwareKernel(routed, generation: loadGeneration)
+                return
+            }
             failNow(reason: reason, raw: raw)
             return
         }
@@ -3298,7 +3388,10 @@ final class PlaybackEngine: ObservableObject {
             } else if self.recoveryAttempts < 6 {
                 self.handleFailure(reason: reason, raw: raw)
             } else {
-                self.failNow(reason: reason, raw: raw)
+                // 预算已满：回 handleFailure 走它的耗尽
+                // 分支（可能先换软件内核再试），而不是
+                // 在这里直接落失败页绕过换内核的机会
+                self.handleFailure(reason: reason, raw: raw)
             }
         }
     }

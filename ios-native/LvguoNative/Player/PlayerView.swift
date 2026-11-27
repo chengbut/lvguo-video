@@ -13,7 +13,12 @@ final class PiPBridge: NSObject, ObservableObject, AVPictureInPictureControllerD
     @Published var isPossible = false
     @Published var isActive = false
     var onStopped: (() -> Void)?
+    /// 手动启动失败/无响应时回调页面 toast（修复轮 13，
+    /// 与软件内核桥对齐）；后台自动兜底的失败不回调
+    var onFailed: ((String) -> Void)?
     private var possibleObservation: NSKeyValueObservation?
+    private var startWatchdog: DispatchWorkItem?
+    private var lastStartManual = false
     /// 切后台自动进小窗（修复轮 12）：由播放页按「自动
     /// 画中画」设置同步。标准链路是控制器上的
     /// canStartPictureInPictureAutomaticallyFromInline——
@@ -38,29 +43,96 @@ final class PiPBridge: NSObject, ObservableObject, AVPictureInPictureControllerD
             = autoStartEnabled
         controller = created
         possibleObservation = created.observe(
-            \AVPictureInPictureController.isPictureInPicturePossible, options: [.new]
+            \AVPictureInPictureController.isPictureInPicturePossible,
+            options: [.initial, .new]
         ) { [weak self] controller, _ in
             DispatchQueue.main.async {
-                self?.isPossible = controller.isPictureInPicturePossible
+                guard let self else { return }
+                let value = controller.isPictureInPicturePossible
+                guard value != self.isPossible else { return }
+                self.isPossible = value
+                DiaryStore.shared.add("系统内核小窗 possible 变为 \(value)")
             }
         }
         isPossible = created.isPictureInPicturePossible
+        DiaryStore.shared.add(
+            "系统内核小窗桥已接管控制器"
+                + "（supported=\(AVPictureInPictureController.isPictureInPictureSupported())"
+                + " possible=\(isPossible)）"
+        )
     }
 
-    func start() { controller?.startPictureInPicture() }
-    func stop() { controller?.stopPictureInPicture() }
+    func start() { start(manual: true) }
+
+    /// 启动小窗（修复轮 13，与软件内核桥同一口径）：
+    /// possible 为 false 也照样调系统启动，成败由
+    /// delegate 回调与 1.2 秒看门狗兜底；手动启动
+    /// 失败/无响应才经 onFailed 给页面 toast
+    func start(manual: Bool) {
+        guard let controller else {
+            DiaryStore.shared.add("系统内核小窗启动请求但控制器未就绪")
+            if manual { onFailed?("小窗暂不可用") }
+            return
+        }
+        lastStartManual = manual
+        DiaryStore.shared.add(
+            "系统内核小窗启动请求（manual=\(manual) possible=\(isPossible)）")
+        controller.startPictureInPicture()
+        startWatchdog?.cancel()
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self, !self.isActive else { return }
+            DiaryStore.shared.add(
+                "系统内核小窗启动 1.2 秒无响应（possible=\(self.isPossible)）")
+            if self.lastStartManual {
+                self.onFailed?("小窗暂不可用")
+            }
+        }
+        startWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 1.2, execute: watchdog)
+    }
+
+    func stop() {
+        DiaryStore.shared.add("系统内核小窗停止请求")
+        controller?.stopPictureInPicture()
+    }
+
+    func pictureInPictureControllerWillStartPictureInPicture(
+        _ controller: AVPictureInPictureController
+    ) {
+        DiaryStore.shared.add("系统内核小窗即将开始")
+    }
 
     func pictureInPictureControllerDidStartPictureInPicture(
         _ controller: AVPictureInPictureController
     ) {
+        startWatchdog?.cancel()
         isActive = true
+        DiaryStore.shared.add("系统内核小窗已开始")
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(
         _ controller: AVPictureInPictureController
     ) {
+        startWatchdog?.cancel()
         isActive = false
+        DiaryStore.shared.add("系统内核小窗已关闭")
         onStopped?()
+    }
+
+    func pictureInPictureController(
+        _ controller: AVPictureInPictureController,
+        failedToStartPictureInPictureWithError error: Error
+    ) {
+        startWatchdog?.cancel()
+        let nsError = error as NSError
+        DiaryStore.shared.add(
+            "系统内核小窗启动失败：\(error.localizedDescription)"
+                + "（\(nsError.domain) \(nsError.code)）"
+        )
+        if lastStartManual {
+            onFailed?("小窗启动失败，请重试")
+        }
     }
 }
 
@@ -572,10 +644,19 @@ struct PlayerPage: View {
             // 重复 start 是无操作。PiP 不可用/未开启时
             // 什么都不做：播放不暂停，后台靠音频模式
             // 续声（与旧版降级一致）
+            // 修复轮 13：兜底不再以 pipPossibleNow 为
+            // 门槛——该值在软件内核链路上不可靠（见
+            // SoftwarePiPBridge 类头注释），作门槛等于
+            // 永远不试；改走桥的静默启动（manual=false，
+            // 失败只记日记、不弹 toast）
             if phase == .background,
                settings.autoPictureInPicture,
-               !engine.isPaused, pipPossibleNow {
-                startPiP()
+               !engine.isPaused {
+                if engine.activeKernel == .software {
+                    softwarePipBridge.start(manual: false)
+                } else {
+                    pipBridge.start(manual: false)
+                }
             }
         }
         .onChange(of: settings.autoPictureInPicture) { _, enabled in
@@ -607,8 +688,11 @@ struct PlayerPage: View {
         // 软件内核侧桥会在每次重新接管时补上
         pipBridge.autoStartEnabled = settings.autoPictureInPicture
         softwarePipBridge.autoStartEnabled = settings.autoPictureInPicture
-        softwarePipBridge.onFailed = { _ in
-            showToast("小窗启动失败，请重试")
+        softwarePipBridge.onFailed = { message in
+            showToast(message)
+        }
+        pipBridge.onFailed = { message in
+            showToast(message)
         }
         engine.playbackRate = Float(settings.speed)
         engine.outroThreshold = settings.autoAdvance
@@ -1009,6 +1093,18 @@ struct PlayerPage: View {
                     Text(engine.loadingMessage)
                         .font(.subheadline)
                         .foregroundStyle(.white)
+                    // 加载态常驻返回（云盘修复）：本页是
+                    // fullScreenCover 呈现、没有手势退出，
+                    // 旧版加载遮罩上没有任何出口，加载
+                    // 久等时用户被困在黑屏里出不去。动作
+                    // 与失败页的「返回」一致
+                    Button("返回") {
+                        saveProgressNow()
+                        engine.pause()
+                        dismiss()
+                    }
+                    .buttonStyle(.glass)
+                    .padding(.top, 8)
                 }
             }
         } else if engine.phase == .failed {
@@ -1283,16 +1379,19 @@ struct PlayerPage: View {
                         .foregroundStyle(.white.opacity(0.9))
                 }
             }
-            if pipPossibleNow {
-                Button {
-                    startPiP()
-                } label: {
-                    Image(systemName: "pip.enter")
-                        .font(.headline)
-                        .padding(10)
-                }
-                .buttonStyle(.glass)
+            // 小窗按钮常显（修复轮 13）：possible 在软件
+            // 内核链路上不可靠，作显隐条件会出现「控件
+            // 没有」且无任何反馈；常显 + 未就绪时半透明，
+            // 点击由桥给出成败反馈（见 SoftwarePiPBridge）
+            Button {
+                startPiP()
+            } label: {
+                Image(systemName: "pip.enter")
+                    .font(.headline)
+                    .padding(10)
             }
+            .buttonStyle(.glass)
+            .opacity(pipPossibleNow ? 1 : 0.45)
             Button {
                 showSettings = true
                 showControls()
@@ -1427,14 +1526,14 @@ struct PlayerPage: View {
             }
             Spacer()
             sleepMenu
-            if pipPossibleNow {
-                Button {
-                    startPiP()
-                } label: {
-                    Image(systemName: "pip.enter")
-                        .frame(width: 40, height: 44)
-                }
+            // 小窗按钮常显（修复轮 13，同顶栏）
+            Button {
+                startPiP()
+            } label: {
+                Image(systemName: "pip.enter")
+                    .frame(width: 40, height: 44)
             }
+            .opacity(pipPossibleNow ? 1 : 0.45)
         }
         .foregroundStyle(.white)
         .buttonStyle(.plain)
@@ -1608,14 +1707,14 @@ struct PlayerPage: View {
                 }
             }
             sleepMenu
-            if pipPossibleNow {
-                Button {
-                    startPiP()
-                } label: {
-                    Image(systemName: "pip.enter")
-                        .frame(width: 40, height: 48)
-                }
+            // 小窗按钮常显（修复轮 13，同顶栏）
+            Button {
+                startPiP()
+            } label: {
+                Image(systemName: "pip.enter")
+                    .frame(width: 40, height: 48)
             }
+            .opacity(pipPossibleNow ? 1 : 0.45)
         }
         .foregroundStyle(.white)
         .buttonStyle(.plain)
@@ -1863,13 +1962,14 @@ struct PlaybackSettingsSheet: View {
                     }
                 }
                 Section {
+                    // 常显可点（修复轮 13，同播放页按钮）：
+                    // 不再以 pipPossible 禁用，成败由桥反馈
                     Button {
                         dismiss()
                         onPiP()
                     } label: {
                         Label("小窗播放", systemImage: "pip.enter")
                     }
-                    .disabled(!pipPossible)
                     Button {
                         onLock()
                     } label: {

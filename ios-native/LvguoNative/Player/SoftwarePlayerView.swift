@@ -1,3 +1,4 @@
+import AVFoundation
 import AVKit
 import KSPlayer
 import SwiftUI
@@ -32,6 +33,97 @@ import UIKit
 /// 注入 controllerProvider 现取现用，并在每次内核
 /// 状态/进度回调里调 refreshController() 核对身份，
 /// 变了就重新接管（delegate + KVO + 自动启动标志）。
+///
+/// 修复轮 13（1.6 真机：播放页没有小窗按钮、切后台不
+/// 自动进小窗）：轮 12 的接管救不回 possible——桥接管
+/// 的那只内核控制器是在 makeUIView 阶段首访懒建的，
+/// 绑的是尚未入窗的 displayLayer；此后桥只做身份核
+/// 对、从不重建，而同一内核跨集复用同一 videoOutput，
+/// 这只「出生太早」的控制器就是整场唯一一只，
+/// possible 终生为 false（按钮以它为显隐条件、自动
+/// 兜底也以它为门槛，两个症状同源）。改法：桥不再借
+/// 内核的控制器，改为在渲染视图已上屏后用内核当前
+/// displayLayer 自建一只 AVPictureInPictureController
+/// （回放委托经转发代理回到 KSMEPlayer 本体），图层
+/// 被换就按新图层重建；possible 的每次变化、自建
+/// 时刻的图层状态、系统第一次回放状态查询都进日记，
+/// 下一轮真机能一锤定音。
+/// 小窗回放委托的转发代理（修复轮 13）：系统靠
+/// AVPictureInPictureSampleBufferPlaybackDelegate
+/// 的查询（时间轴、是否暂停）完成对 sampleBuffer
+/// 型小窗的可用性评估。KSMEPlayer 本体已实现这些
+/// 方法（均为 public），代理只转发，并记下系统第
+/// 一次来查询的时刻——这是「系统确实在评估这只
+/// 控制器」的一手证据；内核已拆除时返回安全缺省
+/// （无限时间轴 + 已暂停），不假造播放状态
+final class SoftwarePiPPlaybackDelegateProxy:
+    NSObject, AVPictureInPictureSampleBufferPlaybackDelegate {
+    weak var player: KSMEPlayer?
+    private var queryLogged = false
+
+    private func noteQueryIfNeeded() {
+        guard !queryLogged else { return }
+        queryLogged = true
+        DiaryStore.shared.add("小窗系统已开始查询回放状态（控制器进入评估）")
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        setPlaying playing: Bool
+    ) {
+        noteQueryIfNeeded()
+        player?.pictureInPictureController(
+            pictureInPictureController, setPlaying: playing)
+    }
+
+    func pictureInPictureControllerTimeRangeForPlayback(
+        _ pictureInPictureController: AVPictureInPictureController
+    ) -> CMTimeRange {
+        noteQueryIfNeeded()
+        guard let player else {
+            return CMTimeRange(
+                start: .negativeInfinity, duration: .positiveInfinity)
+        }
+        return player.pictureInPictureControllerTimeRangeForPlayback(
+            pictureInPictureController)
+    }
+
+    func pictureInPictureControllerIsPlaybackPaused(
+        _ pictureInPictureController: AVPictureInPictureController
+    ) -> Bool {
+        noteQueryIfNeeded()
+        guard let player else { return true }
+        return player.pictureInPictureControllerIsPlaybackPaused(
+            pictureInPictureController)
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        didTransitionToRenderSize newRenderSize: CMVideoDimensions
+    ) {
+        player?.pictureInPictureController(
+            pictureInPictureController,
+            didTransitionToRenderSize: newRenderSize)
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        skipByInterval skipInterval: CMTime
+    ) async {
+        guard let player else { return }
+        await player.pictureInPictureController(
+            pictureInPictureController, skipByInterval: skipInterval)
+    }
+
+    func pictureInPictureControllerShouldProhibitBackgroundAudioPlayback(
+        _ pictureInPictureController: AVPictureInPictureController
+    ) -> Bool {
+        player?
+            .pictureInPictureControllerShouldProhibitBackgroundAudioPlayback(
+                pictureInPictureController) ?? false
+    }
+}
+
 final class SoftwarePiPBridge: NSObject, ObservableObject,
     AVPictureInPictureControllerDelegate {
     @Published var isPossible = false
@@ -41,50 +133,90 @@ final class SoftwarePiPBridge: NSObject, ObservableObject,
     /// coordinator 注册的延迟拆除（小窗中退出页面时
     /// teardown 先挂起，小窗关闭后由托管方调用）
     var deferredTeardownHandler: (() -> Void)?
-    /// 当前控制器的现取现用来源（coordinator 注入）：
-    /// 返回 KSMEPlayer 此刻的 pipController
-    var controllerProvider: (() -> AVPictureInPictureController?)?
+    /// 小窗源的现取现用来源（coordinator 注入）：返回
+    /// 当前软件内核的 displayLayer 与内核本体；渲染
+    /// 视图未上屏（不在 window 内 / frame 为零）时
+    /// 返回 nil——控制器只在图层入窗后才自建（修复
+    /// 轮 13，见类头注释）
+    var sourceProvider:
+        (() -> (layer: AVSampleBufferDisplayLayer, player: KSMEPlayer)?)?
     /// 切后台自动进小窗（修复轮 12）：由播放页按
-    /// 「自动画中画」设置同步到当前控制器；控制器被
-    /// 替换时在重新接管里补上。注意 KSPlayerLayer 会
-    /// 在它自己的 readyToPlay 里按 KSOptions 默认值
-    /// （true）把这个标志打开、不看本 App 设置——
-    /// coordinator 在状态回调里调 refreshAutoStart()
-    /// 以本 App 设置为准覆盖回去
+    /// 「自动画中画」设置同步到桥自建的控制器；按新
+    /// 图层重建控制器时在 buildController 里补上，
+    /// 状态回调里再调 refreshAutoStart() 复核
     var autoStartEnabled = false {
         didSet { refreshAutoStart() }
     }
-    private weak var controller: AVPictureInPictureController?
+    private var controller: AVPictureInPictureController?
+    private let playbackProxy = SoftwarePiPPlaybackDelegateProxy()
     private var possibleObservation: NSKeyValueObservation?
+    private var startWatchdog: DispatchWorkItem?
+    private var lastStartManual = false
 
-    func attach(controller: AVPictureInPictureController?) {
-        guard let controller, controller !== self.controller else { return }
-        self.controller = controller
-        controller.delegate = self
-        controller.canStartPictureInPictureAutomaticallyFromInline
+    /// 核对小窗源（coordinator 在入窗、内核状态/进度
+    /// 回调里高频调用）：源未就绪（未上屏）直接返回；
+    /// 没有控制器就自建一只；内核换掉 displayLayer
+    /// （格式描述变化）就按新图层重建——旧控制器绑
+    /// 的是已不在画面里的旧图层，继续用必然落空。
+    /// 小窗进行中不重建（不亲手拆正在播的小窗）
+    func refreshController() {
+        guard let source = sourceProvider?() else { return }
+        playbackProxy.player = source.player
+        if let controller,
+           controller.contentSource?.sampleBufferDisplayLayer
+               === source.layer {
+            return
+        }
+        guard !isActive else { return }
+        buildController(source: source)
+    }
+
+    private func buildController(
+        source: (layer: AVSampleBufferDisplayLayer, player: KSMEPlayer)
+    ) {
+        teardownController()
+        playbackProxy.player = source.player
+        let contentSource = AVPictureInPictureController.ContentSource(
+            sampleBufferDisplayLayer: source.layer,
+            playbackDelegate: playbackProxy
+        )
+        let created = AVPictureInPictureController(
+            contentSource: contentSource)
+        created.delegate = self
+        created.canStartPictureInPictureAutomaticallyFromInline
             = autoStartEnabled
-        possibleObservation = controller.observe(
+        controller = created
+        possibleObservation = created.observe(
             \AVPictureInPictureController.isPictureInPicturePossible,
-            options: [.new]
-        ) { [weak self] controller, _ in
+            options: [.initial, .new]
+        ) { [weak self, weak layer = source.layer] controller, _ in
             DispatchQueue.main.async {
-                self?.isPossible = controller.isPictureInPicturePossible
+                guard let self else { return }
+                let value = controller.isPictureInPicturePossible
+                guard value != self.isPossible else { return }
+                self.isPossible = value
+                DiaryStore.shared.add(
+                    "软件内核小窗 possible 变为 \(value)"
+                        + "（图层状态 \(layer?.status.rawValue ?? -1)）"
+                )
             }
         }
-        isPossible = controller.isPictureInPicturePossible
+        isPossible = created.isPictureInPicturePossible
         DiaryStore.shared.add(
-            "软件内核小窗桥已接管控制器（possible=\(isPossible)）"
+            "软件内核小窗桥已自建控制器"
+                + "（supported=\(AVPictureInPictureController.isPictureInPictureSupported())"
+                + " possible=\(isPossible)"
+                + " 图层状态 \(source.layer.status.rawValue)"
+                + " 时长 \(Int(source.player.duration)) 秒）"
         )
     }
 
-    /// 核对控制器身份（coordinator 在内核状态/进度
-    /// 回调里高频调用，身份没变时只是两次指针比较）：
-    /// 内核把控制器换掉后在这里重新接管
-    func refreshController() {
-        guard let provided = controllerProvider?() else { return }
-        if provided !== controller {
-            attach(controller: provided)
-        }
+    private func teardownController() {
+        startWatchdog?.cancel()
+        startWatchdog = nil
+        possibleObservation = nil
+        controller?.delegate = nil
+        controller = nil
     }
 
     /// 把自动启动标志以本 App 设置为准刷到当前控制器
@@ -93,24 +225,59 @@ final class SoftwarePiPBridge: NSObject, ObservableObject,
             = autoStartEnabled
     }
 
-    /// 现取现用：先核对身份再拿控制器，避免对着已被
-    /// 内核替换掉的旧控制器调 start（必然落空）
-    private func liveController() -> AVPictureInPictureController? {
+    func start() { start(manual: true) }
+
+    /// 启动小窗：possible 为 false 也照样调系统启动
+    /// （KVO 值可能滞后于系统内部状态）——成败由
+    /// delegate 回调与 1.2 秒看门狗兜底：手动启动
+    /// 失败/无响应才经 onFailed 给页面 toast，后台
+    /// 自动兜底的失败只记日记、不打扰用户
+    func start(manual: Bool) {
         refreshController()
-        return controller
+        guard let controller else {
+            DiaryStore.shared.add(
+                "软件内核小窗启动请求但控制器未就绪（源未上屏）")
+            if manual { onFailed?("小窗暂不可用") }
+            return
+        }
+        lastStartManual = manual
+        DiaryStore.shared.add(
+            "软件内核小窗启动请求（manual=\(manual) possible=\(isPossible)）")
+        controller.startPictureInPicture()
+        startWatchdog?.cancel()
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self, !self.isActive else { return }
+            DiaryStore.shared.add(
+                "软件内核小窗启动 1.2 秒无响应（possible=\(self.isPossible)）")
+            if self.lastStartManual {
+                self.onFailed?("小窗暂不可用")
+            }
+        }
+        startWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 1.2, execute: watchdog)
     }
 
-    func start() { liveController()?.startPictureInPicture() }
-    func stop() { liveController()?.stopPictureInPicture() }
+    func stop() {
+        DiaryStore.shared.add("软件内核小窗停止请求")
+        controller?.stopPictureInPicture()
+    }
 
     func runDeferredTeardown() {
         deferredTeardownHandler?()
         deferredTeardownHandler = nil
     }
 
+    func pictureInPictureControllerWillStartPictureInPicture(
+        _ controller: AVPictureInPictureController
+    ) {
+        DiaryStore.shared.add("软件内核小窗即将开始")
+    }
+
     func pictureInPictureControllerDidStartPictureInPicture(
         _ controller: AVPictureInPictureController
     ) {
+        startWatchdog?.cancel()
         isActive = true
         DiaryStore.shared.add("软件内核小窗已开始")
     }
@@ -118,6 +285,7 @@ final class SoftwarePiPBridge: NSObject, ObservableObject,
     func pictureInPictureControllerDidStopPictureInPicture(
         _ controller: AVPictureInPictureController
     ) {
+        startWatchdog?.cancel()
         isActive = false
         DiaryStore.shared.add("软件内核小窗已关闭")
         onStopped?()
@@ -127,10 +295,15 @@ final class SoftwarePiPBridge: NSObject, ObservableObject,
         _ controller: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
+        startWatchdog?.cancel()
+        let nsError = error as NSError
         DiaryStore.shared.add(
             "软件内核小窗启动失败：\(error.localizedDescription)"
+                + "（\(nsError.domain) \(nsError.code)）"
         )
-        onFailed?(error.localizedDescription)
+        if lastStartManual {
+            onFailed?("小窗启动失败，请重试")
+        }
     }
 
     func pictureInPictureController(
@@ -408,8 +581,8 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         /// 「内核自身触发的 paused」（build 6 真机出现
         /// 状态自行变 paused 而触发者不明）
         private var appCommandedPause = false
-        /// 软件内核小窗桥（修复轮 11）：attach 时接管
-        /// KSMEPlayer 自带 PiP 控制器的 delegate
+        /// 软件内核小窗桥（修复轮 11 建桥，轮 13 改为
+        /// 桥自建控制器，见 SoftwarePiPBridge 类头注释）
         private weak var pipBridge: SoftwarePiPBridge?
 
         func attach(
@@ -430,6 +603,9 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
                 if let view = self.layer?.player.view {
                     self.container?.host(view)
                 }
+                // 小窗控制器只在图层入窗后自建（修复轮 13）：
+                // 入窗这一刻正是源就绪的时刻，立即核对一次
+                self.pipBridge?.refreshController()
                 if !self.windowAttachLogged {
                     self.windowAttachLogged = true
                     DiaryStore.shared.add(
@@ -454,12 +630,17 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             finished = false
             firstFrameReported = false
             trackInfoReported = false
-            // 小窗桥的现取现用来源（修复轮 12）：内核
-            // 中途替换 pipController 时，桥经这里拿到
-            // 当前那只（桥弱持有 coordinator 的 layer，
-            // 不成环）
-            pipBridge.controllerProvider = { [weak self] in
-                (self?.layer?.player as? KSMEPlayer)?.pipController
+            // 小窗桥的小窗源（修复轮 13）：桥自建控制器
+            // 需要内核当前的 displayLayer 与内核本体；
+            // 渲染视图未上屏时返回 nil、桥不建控制器
+            // （桥弱持有 coordinator 的 layer，不成环）
+            pipBridge.sourceProvider = { [weak self] in
+                guard let self,
+                      let mePlayer = self.layer?.player as? KSMEPlayer,
+                      let displayLayer = mePlayer.videoOutput?.displayLayer,
+                      self.kernelIsPresented()
+                else { return nil }
+                return (layer: displayLayer, player: mePlayer)
             }
             container.host(layer.player.view)
             layer.player.contentMode = SoftwarePlayerSurface.contentMode(for: fit)
@@ -469,17 +650,12 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
             attachPiPController()
         }
 
-        /// 把 KSMEPlayer 自带的 PiP 控制器交给小窗桥：
-        /// 控制器是懒建的（首次访问才基于 videoOutput
-        /// 的 displayLayer 创建），attach 时与就绪时各
-        /// 试一次；拿不到（无视频输出等）就保持桥的
-        /// isPossible = false，页面不显示小窗入口。
-        /// 控制器之后还会被内核整只替换（修复轮 12），
-        /// 后续身份核对走桥的 refreshController（状态/
-        /// 进度回调驱动 + controllerProvider 现取现用）
+        /// 催小窗桥核对小窗源（修复轮 13）：桥自建
+        /// 控制器，源未上屏时核对是无操作；attach 时
+        /// 与就绪时各催一次，之后的核对由入窗回调与
+        /// 状态/进度回调里的 refreshController 驱动
         private func attachPiPController() {
-            guard let mePlayer = layer?.player as? KSMEPlayer else { return }
-            pipBridge?.attach(controller: mePlayer.pipController)
+            pipBridge?.refreshController()
         }
 
         func update(request: PlaybackRequest, fit: VideoFitMode) {
@@ -518,11 +694,11 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         func teardownNow() {
             FFmpegDiaryLogHandler.shared.endSession()
             pendingErrorWork?.cancel()
-            // 小窗桥的现取现用来源随会话结束摘除（修复
-            // 轮 12）：桥可能被 PlaybackKeepAlive 继续
-            // 持有到小窗关闭，摘除后它的 start/stop 只
-            // 落在已保留的当前控制器上，不再探到新会话
-            pipBridge?.controllerProvider = nil
+            // 小窗桥的小窗源随会话结束摘除（修复轮 12
+            // 设立、轮 13 沿用）：桥可能被 PlaybackKeepAlive
+            // 继续持有到小窗关闭，摘除后它的 start/stop
+            // 只落在已自建的当前控制器上，不再探到新会话
+            pipBridge?.sourceProvider = nil
             if let engine, engine.softwareControl === self {
                 engine.softwareControl = nil
             }
@@ -535,13 +711,10 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         @MainActor
         func player(layer: KSPlayerLayer, state: KSPlayerState) {
             container?.host(layer.player.view)
-            // 小窗控制器身份核对（修复轮 12）：内核换
-            // displayLayer 时会整只替换 pipController，
-            // 每次状态回调都核对一次、变了重新接管；
-            // 自动启动标志随之以本 App 设置为准刷新
-            // （KSPlayerLayer 在 readyToPlay 里刚按它
-            // 自己的默认值动过这个标志，顺序在我们
-            // 之前，这里覆盖回去正好）
+            // 小窗源核对（修复轮 12 设立、轮 13 改自建）：
+            // 内核换 displayLayer 时桥按新图层重建自家
+            // 控制器，每次状态回调都核对一次；自动启动
+            // 标志随之以本 App 设置为准刷新到桥的控制器
             pipBridge?.refreshController()
             pipBridge?.refreshAutoStart()
             // paused 不走通用状态行：要带触发来源（见下）
@@ -577,10 +750,10 @@ struct SoftwarePlayerSurface: UIViewRepresentable {
         func player(
             layer: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval
         ) {
-            // 进度回调约 10 次/秒：顺带核对小窗控制器
-            // 身份（修复轮 12）——格式描述变化引起的
-            // 控制器替换发生在两帧之间，不等状态回调
-            // 也能及时重新接管
+            // 进度回调约 10 次/秒：顺带核对小窗源
+            // （修复轮 12 设立、轮 13 改自建）——格式
+            // 描述变化引起的图层更换发生在两帧之间，
+            // 不等状态回调也能及时按新图层重建控制器
             pipBridge?.refreshController()
             engine?.noteSoftwareProgress(
                 time: currentTime, duration: totalTime,

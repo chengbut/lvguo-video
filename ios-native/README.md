@@ -611,6 +611,31 @@ input into NAL units」正是把加密样本当明文
 
 待真机验清单：① 加密流（软件内核）点小窗按钮进小窗、恢复全屏，日记应出现「软件内核小窗桥已接管控制器」；切集/切码率后小窗仍可用；② 双内核切后台自动进小窗（新装默认已开；老用户先确认「我的」页自动画中画开关状态）；③ 慢拖进度条超过 5 秒控件不消失、点开菜单慢挑不消失、无操作约 5 秒后才隐藏；④ 竖屏点亮控件后转横屏，控件应在场并重新计时；⑤ 非加密流（系统内核）小窗单独验一次（本轮系统内核只补自动标志，其手动小窗为真机首验）。
 
+## 修复轮 13＋云盘修复（2026-11-28）：画中画重构 + 移动云盘黑屏闭环（1.7 build 1）
+
+版本口径：本轮起版本号迭代为 **1.7**、build 重置为 **1**。来源：用户 2026-11-28 实测 1.6 后报三缺陷——播放页无小窗按钮、切后台不自动小窗、移动云盘点视频黑屏且界面无响应。逐项状态如下（「已修」只代表代码侧改完，真机结论以用户复测为准）：
+
+### 画中画（轮 13）
+
+1. **播放页无小窗按钮 + 自动小窗不打开**（已修，待真机验）：主因——软件内核的那只 PiP 控制器「出生太早」且终生不换。KSMEPlayer 的 `_pipController` 是 lazy var，首次访问时以当时的 `videoOutput.displayLayer` 建 ContentSource、之后不再自建；App 侧 coordinator 在 `makeUIView` 阶段（MetalPlayView 尚未入窗）就首访它，控制器绑死在未入窗的 displayLayer 上；轮 12 的 `refreshController()` 只在身份变化时重新接管，身份不变就永远是这只。跨集也不换：KSPlayerLayer `set(url:)` 走 `player.replace(url:)`，KSMEPlayer 与 videoOutput 全程复用，displayView 只在格式描述真变化时才换（用户固定 720p 变体整场不触发）。于是 `isPictureInPicturePossible` 终生停在 false——按钮以 possible 为显隐条件、切后台兜底也以 possible 为门槛，两症状同源。对照：能在 iOS 上跑通的 sample-buffer PiP demo 都是视图入窗后才建控制器；KSPlayer 自家 UI 的小窗按钮常显、直接 toggle，根本不读 possible。其余前提逐项核过均无断点：音频会话 `.playback/.moviePlayback`＋激活、`UIBackgroundModes = audio`、8-bit 内容帧确实进 displayLayer、回放委托四方法齐全且返回值有效。
+   改（`SoftwarePlayerView.swift`）：桥**不再借用** KSMEPlayer 的 `pipController`——新增 `sourceProvider`（coordinator 注入，返回当前 displayLayer + 内核本体；渲染视图未上屏时返回 nil），桥在图层入窗后用 `AVPictureInPictureController.ContentSource` **自建**控制器；`refreshController()` 在入窗回调、状态/进度回调里高频核对，图层被换就按新图层重建（小窗进行中不重建）。新增 `SoftwarePiPPlaybackDelegateProxy`：ContentSource 的回放委托经它转发回 KSMEPlayer 本体的 public 实现。KVO 改 `[.initial, .new]`；possible 每次变化记日记（带图层状态 rawValue），自建时刻记 supported/possible/图层状态/时长，WillStart/DidStart/DidStop/启动/停止请求全记，`failedToStart` 带 NSError domain+code。`start(manual:)` 在 possible 为 false 时也照样调系统启动（防 KVO 滞后），1.2 秒看门狗兜底——手动启动失败/无响应经 `onFailed` 给页面 toast（「小窗暂不可用」/「小窗启动失败，请重试」），后台自动兜底（manual=false）失败只记日记。
+2. **小窗按钮改常显**（已修，待真机验）：`PlayerView.swift` 顶栏、竖屏集数条、横屏工具栏三处去掉 `if pipPossibleNow` 门控，未就绪时半透明（opacity 0.45）提示状态；设置面板「小窗播放」行去掉 `.disabled(!pipPossible)`。理由：KSPlayer 自家 UI 即常显直调；老 Flutter 版虽也以 possible 门控，但它走 AVPlayer 通路、possible 可靠，与本链路不可比；常显+点击必反馈是唯一能终结「控件没有」的方案。scenePhase 切后台兜底同步去掉 possible 门槛，改走桥的 `start(manual: false)` 静默启动。系统内核 `PiPBridge` 同口径补强：KVO `[.initial, .new]`、possible 变化/接管/WillStart/DidStart/DidStop/启动请求日记、failedToStart 回调（带 domain/code）、看门狗 + onFailed；页面 `start()` 已给两个桥都接上 onFailed → toast。
+3. **自动画中画默认开的一次性迁移**（已修，待真机验）：轮 12 的「默认改开」只改键缺失时的缺省，从 1.5 覆盖安装、已存 `autoPictureInPicture=false` 的用户不生效（用户本人即中招，且桥每次状态回调按设置把自动标志刷成 false，与 possible 无关）。改（`Data/Stores.swift`，落点 `SettingsStore.init`）：`settings.json` 中新键 `autoPipDefaultV2Applied` **缺失**时触发——`autoPictureInPicture` 强制置 true、标记置 true、init 末尾立即 `save()` 落盘（值+标记同写）；标记存在后完全按用户存的值读，用户之后在「我的」页关掉即以用户为准、永不再强制。新装用户同样走一次（值本就是 true，无副作用）。
+4. **两条同症状死路如实记录（本轮未根治）**：① 10-bit 软件解码内容——帧被包成 `PixelBuffer`，其 `cvPixelBuffer` 恒为 nil，MetalPlayView 只走 Metal 通路、displayLayer 一帧都收不到，possible 必 false；与内容格式绑定（不是用户本次报的 720p H.264），根治需 KSPlayer 改帧通路，超出本轮范围，本轮日记（图层状态）可把它与主因区分开。② 设备级开关——iOS 设置→通用→画中画被关时 possible 也恒 false，代码侧无法区分，本轮的「点按钮必有反馈 + 失败日记带错误域/码」即为它留的判别口。
+
+### 移动云盘黑屏＋卡死（云盘修复）
+
+链路复核：点击路由存在（`FileBrowserView.swift` 视频行 → `play(entry)` → `client.target(entry)` → 成功才组 PlaybackRequest 并 fullScreenCover 呈现 PlayerPage；取链失败只在浏览页出 notice，不会进黑屏）；取链与老版 Dart `file_sources.dart` 逐项对照无差异（cdnSwitch 真用 cdnUrl、否则 url、两边都不带 headers），`jsonRequest` 全异步、25 秒超时，无同步阻塞、无无限重试——**用户能进黑屏，说明取链成功，断点全在播放层的失败闭环**。全仓扫过同步阻塞原语（文件/播放路径无 semaphore/同步网络/主线程 sleep），「卡死」不是主线程冻住，而是下列断点 1 的无限恢复循环＋断点 3 的资源耗尽＋断点 4 的无出口三者叠加。1.5 审计只核对了「链路环节在不在」，没有追失败闭环的计数器复位条件——清零点藏在 readyToPlay 回调里，从链路图上看不见，这是审计与实测的出入所在。
+
+1. **断点 1（主因）：恢复预算被「打开成功」无条件清零，失败闭环可无限循环**（已修，待真机验）：`installItem` 的 `.readyToPlay` 回调无条件把 recoveryAttempts/recoveryRefreshes/formatFailureRetries 清零，而 `AVPlayerItemFailedToPlayToEndTime` 通知又调 handleFailure 进恢复阶梯——「地址能打开（ready）却撑不住播放」的流形成死循环：ready → 播不动/失败 → 恢复第 1 次（重取址）→ ready → 预算又清零 → ……phase 在 loading/ready（黑屏）之间反复，**永远到不了带「返回」的失败页**；位置卡死看门狗（tick，20 秒）同理被反复重置。改（`PlaybackEngine.swift`）：删去 readyToPlay 处的四项无条件清零；预算清零改到新增的 `recordChainSuccessIfNeeded`——与「播成功」同一口径（位置越过起始点 1 秒；软件内核另需首帧＋上屏证据）才清 recoveryAttempts/recoveryRefreshes/formatFailureRetries/chainFormatFatal。能开不能播不再重置阶梯，循环必然终止到失败页。
+2. **断点 2：普通打开失败永远不给软件内核机会**（已修，待真机验）：系统内核打开失败时，原先只有「格式致命」或探针判定容器不支持才换软件内核，其余失败一律在系统内核上刷 6 次恢复后直接失败；老版 Flutter 播云盘文件靠的是 FFmpeg 系播放器，原生对应的软件内核对非格式类失败从不被调用。改：`handleFailure` 耗尽分支落失败页前，若当前是系统内核、软件内核本链还没试过、有 URL、非本地文件 → 先换软件内核同计划再试一次，双内核都败才 failNow（与软件侧既有闭环口径一致）；`scheduleRecovery` 取址拿不到且预算已满的末支由直接 failNow 改回 handleFailure 走耗尽分支，不绕过换内核机会。
+3. **断点 3：MP4 结构探针无字节上限 + 从不取消，可整文件灌入内存**（已修，待真机验）：`MP4StructureProbe` 的 didReceive 只 append、无上限、不中途取消——服务器无视 Range 回 200 全量时要把整个文件收进内存才收尾（云盘文件动辄数百 MB–GB，内存暴涨且带宽被探针与播放器互抢）；审计探针自持、无人登记取消，每次 load/恢复重开都新挂一轮，与断点 1 的循环叠加就是多轮全文件下载并发。改：探针加每步字节上限（盒头步 8MB、moov 步 moovFetchCap+256KB），didReceive 到顶即 cancel 并在 didComplete 按已到数据收尾（200 全量转本地步进解析、moov 步快速收尾）；新增 `cancel()`，fetch() 加 `guard !finished` 防取消后又起下载；新增 `auditProbes` 数组登记审计探针、全部完成时清空，`load()` 开头统一 cancel 上一轮探针。
+4. **断点 4：加载遮罩没有任何出口**（已修，待真机验）：PlayerPage 经 fullScreenCover 呈现（无手势退出），加载态遮罩原先只有转圈和文案、**没有返回按钮**，失败页虽有「返回」但断点 1 让失败页永不出现，用户唯一的出口是控件层里会随 ready 阶段自动隐藏的返回钮，实际体验就是困死在黑屏里。改（`PlayerView.swift`，与轮 13 改动区域不重叠）：加载遮罩加常驻「返回」按钮，动作与失败页一致（saveProgressNow → engine.pause → dismiss），加载多久都能退出。
+
+夸克顺带核过：路由与透传完整（`QuarkSourceClient.target` 取 download_url 并带 Cookie/Referer/桌面 UA 三件套 → PlaybackRequest.headers → 资源代理逐请求注入，私有失败还有直连带头兜底），代码上未见夸克特有断点；本轮引擎层三修（预算、换内核、探针）对夸克同样生效。
+
+待真机验清单：① 播软件内核片（CENC），「我的→诊断」应依次出现「软件内核小窗桥已自建控制器（supported=true possible=… 图层状态 …）」「小窗系统已开始查询回放状态」「软件内核小窗 possible 变为 true」，三条齐 = 小窗主因修复成立；② 播放页顶栏/工具栏应始终有小窗按钮（未就绪时半透明），点它应进小窗；若点后 toast「小窗暂不可用」且日记有「启动 1.2 秒无响应」或「启动失败（domain code）」，把该行原文发回判别路径（图层状态 failed/unknown 且内容 10-bit = 死路 ①；supported=false 或失败码指向系统禁用 = 死路 ②，查手机设置→通用→画中画）；③ 老用户升级后首次启动起「自动画中画」应为开，播放中划后台应自动进小窗，日记应有「启动请求（manual=false …）」或系统自动链路的即将开始/已开始；④ 切一集、切清晰度后重复 ①②（验证图层更换后的重建）；⑤ 系统内核片源重复 ②③；⑥ 移动云盘点开一个视频：能播即通；若仍不能播，应等到失败页出现（不再无限黑屏），把失败页文案＋诊断里本次播放的完整段落（播放计划→探针→路由→失败行）抄回即可定位；⑦ 加载超过十几秒时点遮罩上的「返回」，应能正常退回文件列表；⑧ 顺带点一个夸克网盘视频，确认同样能播/能到失败页。
+
 ## 全量对齐表（2026-11-27 修复轮 5 结束时状态）
 
 状态含义：**已对齐** = 与 Flutter 版行为一致；**本轮补齐** = 本轮
@@ -634,11 +659,11 @@ input into NAL units」正是把加密样本当明文
 | 锁定 | 本轮补齐 | 中左侧锁钮；锁定后只剩锁图标（点屏探出），文案「已锁定，点屏幕显示锁图标」「已锁定，点击锁图标解锁」「已解锁」与 Flutter 一致；修复轮 3：锁定态探出位置竖屏改右上角（安全区顶 + 6、右 12，对齐 PlayerLockOverlay 竖屏 alignments），旧版落在屏幕正中 |
 | 暂停标记 | 本轮补齐 | 横屏 68pt 玻璃圆钮 + 播放图标，右 20 / 底 92；修复轮 3：竖屏改屏幕中央 72pt 玻璃圆钮（对齐 Flutter 竖屏页中央大播放钮，材质改原生液态玻璃） |
 | 卡顿指示 | 本轮补齐 | 已就绪且卡顿时中央只转圈（对齐 Flutter stall 态） |
-| 加载状态 | 本轮补齐 | 半透明黑遮罩 + 转圈 + 加载文案（「正在准备播放」/恢复时「正在重新获取播放地址」「正在切换备用线路」，与 Flutter 一致） |
+| 加载状态 | 本轮补齐 | 半透明黑遮罩 + 转圈 + 加载文案（「正在准备播放」/恢复时「正在重新获取播放地址」「正在切换备用线路」，与 Flutter 一致）；1.7 云盘修复：加载遮罩加常驻「返回」按钮（saveProgressNow → 暂停 → dismiss，与失败页一致），加载多久都能退出，不再困死黑屏 |
 | 失败状态 | 本轮补齐 | 90% 黑遮罩 + 标题「暂时无法播放」+ 症状文案与原始错误 + 「重试」（本地为「重试本地播放」）/「从头播放」（进度 > 0 时）/「改为在线播放」（本地失败且有在线回退时），与 Flutter 一致 |
 | 加载超时 | 本轮补齐 | 30 秒未就绪且无进度 → 超时失败进错误状态，不再无限「加载中」 |
 | 错误原文透出 | 本轮补齐 | AVPlayerItem 的系统错误原文（含错误日志 errorComment）进失败文案；切集取址失败的模块原始错误以 toast 透出（旧版 resolveRequest 静默吞错已修） |
-| 画中画 | 已修（修复轮 11/12），待真机验 | 系统内核 AVPictureInPictureController（系统托管）；软件内核修复轮 11 起经 SoftwarePiPBridge 接管 KSMEPlayer 的 KSPictureInPictureController，轮 12 改桥为现取现用 + 状态/进度回调重接管（根因：KSPlayer 会在切集/码率/格式落定时整只替换控制器，桥弱持旧控制器失效）；双桥自动小窗标志统一跟随 App「自动画中画」设置（系统内核轮 12 补设 canStartPictureInPictureAutomaticallyFromInline），该设置轮 12 起默认开（用户拍板，原与 Flutter 同为默认关）；PiP 中退出页面由 PlaybackKeepAlive 托管引擎续播 |
+| 画中画 | 已修（修复轮 11/12/13），待真机验 | 系统内核 AVPictureInPictureController（系统托管）；软件内核轮 11 起经 SoftwarePiPBridge 接管，轮 12 改现取现用 + 重接管；轮 13 查明 1.6 真机主因——KSPlayer 的 PiP 控制器在渲染视图入窗前被懒建、绑死未入窗的 displayLayer 且终生不换（跨集复用同一 videoOutput），isPictureInPicturePossible 终生为 false，按钮与自动小窗同源失效；改桥为图层入窗后自建 AVPictureInPictureController（ContentSource）+ 回放委托转发代理 + 图层更换时重建（小窗中不重建），possible 变化/启动失败全程日记（failedToStart 带 NSError 域/码）+ 1.2 秒看门狗，手动启动失败给页面 toast；系统内核桥同口径补强；按钮改三处常显（未就绪半透明 0.45），切后台兜底不再以 possible 为门槛；双桥自动小窗标志统一跟随 App「自动画中画」设置（系统内核轮 12 补设 canStartPictureInPictureAutomaticallyFromInline），该设置轮 12 起默认开（用户拍板），轮 13 加一次性迁移（autoPipDefaultV2Applied）让从旧版覆盖安装、已存 false 的用户真正默认开、之后以用户设置为准；仍存两条 possible 死路：10-bit 软件解码内容 displayLayer 收不到帧、设备级画中画被系统设置关闭（判别靠日记，见轮 13 章节）；PiP 中退出页面由 PlaybackKeepAlive 托管引擎续播 |
 | 全屏按钮 | 已对齐（结构等效） | 原生播放页本身即全屏呈现，Flutter 的「进全屏」动作在此结构下恒成立，未摆按钮 |
 | 竖屏样式页 | 仍缺（结构差异） | Flutter 竖屏页是纵滑切集 PageView + 下半部剧目信息区，原生播放页是单一全屏页；修复轮 3 已把竖屏 chrome 的位置/安全区逐项对位（顶栏、玻璃控制块 + 集数条、中央暂停钮、右上锁钮、徽章位置），纵滑切集与竖屏页下方的剧目信息区未移植 |
 | 弹幕 | 已对齐（同为不支持） | Flutter 的 danmakuSupported 只认内置 SourceSite 注册表，JS 模块源恒为 false；原生只有 JS 模块源，同样无弹幕入口（不摆假开关） |
@@ -684,7 +709,7 @@ input into NAL units」正是把加密样本当明文
 | 历史（站源） | 已对齐 | 搜索 + 来源筛选 + 今天/昨天/更早海报网格（2:3），点条目进详情按集号续播 |
 | 历史（文件） | 已对齐 | 分段切换，按定位符重新取址续播；本轮给文件会话补了恢复取址（地址过期可自愈） |
 | 资源（模块管理） | 已对齐 | URL 装包、启用/停用/设当前/卸载、示例模块；不内置任何站源模块 |
-| 文件源管理与浏览 | 已对齐 | WebDAV/HTTP/FTP/天翼/移动，增删改、浏览、下载、播放 |
+| 文件源管理与浏览 | 已对齐（云盘点播黑屏已修，待真机验） | WebDAV/HTTP/FTP/天翼/移动/夸克（轮 11 纳入），增删改、浏览、下载、播放；1.7 云盘修复：移动云盘点开视频黑屏＋界面无响应的根因不在取链（路由/签名/取址与老版逐项一致、取链全异步带超时），在播放层失败闭环四断点——恢复预算被 readyToPlay 无条件清零致「能开不能播」无限循环到不了失败页、普通打开失败从不换软件内核、MP4 结构探针无字节上限且从不取消可整文件灌入内存、加载遮罩无返回出口；已修（预算改真播成功才清零、系统内核耗尽先换软件内核再试、探针加上限与统一取消登记、加载遮罩加常驻「返回」），详见「修复轮 13＋云盘修复」章节；夸克链复核无特有断点，引擎层修复同样生效 |
 
 ### 模块运行时（与 Go 核心对齐）
 
