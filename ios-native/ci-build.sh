@@ -31,16 +31,24 @@ BUILD_ARGS=(
 xcodebuild build "${BUILD_ARGS[@]}" 2>&1 | tee build.log
 BUILD_RC=${PIPESTATUS[0]}
 if [ "$BUILD_RC" != "0" ] && grep -q "Build input files cannot be found" build.log; then
-  # 已知形态（run 45966946541 诊断实测）：-sdk 构建下 SPM 包
-  # 目标的合并 .o 落在 Release-iphoneos/，而应用的链接阶段
-  # 按 SPM 集成约定去 Release/ 找——包本身编译无误，只差
-  # 这一层路径。把 .o 桥接过去后重跑构建（包目标已最新，
-  # 第二遍只补链接与应用组装）。
-  PROD="build/DerivedData/Build/Products"
-  if [ -d "$PROD/Release-iphoneos" ]; then
-    mkdir -p "$PROD/Release"
-    cp -f "$PROD"/Release-iphoneos/*.o "$PROD/Release/" 2>/dev/null || true
-    echo "error: DIAG bridged-o: $(ls "$PROD/Release" 2>/dev/null | tr '\n' ' ')" | tee -a build.log
+  # 已知形态（run 45966946541 诊断 + 45968109032 复证）：
+  # -sdk 构建下 SPM 包目标的全部产物落在带 -iphoneos 后缀
+  # 的目录里，而应用侧按 SPM 集成约定计算的路径不带后缀
+  # ——包本身编译无误，缺的只是路径别名。用符号链接把
+  # 不带后缀的路径桥接到实际产物目录后重跑构建（包目标
+  # 已最新，第二遍只补链接与应用组装）：
+  #   Build/Products/Release            → Release-iphoneos
+  #   Intermediates.noindex/{KSPlayer,FFmpegKit}.build/Release
+  #                                       → Release-iphoneos
+  DD="build/DerivedData/Build"
+  if [ -d "$DD/Products/Release-iphoneos" ]; then
+    ln -sfn Release-iphoneos "$DD/Products/Release"
+    for B in KSPlayer FFmpegKit; do
+      if [ -d "$DD/Intermediates.noindex/$B.build/Release-iphoneos" ]; then
+        ln -sfn Release-iphoneos "$DD/Intermediates.noindex/$B.build/Release"
+      fi
+    done
+    echo "error: DIAG bridged: products=$(readlink "$DD/Products/Release" 2>/dev/null) ksplayer=$(readlink "$DD/Intermediates.noindex/KSPlayer.build/Release" 2>/dev/null) ffmpegkit=$(readlink "$DD/Intermediates.noindex/FFmpegKit.build/Release" 2>/dev/null)" | tee -a build.log
     xcodebuild build "${BUILD_ARGS[@]}" 2>&1 | tee -a build.log
     BUILD_RC=${PIPESTATUS[0]}
   fi
