@@ -47,6 +47,7 @@ enum CryptoUtils {
             throw CryptoError.message("AES 向量或数据长度无效")
         }
         var output = Data(count: data.count + kCCBlockSizeAES128)
+        let outputCapacity = output.count
         var outputLength = 0
         let status = output.withUnsafeMutableBytes { outputPointer in
             data.withUnsafeBytes { dataPointer in
@@ -59,7 +60,7 @@ enum CryptoUtils {
                             keyPointer.baseAddress, key.count,
                             ivPointer.baseAddress,
                             dataPointer.baseAddress, data.count,
-                            outputPointer.baseAddress, output.count,
+                            outputPointer.baseAddress, outputCapacity,
                             &outputLength
                         )
                     }
