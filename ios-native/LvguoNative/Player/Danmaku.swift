@@ -73,8 +73,7 @@ Self.double(source["danmakuSpeed"], fallback: 1), 0.5...2.0
 let storedMerge = JSON.dictString(source["danmakuMerge"])
 merge = Self.merges.contains { $0.0 == storedMerge}
 ? storedMerge: "ten"
-words = (source["danmakuWords"] as? [Any]) ?? []
-.compactMap { $0 as? String}
+words = JSON.dictStringArray(source["danmakuWords"])
 loading = false
 if AppData.readJSONDictionary(file) == nil, dict != nil {
 save()
