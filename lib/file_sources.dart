@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:encrypt/encrypt.dart' as enc;
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1179,28 +1179,35 @@ class TianyiSourceClient implements FileSourceClient {
 // 中国移动云盘原生（实验）
 // ---------------------------------------------------------------------------
 
-/// 中国移动云盘原生客户端（实验性，未实测）：按 Alist 开源 139
-/// 驱动公开的新个人云接口形态实现——personal-kd-njs.yun.139.com
-/// 的 hcy/file/list 列目录、hcy/file/download 现取下载地址，
-/// Authorization 头鉴权。令牌本体是 yun.139.com 下名为
-/// authorization 的 Cookie 的值（cloud139 README / Alist 文档）；
-/// hcy 接口只认 Authorization 头、不认 Cookie 头，所以凭据若是
-/// 整段 Cookie 串，先从里面抠出 authorization 项再当令牌用，
-/// 抠不到才整段当 Cookie 头发送。固定头对齐 Alist 驱动
-/// drivers/139 的 shareHeaders（hcy-cool-flag / CMS-DEVICE /
-/// x-m4c-caller / X-Yun-Api-Version / Origin）。
-/// hcy 加密请求用某把密钥没被网关接受（解密失败，或网关明文回
-/// 01000008「无法匹配密钥或未加密」）时抛出，触发换下一把候选密钥重试。
-class _HcyKeyMismatch implements Exception {
-  _HcyKeyMismatch(this.rawResponse);
-  final String rawResponse;
-}
-
+/// 中国移动云盘原生客户端（实验性，未实测）：按 OpenList 官方驱动
+/// drivers/139 的 personal_new（新个人云）形态实现——先向
+/// user-njs.yun.139.com/user/route/qryRoutePolicy 查账号专属的个人云
+/// 节点地址（源码 `requestRoute` / `Init`），再在该节点上调
+/// /file/list 列目录、/file/getDownloadUrl 现取下载地址（源码
+/// `personalPost` → `newRequest`、`personalGetFiles`、
+/// `personalGetLink`）。请求体是明文 JSON，不做加密；鉴权靠
+/// Authorization: Basic <令牌>，另加 Mcloud-Sign 签名头（源码
+/// `calSign`：请求体先 encodeURIComponent、字符排序、base64 后与
+/// 时间戳+随机串一起三轮 MD5）。令牌本体是 yun.139.com 下名为
+/// authorization 的 Cookie 的值，与 OpenList 里手填的 Authorization
+/// 是同一个东西（base64 串，解码后以冒号分段、第二段是账号名，
+/// 路由查询要用，见源码 `refreshToken` 的解析）；凭据若是整段
+/// Cookie 串，先从里面抠出 authorization 项再当令牌用。
+/// 之前两套形态的实测结论：hcy 网关（hcy/file/list）明文报
+/// 01000008、按 `yun139EncryptedRequest` 加 AES 信封换两把公开
+/// 密钥仍报 01000008，已整段删除，不再保留双形态。
 class MobileSourceClient implements FileSourceClient {
   MobileSourceClient(this.source);
   final FileSource source;
 
-  static const _base = 'https://personal-kd-njs.yun.139.com';
+  /// 路由查询失败时的回退节点（OpenList 是初始化直接失败；这里回退
+  /// 到已知的个人云节点域名继续，让真正的接口报错透出给用户）。
+  static const _defaultHost = 'https://personal-kd-njs.yun.139.com';
+  static const _routeUrl =
+      'https://user-njs.yun.139.com/user/route/qryRoutePolicy';
+
+  /// 按令牌缓存路由查询下发的个人云节点，避免每次列目录都查一遍。
+  static final _hostCache = <String, String>{};
 
   /// 凭据是整段 Cookie 串时，抠其中名为 authorization 的一项。
   String? get _cookieToken {
@@ -1217,148 +1224,192 @@ class MobileSourceClient implements FileSourceClient {
     return null;
   }
 
-  bool get _cookieMode {
-    final value = source.credential;
-    return _cookieToken == null && value.contains(';') && value.contains('=');
-  }
-
-  Map<String, String> get _headers {
-    final raw = source.credential;
-    final token = _cookieToken ?? raw;
-    return {
-      if (_cookieMode)
-        'Cookie': raw
-      else
-        'Authorization': token.startsWith('Basic ') ? token : 'Basic $token',
-      'x-yun-channel-source': '10000034',
-      'x-yun-api-version': 'v1',
-      'hcy-cool-flag': '1',
-      'CMS-DEVICE': 'default',
-      'x-m4c-caller': 'PC',
-      'Origin': 'https://yun.139.com',
-      'Referer': 'https://yun.139.com/',
-      'User-Agent': _browserUserAgent,
-      'Accept': 'application/json, text/plain, */*',
-    };
-  }
-
-  /// hcy 网关加密请求的候选固定密钥，按 OpenList drivers/139/util.go 里
-  /// `yun139EncryptedRequest` 的调用方取值：主密钥是 KEY_HEX_1 的 hex
-  /// 解码结果（thirdlogin、andAlbum 等 hcy 接口都用它，解码后是 24 字节
-  /// ASCII，走 AES-192）；备用是 share 接口的 shareAesKeyHex，即字符串
-  /// "PVGDwmcvfs1uV3d1" 的原始字节（AES-128）。探活/请求时逐个试，
-  /// 先命中的会被记住，后续请求直接用它。
-  static final _hcyKeys = <Uint8List>[
-    _hexDecode('73634235495062495331515373756c734e7253306c673d3d'),
-    Uint8List.fromList(utf8.encode('PVGDwmcvfs1uV3d1')),
-  ];
-  static int _hcyKeyIndex = 0;
-
-  static Uint8List _hexDecode(String hex) {
-    final out = Uint8List(hex.length ~/ 2);
-    for (var i = 0; i < out.length; i++) {
-      out[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+  /// 实际使用的令牌：去掉可能带上的 "Basic " 前缀（OpenList 的
+  /// `credentialState` 明确要求 Authorization 值本身不带 Basic 前缀，
+  /// 前缀由发请求时统一加）。
+  String get _token {
+    var token = (_cookieToken ?? source.credential).trim();
+    if (token.toLowerCase().startsWith('basic ')) {
+      token = token.substring(6).trim();
     }
-    return out;
+    return token;
   }
 
-  /// 对齐 OpenList `sortedJsonStringify`：对象键字典序递归排序、紧凑
-  /// 输出、整数不带小数点。仅一处有意偏差：源码对字符串值先试 JSON
-  /// 解析、标量解析成功会去掉引号（如把纯数字字符串写成数字），与本
-  /// 接口字段类型（parentFileId / fileId 均为字符串）不符，这里只对
-  /// 解析出对象/数组的字符串递归，标量字符串一律按字符串输出。
-  static String _sortedJsonStringify(Object? value) {
-    if (value == null) return 'null';
-    if (value is String) {
-      try {
-        final parsed = jsonDecode(value);
-        if (parsed is Map || parsed is List) {
-          return _sortedJsonStringify(parsed);
-        }
-      } catch (_) {
-        // 不是 JSON 串，按普通字符串处理。
+  /// 从令牌解出账号名（对齐 OpenList `refreshToken` 对 Authorization
+  /// 的解析：base64 解码后以 ":" 分段，第二段是账号）。解不出返回
+  /// null，此时跳过路由查询、直接用回退节点。
+  String? get _account {
+    try {
+      final decoded = utf8.decode(
+        base64Decode(base64.normalize(_token)),
+        allowMalformed: true,
+      );
+      final splits = decoded.split(':');
+      if (splits.length >= 3 && splits[1].isNotEmpty) return splits[1];
+    } catch (_) {
+      // 令牌不是预期的 base64 分段形态。
+    }
+    return null;
+  }
+
+  static String _md5Hex(String input) =>
+      md5.convert(utf8.encode(input)).toString();
+
+  /// 对齐 OpenList `encodeURIComponent`（util.go）：JS 语义的
+  /// encodeURIComponent——UTF-8 字节逐个处理，只保留 A-Za-z0-9 与
+  /// - _ . ! ~ * ' ( )，其余一律 %XX（大写十六进制，空格为 %20）。
+  static String _encodeURIComponent(String input) {
+    final buffer = StringBuffer();
+    for (final byte in utf8.encode(input)) {
+      final unreserved =
+          (byte >= 0x41 && byte <= 0x5A) || // A-Z
+          (byte >= 0x61 && byte <= 0x7A) || // a-z
+          (byte >= 0x30 && byte <= 0x39) || // 0-9
+          byte == 0x2D || // -
+          byte == 0x5F || // _
+          byte == 0x2E || // .
+          byte == 0x21 || // !
+          byte == 0x7E || // ~
+          byte == 0x2A || // *
+          byte == 0x27 || // '
+          byte == 0x28 || // (
+          byte == 0x29; // )
+      if (unreserved) {
+        buffer.writeCharCode(byte);
+      } else {
+        buffer.write('%');
+        buffer.write(byte.toRadixString(16).toUpperCase().padLeft(2, '0'));
       }
-      return jsonEncode(value);
     }
+    return buffer.toString();
+  }
+
+  /// 对齐 OpenList `calSign`（util.go）：body 先 encodeURIComponent，
+  /// 再按字符排序、整体 base64，MD5 后拼上 "ts:randStr" 的 MD5，
+  /// 拼接串再 MD5 并转大写。
+  static String _calSign(String body, String ts, String randStr) {
+    final chars = _encodeURIComponent(body).split('')..sort();
+    final b64 = base64Encode(utf8.encode(chars.join()));
+    final res = _md5Hex(b64) + _md5Hex('$ts:$randStr');
+    return _md5Hex(res).toUpperCase();
+  }
+
+  /// 签名用的时间戳，格式与源码 `time.Now().Format("2006-01-02
+  /// 15:04:05")` 一致（本地时间）。
+  static String _timestamp() {
+    final now = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${now.year}-${two(now.month)}-${two(now.day)} '
+        '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
+  }
+
+  /// 签名用的随机串（源码 `random.String(16)`；随机串本身随签名头
+  /// 明文发送，服务端用同一串重算签名，字符集不影响验证）。
+  static String _randomString(int length) {
+    const charset =
+        '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    final random = Random.secure();
+    return List<String>.generate(
+      length,
+      (_) => charset[random.nextInt(charset.length)],
+    ).join();
+  }
+
+  /// 请求体的规范序列化：对象键字典序递归排序、紧凑输出——与 Go
+  /// encoding/json 对 map 的输出一致。签名与实际发送共用同一份
+  /// 字符串，保证签的就是发的。
+  static String _canonicalJson(Object? value) {
+    if (value == null) return 'null';
+    if (value is String) return jsonEncode(value);
+    if (value is bool) return value ? 'true' : 'false';
     if (value is num) {
       if (value is int) return '$value';
       final d = value.toDouble();
       if (d == d.truncateToDouble() && d.abs() < 1e15) return '${d.toInt()}';
       return '$d';
     }
-    if (value is bool) return value ? 'true' : 'false';
     if (value is List) {
-      return '[${value.map(_sortedJsonStringify).join(',')}]';
+      return '[${value.map(_canonicalJson).join(',')}]';
     }
     if (value is Map) {
       final keys = value.keys.map((k) => '$k').toList()..sort();
       final pairs = keys.map(
-        (k) => '${jsonEncode(k)}:${_sortedJsonStringify(value[k])}',
+        (k) => '${jsonEncode(k)}:${_canonicalJson(value[k])}',
       );
       return '{${pairs.join(',')}}';
     }
     return jsonEncode(value);
   }
 
-  /// hcy 加密请求（对齐 OpenList `yun139EncryptedRequest`）：请求体先
-  /// 排序序列化，再 AES-CBC / PKCS7 加密，随机 16 字节 IV 拼在密文前
-  /// 一起 base64 作为请求体发出；响应若以 { 开头是明文 JSON（错误也
-  /// 走这条，原文透出给 [_check]），否则同样是 base64(IV+密文)，用同
-  /// 一把密钥解密后再解析。密钥不匹配时换下一把候选密钥重试。
-  Future<Map<String, dynamic>> _encryptedPost(
-    String path,
-    Map<String, dynamic> body,
-  ) async {
-    _HcyKeyMismatch? lastMismatch;
-    for (var attempt = 0; attempt < _hcyKeys.length; attempt++) {
-      final keyIndex = (_hcyKeyIndex + attempt) % _hcyKeys.length;
-      try {
-        final json = await _encryptedPostWithKey(
-          path,
-          body,
-          _hcyKeys[keyIndex],
-        );
-        _hcyKeyIndex = keyIndex;
-        return json;
-      } on _HcyKeyMismatch catch (e) {
-        lastMismatch = e;
-      }
-    }
-    throw FileSourceFailure(
-      '中国移动云盘加密请求失败（原始返回：${lastMismatch?.rawResponse ?? ''}）',
-    );
-  }
-
-  Future<Map<String, dynamic>> _encryptedPostWithKey(
-    String path,
-    Map<String, dynamic> body,
-    Uint8List keyBytes,
-  ) async {
-    final plain = _sortedJsonStringify(body);
-    final random = Random.secure();
-    final ivBytes = Uint8List.fromList(
-      List<int>.generate(16, (_) => random.nextInt(256)),
-    );
-    final encrypter = enc.Encrypter(
-      enc.AES(enc.Key(keyBytes), mode: enc.AESMode.cbc, padding: 'PKCS7'),
-    );
-    final cipherBytes = encrypter
-        .encryptBytes(utf8.encode(plain), iv: enc.IV(ivBytes))
-        .bytes;
-    final payload = base64Encode(<int>[...ivBytes, ...cipherBytes]);
-
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+  /// 带 Mcloud-Sign 的 POST 发送：[body] 是已规范序列化的字符串
+  /// （签它、发它）。[route] 为 true 时用源码 `requestRoute` 的小写
+  /// 头组，否则用 `newRequest` 的头组（两组在源码里本就不同，原样
+  /// 对齐）。错误处理与 [jsonRequest] 一致——非 200 / 非 JSON /
+  /// 网络错误都翻成带原始返回片段的 [FileSourceFailure]。
+  Future<Map<String, dynamic>> _signedPost(
+    Uri uri,
+    String body, {
+    required bool route,
+  }) async {
+    final ts = _timestamp();
+    final randStr = _randomString(16);
+    final sign = '$ts,$randStr,${_calSign(body, ts, randStr)}';
+    final headers = route
+        ? <String, String>{
+            'Accept': 'application/json, text/plain, */*',
+            'CMS-DEVICE': 'default',
+            'Authorization': 'Basic $_token',
+            'mcloud-channel': '1000101',
+            'mcloud-client': '10701',
+            'mcloud-sign': sign,
+            'mcloud-version': '7.14.0',
+            'Origin': 'https://yun.139.com',
+            'Referer': 'https://yun.139.com/w/',
+            'x-DeviceInfo':
+                '||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||',
+            'x-huawei-channelSrc': '10000034',
+            'x-inner-ntwk': '2',
+            'x-m4c-caller': 'PC',
+            'x-m4c-src': '10002',
+            'x-SvcType': '1',
+            'Inner-Hcy-Router-Https': '1',
+            'User-Agent': _browserUserAgent,
+          }
+        : <String, String>{
+            'Accept': 'application/json, text/plain, */*',
+            'Authorization': 'Basic $_token',
+            'Caller': 'web',
+            'Cms-Device': 'default',
+            'Mcloud-Channel': '1000101',
+            'Mcloud-Client': '10701',
+            'Mcloud-Route': '001',
+            'Mcloud-Sign': sign,
+            'Mcloud-Version': '7.14.0',
+            'x-DeviceInfo':
+                '||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||',
+            'x-huawei-channelSrc': '10000034',
+            'x-inner-ntwk': '2',
+            'x-m4c-caller': 'PC',
+            'x-m4c-src': '10002',
+            'x-SvcType': '1',
+            'X-Yun-Api-Version': 'v1',
+            'X-Yun-App-Channel': '10000034',
+            'X-Yun-Channel-Source': '10000034',
+            'X-Yun-Client-Info':
+                '||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||',
+            'X-Yun-Module-Type': '100',
+            'X-Yun-Svc-Type': '1',
+            'User-Agent': _browserUserAgent,
+          };
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
     try {
       final request = await client
-          .openUrl('POST', Uri.parse('$_base/$path'))
+          .openUrl('POST', uri)
           .timeout(const Duration(seconds: 20));
-      _headers.forEach(request.headers.set);
-      request.headers.contentType = ContentType(
-        'text',
-        'plain',
-        charset: 'utf-8',
-      );
-      request.write(payload);
+      headers.forEach(request.headers.set);
+      request.headers.contentType = ContentType.json;
+      request.write(body);
       final response = await request.close().timeout(
         const Duration(seconds: 25),
       );
@@ -1371,38 +1422,14 @@ class MobileSourceClient implements FileSourceClient {
           '服务器返回 ${response.statusCode}：${excerptText(text)}',
         );
       }
-      if (text.startsWith('{')) {
-        Object? decoded;
-        try {
-          decoded = jsonDecode(text);
-        } catch (_) {
-          decoded = null;
-        }
-        if (decoded is Map) {
-          final map = Map<String, dynamic>.from(decoded);
-          if ('${map['code'] ?? ''}' == '01000008') {
-            throw _HcyKeyMismatch(excerptText(text));
-          }
-          return map;
-        }
-        throw FileSourceFailure('服务器返回了无法解析的内容：${excerptText(text)}');
-      }
       try {
-        final raw = base64Decode(text.replaceAll(RegExp(r'\s+'), ''));
-        if (raw.length <= 16) throw const FormatException('too short');
-        final plainBytes = encrypter.decryptBytes(
-          enc.Encrypted(Uint8List.fromList(raw.sublist(16))),
-          iv: enc.IV(Uint8List.fromList(raw.sublist(0, 16))),
-        );
-        final decoded = jsonDecode(utf8.decode(plainBytes));
+        final decoded = jsonDecode(text);
         if (decoded is Map) return Map<String, dynamic>.from(decoded);
-        throw const FormatException('not a json object');
       } catch (_) {
-        throw _HcyKeyMismatch(excerptText(text));
+        // 落到下面的统一报错。
       }
+      throw FileSourceFailure('服务器返回了无法解析的内容：${excerptText(text)}');
     } on FileSourceFailure {
-      rethrow;
-    } on _HcyKeyMismatch {
       rethrow;
     } on SocketException {
       throw FileSourceFailure('连不上服务器，请检查网络');
@@ -1411,6 +1438,64 @@ class MobileSourceClient implements FileSourceClient {
     } finally {
       client.close(force: true);
     }
+  }
+
+  /// 查账号专属的个人云节点（源码 `Init` 里的 Query Route Policy）：
+  /// 向 user-njs 查路由策略，取 modName 为 personal 的 httpsUrl。
+  /// 查询失败不拦路，回退 [_defaultHost] 继续，真正的接口报错由
+  /// 随后的 list 透出。
+  Future<String> _resolveHost() async {
+    final token = _token;
+    final cached = _hostCache[token];
+    if (cached != null) return cached;
+    var host = _defaultHost;
+    final account = _account;
+    if (account != null) {
+      try {
+        final json = await _signedPost(
+          Uri.parse(_routeUrl),
+          _canonicalJson({
+            'userInfo': {
+              'userType': 1,
+              'accountType': 1,
+              'accountName': account,
+            },
+            'modAddrType': 1,
+          }),
+          route: true,
+        );
+        _check(json);
+        final data = json['data'];
+        final policies = data is Map ? data['routePolicyList'] : null;
+        if (policies is List) {
+          for (final item in policies) {
+            if (item is Map && item['modName'] == 'personal') {
+              final url = '${item['httpsUrl'] ?? ''}'.replaceAll(
+                RegExp(r'/+$'),
+                '',
+              );
+              if (url.isNotEmpty) host = url;
+            }
+          }
+        }
+      } catch (_) {
+        // 路由查询失败不拦路：用回退节点继续。
+      }
+    }
+    return _hostCache[token] = host;
+  }
+
+  /// personal_new 的一次业务请求（源码 `personalPost`）。
+  Future<Map<String, dynamic>> _personalPost(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final host = await _resolveHost();
+    return _signedPost(
+      Uri.parse('$host$path'),
+      _canonicalJson(body),
+      route: false,
+    );
   }
 
   void _check(Map<String, dynamic> json) {
@@ -1426,21 +1511,23 @@ class MobileSourceClient implements FileSourceClient {
 
   @override
   Future<List<FileEntry>> list(String? path) async {
-    final parentId = path ?? '/';
+    // personal_new 的根目录 id 是 "/"（源码 Init 的 RootFolderID
+    // 默认值）；子目录用条目自身的 fileId 作 path 传入。
+    final parentId = (path == null || path.isEmpty) ? '/' : path;
     final entries = <FileEntry>[];
-    var page = 1;
-    while (page <= 30) {
-      final json = await _encryptedPost('hcy/file/list', {
-        'parentFileId': parentId,
-        'pageInfo': {'pageNum': page, 'pageSize': 100},
+    var cursor = '';
+    // 游标分页（源码 personalGetFiles）：nextPageCursor 为空即止。
+    for (var page = 0; page < 200; page++) {
+      final json = await _personalPost('/file/list', {
+        'imageThumbnailStyleList': ['Small', 'Large'],
         'orderBy': 'updated_at',
         'orderDirection': 'DESC',
+        'pageInfo': {'pageCursor': cursor, 'pageSize': 100},
+        'parentFileId': parentId,
       });
       _check(json);
       final data = json['data'];
-      final items = data is Map
-          ? (data['items'] ?? data['contentList'] ?? data['list'])
-          : null;
+      final items = data is Map ? data['items'] : null;
       if (items is! List) {
         throw FileSourceFailure(
           '中国移动云盘返回结构异常（原始返回：${excerptText(jsonEncode(json))}）',
@@ -1448,24 +1535,18 @@ class MobileSourceClient implements FileSourceClient {
       }
       for (final row in items) {
         if (row is! Map) continue;
-        final isDirectory =
-            row['type'] == 'folder' ||
-            row['category'] == 'folder' ||
-            row['isFolder'] == true ||
-            row['folder'] == true;
         entries.add(
           FileEntry(
-            name: '${row['name'] ?? row['fileName'] ?? ''}',
-            href: '${row['fileId'] ?? row['contentId'] ?? row['id'] ?? ''}',
-            isDirectory: isDirectory,
-            size: (row['size'] as num?)?.toInt() ??
-                (row['fileSize'] as num?)?.toInt() ??
-                0,
+            name: '${row['name'] ?? ''}',
+            href: '${row['fileId'] ?? ''}',
+            isDirectory: row['type'] == 'folder',
+            size: (row['size'] as num?)?.toInt() ?? 0,
           ),
         );
       }
-      if (items.length < 100) break;
-      page++;
+      final next = data is Map ? data['nextPageCursor'] : null;
+      if (next is! String || next.isEmpty) break;
+      cursor = next;
     }
     entries.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
@@ -1476,20 +1557,27 @@ class MobileSourceClient implements FileSourceClient {
 
   @override
   Future<FilePlayTarget> target(FileEntry entry) async {
-    for (final endpoint in const ['hcy/file/download', 'hcy/file/getDownloadUrl']) {
-      final json = await _encryptedPost(endpoint, {'fileId': entry.href});
-      _check(json);
-      final data = json['data'];
-      String url = '';
-      if (data is String) {
-        url = data;
-      } else if (data is Map) {
-        url =
-            '${data['cdnUrl'] ?? data['url'] ?? data['downloadUrl'] ?? data['fileDownloadUrl'] ?? ''}';
+    // 源码 personalGetLink：cdnSwitch 为真用 cdnUrl，否则用 url。
+    final json = await _personalPost('/file/getDownloadUrl', {
+      'fileId': entry.href,
+    });
+    _check(json);
+    final data = json['data'];
+    var url = '';
+    if (data is Map) {
+      final cdnUrl = '${data['cdnUrl'] ?? ''}';
+      if (data['cdnSwitch'] == true && cdnUrl.isNotEmpty) {
+        url = cdnUrl;
+      } else {
+        url = '${data['url'] ?? ''}';
       }
-      if (url.isNotEmpty) return FilePlayTarget(url: url);
     }
-    throw FileSourceFailure('中国移动云盘没有返回下载地址，请看接口原始报错或稍后再试');
+    if (url.isEmpty) {
+      throw FileSourceFailure(
+        '中国移动云盘没有返回下载地址（原始返回：${excerptText(jsonEncode(json))}）',
+      );
+    }
+    return FilePlayTarget(url: url);
   }
 
   @override
