@@ -111,6 +111,19 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
     private var roles: [String: [String: String]] = [:]
     /// 分片成功计数（按 key）：日志采样，避免刷满日记
     private var segmentOKCounts: [String: Int] = [:]
+    /// 内容信息 UTI 日志去重（按资源 key + 路径种类，
+    /// 每种只记一行：contentInformation 实际填了什么 UTI
+    /// 是 Cannot Open 排查的关键证据，不能靠猜）
+    private var contentTypeLogged: Set<String> = []
+
+    private func logContentTypeOnce(key: String, kind: String, line: String) {
+        lock.lock()
+        let inserted = contentTypeLogged.insert(key + kind).inserted
+        lock.unlock()
+        if inserted {
+            DiaryStore.shared.add(line)
+        }
+    }
 
     /// 播放列表的内容类型：必须是系统注册的 UTI
     /// （UTType(filenameExtension:"m3u8") = com.apple.mpegurl）。
@@ -182,6 +195,7 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
         entries.removeValue(forKey: key)
         roles.removeValue(forKey: key)
         segmentOKCounts.removeValue(forKey: key)
+        contentTypeLogged = contentTypeLogged.filter { !$0.hasPrefix(key) }
         lock.unlock()
     }
 
@@ -307,6 +321,10 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
             info.contentType = Self.playlistContentType
             info.contentLength = Int64(data.count)
             info.isByteRangeAccessSupported = false
+            logContentTypeOnce(
+                key: key, kind: "|text",
+                line: "内容信息（文本播放列表）：UTI \(Self.playlistContentType)"
+            )
         }
         if let dataRequest = request.dataRequest {
             dataRequest.respond(with: data)
@@ -485,10 +503,22 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
             completionHandler(.allow)
             return
         }
-        let contentType = http.value(forHTTPHeaderField: "Content-Type")?
-            .split(separator: ";").first.map(String.init) ?? ""
-        if let type = UTType(mimeType: contentType.trimmingCharacters(in: .whitespaces)) {
+        let contentType = (http.value(forHTTPHeaderField: "Content-Type")?
+            .split(separator: ";").first.map(String.init) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        if let type = UTType(mimeType: contentType) {
             info.contentType = type.identifier
+            logContentTypeOnce(
+                key: state.key, kind: "|stream",
+                line: "内容信息：UTI \(type.identifier)（源 Content-Type \(contentType.isEmpty ? "无" : contentType)）"
+            )
+        } else {
+            // 映射不出注册 UTI 就不填：AVPlayer 只能靠字节
+            // 内容猜形态，这一行就是下次定位的证据
+            logContentTypeOnce(
+                key: state.key, kind: "|stream",
+                line: "内容信息：未填 UTI（源 Content-Type \(contentType.isEmpty ? "无" : contentType) 无法映射为注册 UTI）"
+            )
         }
         // 内容长度必须如实：206 时 expectedContentLength 只是
         // 本段长度，全长只认 Content-Range 的总数部分
@@ -742,6 +772,10 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
             info.contentType = Self.playlistContentType
             info.contentLength = Int64(data.count)
             info.isByteRangeAccessSupported = false
+            logContentTypeOnce(
+                key: whole.key, kind: "|playlist",
+                line: "内容信息（播放列表）：UTI \(Self.playlistContentType)"
+            )
         }
         if let dataRequest = loadingRequest.dataRequest {
             let start = Int(dataRequest.requestedOffset)
@@ -913,6 +947,161 @@ extension Data {
     }
 }
 
+// MARK: - 媒体格式探针
+
+/// 直链计划的格式指纹探针：计划生成（load）时用宿主传输
+/// 对目标发一次 bytes=0-15 的 Range 请求（带计划凭据头、
+/// 走应用代理设置），按文件头魔数判定容器。
+/// 背景（1.3 build 3 真机深日志）：直链文件被 AVPlayer
+/// 在解析文件头阶段以「媒体损坏」拒收，代理/直连一致、
+/// 确定性复现——先把容器钉死：若是 FLV/Matroska，
+/// AVFoundation 根本不支持，换多少次地址都没用；
+/// 若是标准 MP4，则要查品牌/编码/盒子结构。
+/// 探针只读 16 字节，失败不阻断播放流程。
+final class MediaFormatProbe: NSObject, URLSessionDataDelegate {
+    enum Support {
+        /// 容器本身是 AVPlayer 认的（MP4 系 ftyp）
+        case supported
+        /// AVPlayer 完全不支持（FLV / Matroska）
+        case unsupported
+        /// 判不出，或容器支持情况不单一（MPEG-TS / 未知）
+        case unknown
+    }
+
+    struct Verdict {
+        var status: Int
+        var contentType: String
+        var headHex: String
+        var container: String
+        var support: Support
+
+        /// 日记行：状态 / Content-Type 原文 / 头 16 字节 / 判定
+        var diaryLine: String {
+            let supportText: String
+            switch support {
+            case .supported: supportText = "系统播放器支持的容器"
+            case .unsupported: supportText = "系统播放器不支持"
+            case .unknown: supportText = "支持情况待定"
+            }
+            return "格式探针：状态 \(status) · Content-Type "
+                + "\(contentType.isEmpty ? "无" : contentType) · 头字节 "
+                + "\(headHex) · 判定容器 \(container)（\(supportText)）"
+        }
+
+        /// 失败页一行摘要
+        var pageLine: String { "格式探针：\(container) 格式" }
+    }
+
+    /// 魔数判定：FLV = 46 4C 56；MP4 = 偏移 4 处 ftyp；
+    /// MPEG-TS = 首字节 47；Matroska = 1A 45 DF A3
+    static func detectContainer(_ bytes: [UInt8]) -> (name: String, support: Support) {
+        if bytes.count >= 3, bytes[0] == 0x46, bytes[1] == 0x4C, bytes[2] == 0x56 {
+            return ("FLV", .unsupported)
+        }
+        if bytes.count >= 4, bytes[0] == 0x1A, bytes[1] == 0x45,
+           bytes[2] == 0xDF, bytes[3] == 0xA3 {
+            return ("Matroska", .unsupported)
+        }
+        if bytes.count >= 8,
+           bytes[4] == 0x66, bytes[5] == 0x74, bytes[6] == 0x79, bytes[7] == 0x70 {
+            return ("MP4", .supported)
+        }
+        if bytes.first == 0x47 {
+            return ("MPEG-TS", .unknown)
+        }
+        return ("未知", .unknown)
+    }
+
+    private var session: URLSession?
+    private var received = Data()
+    private var status = 0
+    private var contentType = ""
+    private var finished = false
+    private let completion: (Verdict?) -> Void
+
+    private init(completion: @escaping (Verdict?) -> Void) {
+        self.completion = completion
+    }
+
+    static func start(
+        url: URL, headers: [String: String], sourceId: String,
+        completion: @escaping (Verdict?) -> Void
+    ) -> MediaFormatProbe {
+        let probe = MediaFormatProbe(completion: completion)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        request.setValue("bytes=0-15", forHTTPHeaderField: "Range")
+        let configuration = URLSessionConfiguration.ephemeral
+        ProxySettings.configure(
+            configuration,
+            effective: ProxySettings.effective(
+                forModule: sourceId.isEmpty ? nil : sourceId
+            )
+        )
+        let session = URLSession(
+            configuration: configuration, delegate: probe, delegateQueue: nil
+        )
+        probe.session = session
+        session.dataTask(with: request).resume()
+        return probe
+    }
+
+    private func makeVerdict() -> Verdict {
+        let bytes = [UInt8](received.prefix(16))
+        let (name, support) = Self.detectContainer(bytes)
+        return Verdict(
+            status: status,
+            contentType: contentType,
+            headHex: bytes.map { String(format: "%02X", $0) }
+                .joined(separator: " "),
+            container: name,
+            support: support
+        )
+    }
+
+    private func finish(_ verdict: Verdict?) {
+        guard !finished else { return }
+        finished = true
+        session?.invalidateAndCancel()
+        session = nil
+        let completion = self.completion
+        DispatchQueue.main.async { completion(verdict) }
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        if let http = response as? HTTPURLResponse {
+            status = http.statusCode
+            contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
+    ) {
+        received.append(data)
+        if received.count >= 16 {
+            finish(makeVerdict())
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        // 判定 ftyp 需要 8 字节；不足 8 字节算探针失败
+        // （上层只记一行失败，不阻断播放）
+        finish(received.count >= 8 ? makeVerdict() : nil)
+    }
+}
+
 // MARK: - 播放引擎
 
 /// AVPlayer 播放引擎。恢复策略对齐 Flutter 版 playback_recovery：
@@ -997,6 +1186,19 @@ final class PlaybackEngine: ObservableObject {
     private var currentLoadUsedProxy = false
     private var triedDirectFallback = false
     private var proxyFailureRaw = ""
+    /// 格式探针（直链计划）：结果供失败分类与失败页文案
+    private var probeVerdict: MediaFormatProbe.Verdict?
+    private var activeProbe: MediaFormatProbe?
+    /// 本次 load 是否由恢复阶梯触发：恢复链内的 load
+    /// 不重置格式失败计数与定性（新签名地址每轮都不同，
+    /// 不能靠地址变化判断是不是新的一轮用户播放）
+    private var inRecoveryChain = false
+    /// 「媒体损坏/格式不受支持」类失败已用掉的确认重取
+    /// 次数（上限 1：确定性失败不进恢复阶梯风暴重试）
+    private var formatFailureRetries = 0
+    /// 本轮失败链中已确认的格式类定性（代理/直连任一
+    /// 路径命中即成立，最终报错按格式类呈现）
+    private var chainFormatFatal = false
     private var itemStatusObservation: NSKeyValueObservation?
     private var presentationObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
@@ -1068,6 +1270,14 @@ final class PlaybackEngine: ObservableObject {
         loadWasSwitch = isSwitch
         timedOut = false
         failureText = ""
+        if !inRecoveryChain {
+            // 新的一次用户播放：格式失败计数、定性与
+            // 探针结果全部重置；恢复链内的重开保留
+            formatFailureRetries = 0
+            chainFormatFatal = false
+            probeVerdict = nil
+        }
+        inRecoveryChain = false
         if !recovering {
             loadingMessage = "正在准备播放"
         }
@@ -1081,6 +1291,28 @@ final class PlaybackEngine: ObservableObject {
         proxyFailureRaw = ""
         currentLoadUsedProxy = false
         DiaryStore.shared.add("播放计划：\(Self.planSummary(request))")
+        // 直链计划：并发发一次 16 字节格式探针（不阻断
+        // 播放），结果进日记；失败定性与失败页摘要用它
+        activeProbe = nil
+        if let url = request.url, request.playlistText == nil, !request.isLocal,
+           url.scheme == "http" || url.scheme == "https" {
+            activeProbe = MediaFormatProbe.start(
+                url: url, headers: request.headers, sourceId: request.sourceId
+            ) { [weak self] verdict in
+                guard let self, generation == self.loadGeneration else { return }
+                if let verdict {
+                    self.probeVerdict = verdict
+                    DiaryStore.shared.add(verdict.diaryLine)
+                    // 探针晚于最终失败到达时，补进失败页
+                    if self.phase == .failed,
+                       !self.failureText.contains("格式探针") {
+                        self.failureText += "\n\(verdict.pageLine)"
+                    }
+                } else {
+                    DiaryStore.shared.add("格式探针：失败（未拿到文件头）")
+                }
+            }
+        }
 
         let asset: AVURLAsset
         let needsProxy = !request.headers.isEmpty || request.playlistText != nil
@@ -1124,6 +1356,8 @@ final class PlaybackEngine: ObservableObject {
                     self.phase = .ready
                     self.recoveryAttempts = 0
                     self.recoveryRefreshes = 0
+                    self.formatFailureRetries = 0
+                    self.chainFormatFatal = false
                     self.refreshTracks(item)
                     if self.pendingStartPosition > 1 {
                         let target = self.pendingStartPosition
@@ -1143,6 +1377,12 @@ final class PlaybackEngine: ObservableObject {
                     self.logItemDiagnostics(
                         item, stage: self.triedDirectFallback ? "直连" : "代理"
                     )
+                    let formatFatal = Self.isFormatFatalError(
+                        item.error.map { $0 as NSError }
+                    ) || self.failureIsFormatFatal
+                    if formatFatal {
+                        self.chainFormatFatal = true
+                    }
                     if self.currentLoadUsedProxy, !self.triedDirectFallback,
                        let request = self.currentRequest,
                        request.url != nil, !request.isLocal {
@@ -1156,10 +1396,14 @@ final class PlaybackEngine: ObservableObject {
                     } else if !self.proxyFailureRaw.isEmpty {
                         self.handleFailure(
                             reason: "open_exception",
-                            raw: "代理打开失败：\(self.proxyFailureRaw)；直连打开失败：\(raw)"
+                            raw: "代理打开失败：\(self.proxyFailureRaw)；直连打开失败：\(raw)",
+                            formatFatal: formatFatal
                         )
                     } else {
-                        self.handleFailure(reason: "open_exception", raw: raw)
+                        self.handleFailure(
+                            reason: "open_exception", raw: raw,
+                            formatFatal: formatFatal
+                        )
                     }
                 default:
                     break
@@ -1174,6 +1418,35 @@ final class PlaybackEngine: ObservableObject {
         observeItemNotifications(item)
         player.replaceCurrentItem(with: item)
         scheduleLoadTimeout(generation: generation)
+    }
+
+    /// 「媒体损坏 / 格式不受支持」类确定性失败判定：
+    /// AVFoundation -11829（AVErrorFileFailedToParse，
+    /// 失败原因 "This media may be damaged."）/ -11828
+    /// （AVErrorFileFormatNotRecognized，格式无法识别）/
+    /// -11853（数据无法解析），或错误链中带 NSOSStatus
+    /// -12848（1.3 build 3 真机实测的 -11829 组合）。
+    /// 这类失败发生在解析文件头阶段，与网络、地址新旧
+    /// 无关：同一计划重取多少次结果都一样，不进恢复
+    /// 阶梯风暴重试（见 handleFailure 的格式分支）。
+    static func isFormatFatalError(_ error: NSError?) -> Bool {
+        guard let error else { return false }
+        if error.domain == AVFoundationErrorDomain,
+           error.code == -11829 || error.code == -11828 || error.code == -11853 {
+            return true
+        }
+        var current: NSError? = error
+        while let item = current {
+            if item.code == -12848 { return true }
+            current = item.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
+    /// 本次失败是否已定性为格式类：本链任一路径的错误
+    /// 命中分类，或探针判定容器不受系统播放器支持
+    private var failureIsFormatFatal: Bool {
+        chainFormatFatal || probeVerdict?.support == .unsupported
     }
 
     /// AVPlayerItem 失败时的系统错误原文（含错误日志里的底层原因）
@@ -1347,34 +1620,64 @@ final class PlaybackEngine: ObservableObject {
 
     // MARK: 恢复（对齐 Flutter PlaybackRecovery）
 
-    private func handleFailure(reason: String, raw: String) {
+    private func handleFailure(reason: String, raw: String, formatFatal: Bool = false) {
         lastFailureReason = reason
         lastRawError = raw
         guard !recovering, phase != .failed else { return }
-        guard recoveryAttempts < 6, let onRecover else {
+        if formatFatal || failureIsFormatFatal {
+            // 确定性失败（媒体损坏/格式不受支持）：同一
+            // 计划最多再重取 1 次确认，不进 6 次恢复阶梯。
+            // 1.3 build 3 真机实测：同一计划被整体重试
+            // 十余次、每次错误完全相同，纯属风暴重试
+            chainFormatFatal = true
+            guard formatFailureRetries < 1, onRecover != nil else {
+                failNow(reason: reason, raw: raw)
+                return
+            }
+            formatFailureRetries += 1
+            recoveryAttempts += 1
+            if recoveryRefreshes < 3 { recoveryRefreshes += 1 }
+            loadingMessage = "正在重新获取播放地址确认"
+            phase = .loading
+            scheduleRecovery(reason: reason, raw: raw, attempt: recoveryAttempts)
+            return
+        }
+        guard recoveryAttempts < 6, onRecover != nil else {
             failNow(reason: reason, raw: raw)
             return
         }
-        recovering = true
         recoveryAttempts += 1
         let attempt = recoveryAttempts
         let isRefresh = recoveryRefreshes < 3
         if isRefresh { recoveryRefreshes += 1 }
         loadingMessage = isRefresh ? "正在重新获取播放地址" : "正在切换备用线路"
         phase = .loading
+        scheduleRecovery(reason: reason, raw: raw, attempt: attempt)
+    }
+
+    /// 恢复阶梯的一次取址调度（普通失败与格式类确认
+    /// 共用）：退避后问 onRecover 要新计划，拿到就重开
+    /// （标记恢复链，load 不重置格式失败计数）；拿不到
+    /// 时普通失败继续阶梯、格式类直接报错。
+    private func scheduleRecovery(reason: String, raw: String, attempt: Int) {
+        recovering = true
         let backoff: [Double] = [0.8, 1.5, 2.5, 4.0, 6.0, 6.0]
         let delay = backoff[min(attempt - 1, backoff.count - 1)]
         let keepPosition = currentTime
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self else { return }
-            let fresh = await onRecover(reason, attempt)
+            let recover = self.onRecover
+            let fresh = await recover?(reason, attempt)
             self.recovering = false
             if var fresh {
                 if keepPosition > 1 {
                     fresh.startPosition = keepPosition
                 }
+                self.inRecoveryChain = true
                 self.load(fresh, autoplay: true, isSwitch: false)
+            } else if self.chainFormatFatal {
+                self.failNow(reason: reason, raw: raw)
             } else if self.recoveryAttempts < 6 {
                 self.handleFailure(reason: reason, raw: raw)
             } else {
@@ -1401,9 +1704,22 @@ final class PlaybackEngine: ObservableObject {
         default: symptom = "播放器报错"
         }
         let isLocal = currentRequest?.isLocal ?? false
-        var text = symptom + (isLocal
-            ? "，本地视频没能播放。可重试或重新下载，也可以改为在线播放。"
-            : "，自动恢复未成功。可重试、换一集或选择其他清晰度。")
+        var text: String
+        if let verdict = probeVerdict, verdict.support == .unsupported, !isLocal {
+            // 容器已定性为系统播放器不支持：直接写明
+            // 格式，不再用笼统的「视频打开失败」掩盖定性
+            text = "该视频是 \(verdict.container) 格式，系统播放器不支持此格式。"
+        } else if failureIsFormatFatal, reason == "open_exception", !isLocal {
+            text = "视频打开失败（文件格式不受支持或文件头损坏），"
+                + "自动恢复未成功。重复获取地址不会改变结果，可换一集或选择其他清晰度。"
+        } else {
+            text = symptom + (isLocal
+                ? "，本地视频没能播放。可重试或重新下载，也可以改为在线播放。"
+                : "，自动恢复未成功。可重试、换一集或选择其他清晰度。")
+        }
+        if let verdict = probeVerdict {
+            text += "\n\(verdict.pageLine)"
+        }
         if !raw.isEmpty {
             text += "\n原始错误：\(raw)"
         }
@@ -1651,9 +1967,16 @@ final class PlaybackEngine: ObservableObject {
         ) { [weak self] note in
             guard let self else { return }
             let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            let formatFatal = Self.isFormatFatalError(
+                error.map { $0 as NSError }
+            ) || self.failureIsFormatFatal
+            if formatFatal {
+                self.chainFormatFatal = true
+            }
             self.handleFailure(
                 reason: "open_exception",
-                raw: error?.localizedDescription ?? self.lastRawError
+                raw: error?.localizedDescription ?? self.lastRawError,
+                formatFatal: formatFatal
             )
         })
 
