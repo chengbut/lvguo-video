@@ -429,6 +429,7 @@ private struct HistoryPosterCell: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                .coverBlur(source: entry.source, explore: false)
                 if entry.totalEpisodes > 0 {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {

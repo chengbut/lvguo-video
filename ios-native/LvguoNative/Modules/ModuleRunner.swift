@@ -94,6 +94,8 @@ final class ModuleHostBridge {
         }
         shared.lock.unlock()
         print("[Module \(manifest.id)] \(message)")
+        // 同步进播放调试日记（诊断页可见，与 Flutter DiaryService 汇流一致）
+        DiaryStore.shared.add("[模块 \(manifest.id)] \(message)")
     }
 
     // MARK: - 同步 HTTP（在 JS 执行线程上阻塞等待，与 goja 的同步语义一致）
@@ -126,16 +128,67 @@ final class ModuleHostBridge {
     private var variantSessions: [String: URLSession] = [:]
     private let variantSessionLock = NSLock()
 
+    /// 代理接入（资源设置）：本模块的有效代理（单独设置优先）
+    /// 写进每个会话配置；ProxySettings.generation 变化时
+    /// 丢弃全部已建会话按新代理重建，改完即生效不用重启。
+    private var proxyGenerationSeen = -1
+    private var followSessionStorage: URLSession?
+    private var sameOriginSessionStorage: URLSession?
+
+    private func refreshProxyIfNeeded() {
+        let generation = ProxySettings.generation
+        variantSessionLock.lock()
+        defer { variantSessionLock.unlock() }
+        guard generation != proxyGenerationSeen else { return }
+        proxyGenerationSeen = generation
+        variantSessions.removeAll()
+        followSessionStorage = nil
+        sameOriginSessionStorage = nil
+    }
+
+    private func baseSession(sameOriginOnly: Bool) -> URLSession {
+        refreshProxyIfNeeded()
+        variantSessionLock.lock()
+        defer { variantSessionLock.unlock() }
+        if sameOriginOnly, let existing = sameOriginSessionStorage {
+            return existing
+        }
+        if !sameOriginOnly, let existing = followSessionStorage {
+            return existing
+        }
+        let configuration = URLSessionConfiguration.default
+        ProxySettings.configure(
+            configuration,
+            effective: ProxySettings.effective(forModule: manifest.id)
+        )
+        let created = URLSession(
+            configuration: configuration,
+            delegate: RedirectGate(sameOriginOnly: sameOriginOnly),
+            delegateQueue: nil
+        )
+        if sameOriginOnly {
+            sameOriginSessionStorage = created
+        } else {
+            followSessionStorage = created
+        }
+        return created
+    }
+
     private func session(for variant: TransportVariant, sameOriginOnly: Bool) -> URLSession {
         switch variant {
         case .standard:
-            return sameOriginOnly ? sameOriginSession : followSession
+            return baseSession(sameOriginOnly: sameOriginOnly)
         case .fresh, .freshTLS12:
+            refreshProxyIfNeeded()
             let key = "\(variant.rawValue)-\(sameOriginOnly)"
             variantSessionLock.lock()
             defer { variantSessionLock.unlock() }
             if let existing = variantSessions[key] { return existing }
             let configuration = URLSessionConfiguration.ephemeral
+            ProxySettings.configure(
+                configuration,
+                effective: ProxySettings.effective(forModule: manifest.id)
+            )
             if variant == .freshTLS12 {
                 configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
                 configuration.tlsMaximumSupportedProtocolVersion = .TLSv12
@@ -206,17 +259,6 @@ final class ModuleHostBridge {
                 && port(a) == port(b)
         }
     }
-
-    private lazy var followSession = URLSession(
-        configuration: .default,
-        delegate: RedirectGate(sameOriginOnly: false),
-        delegateQueue: nil
-    )
-    private lazy var sameOriginSession = URLSession(
-        configuration: .default,
-        delegate: RedirectGate(sameOriginOnly: true),
-        delegateQueue: nil
-    )
 
     /// 单次请求（指定传输变体）。wait 是这次尝试的信号量上限，
     /// 请求自身的 timeoutInterval 已由调用方按剩余预算设好。

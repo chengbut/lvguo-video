@@ -51,7 +51,9 @@ struct SearchView: View {
                             NavigationLink {
                                 DramaDetailView(provider: provider, item: item)
                             } label: {
-                                SearchDramaCell(item: item)
+                                SearchDramaCell(
+                                    item: item, moduleId: provider.manifest.id
+                                )
                             }
                             .buttonStyle(.plain)
                         }
@@ -198,6 +200,7 @@ private struct FlowChips: View {
 /// 搜索结果格子（与首页 DramaCell 同形态）
 private struct SearchDramaCell: View {
     let item: DramaItem
+    var moduleId: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -219,6 +222,7 @@ private struct SearchDramaCell: View {
             }
             .aspectRatio(2.0 / 3.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 14))
+            .coverBlur(source: moduleId, explore: true)
             Text(item.title)
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(.primary)

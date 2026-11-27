@@ -11,6 +11,8 @@ struct DramaDetailView: View {
     @EnvironmentObject private var historyStore: HistoryStore
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var downloads: DownloadManager
+    @EnvironmentObject private var downloadPreferences:
+        DownloadPreferencesStore
 
     @State private var drama: DramaItem?
     @State private var chapters: [ChapterItem] = []
@@ -168,6 +170,7 @@ struct DramaDetailView: View {
             }
             .frame(width: 100, height: 150)
             .clipShape(RoundedRectangle(cornerRadius: 14))
+            .coverBlur(source: provider.manifest.id, explore: false)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(displayDrama.title)
@@ -422,6 +425,20 @@ struct DramaDetailView: View {
         session.onRefresh = { [self] session in
             await resolveRequest(index: session.index, startPosition: 0, session: session)
         }
+        // 弹幕数据源：模块声明弹幕能力才注入（与原版一致——
+        // 弹幕只对有弹幕数据的源可用，其余源渲染层保持空）
+        if provider.supportsDanmaku {
+            session.danmakuProvider = provider
+            let drama = displayDrama
+            let allChapters = chapters
+            session.danmakuTaskForEpisode = { index in
+                guard allChapters.indices.contains(index) else { return nil }
+                return ModuleProvider.mediaTask(
+                    drama: drama, chapter: allChapters[index],
+                    index: index, total: allChapters.count
+                )
+            }
+        }
         return session
     }
 
@@ -474,6 +491,7 @@ struct DramaDetailView: View {
             startPosition: start,
             variants: variants,
             quality: plan.quality,
+            sourceId: provider.manifest.id,
             expectedDuration: Double(plan.durationMs) / 1000
         )
     }
@@ -516,6 +534,14 @@ struct DramaDetailView: View {
     }
 
     private func enqueueDownload(chapter: ChapterItem, index: Int) async {
+        // VIP 集与「默认包含 VIP 集」偏好（原版批量选集同语义）：
+        // 章节标记 vip 且偏好未开时不入队，只提示
+        if (chapter.raw["vip"] as? Bool) == true,
+           !downloadPreferences.includeVip {
+            message = "第 \(chapter.episodeLabel) 集是 VIP 集，"
+                + "未加入下载（可在「我的 → 下载」打开默认包含 VIP 集）"
+            return
+        }
         resolvingIndex = index
         defer { resolvingIndex = nil }
         do {

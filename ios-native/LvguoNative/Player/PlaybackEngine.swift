@@ -34,6 +34,8 @@ struct PlaybackRequest {
     var quality: Int = 0
     /// 本地文件（下载目录里的文件）：失败文案与「改为在线播放」按本地处理
     var isLocal: Bool = false
+    /// 来源模块 id（站源播放时有值）：资源代理按它取单独代理设置
+    var sourceId: String = ""
     /// 计划声明的时长（秒，模块 durationMs）：用于识别「提前结束」
     var expectedDuration: Double = 0
 
@@ -87,12 +89,38 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
     private var pending: [Int: AVAssetResourceLoadingRequest] = [:]
     private var pendingEntry: [Int: Entry] = [:]
     private var wholeLoads: [Int: WholeLoad] = [:]
-    private lazy var session: URLSession = {
-        URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-    }()
+
+    /// 播放请求走的会话：带资源设置里的代理（模块单独设置
+    /// 优先，其次全局）。代理 generation 或来源变化时重建，
+    /// 改完代理下一次播放即生效。
+    private var sessionStorage: URLSession?
+    private var sessionProxyKey = ""
+    private var sessionSourceId = ""
+
+    private var session: URLSession {
+        let key = "\(ProxySettings.generation)|\(sessionSourceId)"
+        if let sessionStorage, sessionProxyKey == key {
+            return sessionStorage
+        }
+        sessionProxyKey = key
+        sessionStorage?.invalidateAndCancel()
+        let configuration = URLSessionConfiguration.default
+        ProxySettings.configure(
+            configuration,
+            effective: ProxySettings.effective(
+                forModule: sessionSourceId.isEmpty ? nil : sessionSourceId
+            )
+        )
+        let created = URLSession(
+            configuration: configuration, delegate: self, delegateQueue: nil
+        )
+        sessionStorage = created
+        return created
+    }
 
     /// 注册一份播放资源，返回放进资源 URL 的 key
-    func register(_ entry: Entry) -> String {
+    func register(_ entry: Entry, sourceId: String = "") -> String {
+        sessionSourceId = sourceId
         let key = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         lock.lock()
         entries[key] = entry
@@ -714,7 +742,7 @@ final class PlaybackEngine: ObservableObject {
                 baseURL: request.url,
                 headers: request.headers,
                 playlistText: request.playlistText
-            ))
+            ), sourceId: request.sourceId)
             loaderKey = key
             let assetURL: URL
             if let url = request.url {
@@ -892,6 +920,7 @@ final class PlaybackEngine: ObservableObject {
             text += "\n原始错误：\(raw)"
         }
         failureText = text
+        DiaryStore.shared.add("播放失败：\(text)")
     }
 
     /// 手动重试：清恢复预算，重新走取址（没有取址器时重开当前请求）

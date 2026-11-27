@@ -35,6 +35,9 @@ struct DownloadJob: Identifiable {
     // 已解析地址（首次入队时解析，作兜底）
     var resolvedURL: String = ""
     var resolvedHeadersJSON: String = ""
+    /// 按站源分类保存时的子目录名（站源 = 模块 id，文件源 = 源 id）；
+    /// 空 = 直接放在 downloads 根下（旧任务与未开启分类时）
+    var sourceGroup: String = ""
 
     var progress: Double {
         if state == "completed" { return 1 }
@@ -69,6 +72,7 @@ struct DownloadJob: Identifiable {
             "episodeTotal": episodeTotal,
             "fileSourceId": fileSourceId, "fileRef": fileRef,
             "resolvedURL": resolvedURL, "resolvedHeadersJSON": resolvedHeadersJSON,
+            "sourceGroup": sourceGroup,
         ]
     }
 
@@ -100,6 +104,7 @@ struct DownloadJob: Identifiable {
         job.fileRef = JSON.dictString(dict["fileRef"])
         job.resolvedURL = JSON.dictString(dict["resolvedURL"])
         job.resolvedHeadersJSON = JSON.dictString(dict["resolvedHeadersJSON"])
+        job.sourceGroup = JSON.dictString(dict["sourceGroup"])
         return job
     }
 }
@@ -107,23 +112,36 @@ struct DownloadJob: Identifiable {
 /// 用户暂停信号：run 收尾时据此把任务转 paused 而不是 failed
 struct DownloadPausedError: Error {}
 
-/// 下载管理：串行执行（一次一个），进度落盘，失败可重试
-/// （站源重试会重新走 resolveMedia 取址，凭据过期也能自愈）。
+/// 下载管理：按资源设置的并发数执行（默认 2），进度落盘，
+/// 失败可重试（站源重试会重新走 resolveMedia 取址，凭据
+/// 过期也能自愈）。仅 Wi-Fi 打开时蜂窝网络下不启动新任务、
+/// 单个请求也禁止走蜂窝。
 @MainActor
 final class DownloadManager: ObservableObject {
     @Published private(set) var jobs: [DownloadJob] = []
 
-    let downloadsDirectory: URL
+    private(set) var downloadsDirectory: URL
     private let jobsFile: URL
-    private var running = false
-    private var runTask: Task<Void, Never>?
+    /// 正在跑的任务集合（并发泵）：pump 按 downloadConcurrency 上限补位
+    private var runningIds: Set<String> = []
+    private var runTasks: [String: Task<Void, Never>] = [:]
     /// 被用户暂停的在跑任务：run 收尾时据此转 paused 而不是 failed
     private var pauseRequested: Set<String> = []
+    /// 资源设置 / 下载偏好（App 启动时 installSettings 注入）
+    private(set) var resourceSettings: ResourceSettingsStore?
+    private(set) var downloadPreferences: DownloadPreferencesStore?
+    /// 当前网络是否走 Wi-Fi（NWPathMonitor 维护，未知时 nil）
+    private let pathMonitor = NWPathMonitor()
+    private var pathIsWiFi: Bool?
     private lazy var sessionDelegate = DownloadSessionDelegate(manager: self)
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 3600
+        // 直链下载走全局代理（委托会话全局共享；HLS 路径按模块代理）
+        ProxySettings.configure(
+            config, effective: ProxySettings.effective(forModule: nil)
+        )
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         return URLSession(configuration: config, delegate: sessionDelegate, delegateQueue: queue)
@@ -135,8 +153,27 @@ final class DownloadManager: ObservableObject {
     var fileResolver: ((DownloadJob) async -> (url: String, headers: [String: String])?)?
 
     init(dataDirectory: URL) {
-        downloadsDirectory = dataDirectory.appendingPathComponent("downloads")
+        // 下载位置（存储页可改）：support 应用内部 / documents
+        // 文件 App 可见，落盘在 resource-settings.json，init 时直读
+        let resourceDict = AppData.readJSONDictionary(
+            dataDirectory.appendingPathComponent("resource-settings.json")
+        ) ?? [:]
+        let location = JSON.dictString(resourceDict["downloadsLocation"])
+            == "documents" ? "documents" : "support"
+        let base = ResourceSettingsStore.downloadsBaseDirectory(
+            dataDirectory: dataDirectory, location: location
+        )
+        downloadsDirectory = base.appendingPathComponent("downloads")
         jobsFile = dataDirectory.appendingPathComponent("downloads.json")
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let wifi = path.usesInterfaceType(.wifi)
+            Task { @MainActor [weak self] in
+                guard let self, self.pathIsWiFi != wifi else { return }
+                self.pathIsWiFi = wifi
+                self.pump()
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "lvguo.download.path"))
         try? FileManager.default.createDirectory(
             at: downloadsDirectory, withIntermediateDirectories: true
         )
@@ -203,7 +240,57 @@ final class DownloadManager: ObservableObject {
     }
 
     func jobDirectory(_ id: String) -> URL {
-        downloadsDirectory.appendingPathComponent(id)
+        if let job = jobs.first(where: { $0.id == id }),
+           !job.sourceGroup.isEmpty {
+            return downloadsDirectory
+                .appendingPathComponent(job.sourceGroup)
+                .appendingPathComponent(id)
+        }
+        return downloadsDirectory.appendingPathComponent(id)
+    }
+
+    /// App 启动时注入资源设置与下载偏好（并发/画质/VIP/
+    /// 分类保存都读它们，改完即生效）
+    func installSettings(
+        resourceSettings: ResourceSettingsStore,
+        downloadPreferences: DownloadPreferencesStore
+    ) {
+        self.resourceSettings = resourceSettings
+        self.downloadPreferences = downloadPreferences
+    }
+
+    /// 设置页改了并发/仅 Wi-Fi 后调用：重新补位排队任务
+    func settingsChanged() {
+        pump()
+    }
+
+    /// 迁移下载目录（存储页「更改下载位置」）：有在跑任务时
+    /// 拒绝（先暂停全部），其余整体搬目录并切换根路径。
+    func relocateDownloads(toBase base: URL) throws {
+        let target = base.appendingPathComponent("downloads")
+        if target.standardizedFileURL == downloadsDirectory.standardizedFileURL {
+            return
+        }
+        guard runningIds.isEmpty else {
+            throw FileSourceFailure("有正在下载的任务，请先暂停全部下载再迁移")
+        }
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(
+            at: target, withIntermediateDirectories: true
+        )
+        if fileManager.fileExists(atPath: downloadsDirectory.path) {
+            for name in try fileManager.contentsOfDirectory(
+                atPath: downloadsDirectory.path
+            ) {
+                let from = downloadsDirectory.appendingPathComponent(name)
+                let to = target.appendingPathComponent(name)
+                if fileManager.fileExists(atPath: to.path) {
+                    try fileManager.removeItem(at: to)
+                }
+                try fileManager.moveItem(at: from, to: to)
+            }
+        }
+        downloadsDirectory = target
     }
 
     func localFileURL(_ job: DownloadJob) -> URL? {
@@ -225,7 +312,24 @@ final class DownloadManager: ObservableObject {
         let plan = try await provider.resolveMedia(
             drama: drama, chapter: chapter, index: index, total: total
         )
-        guard !plan.url.isEmpty, URL(string: plan.url) != nil else {
+        // 下载画质偏好（「我的 → 下载」的默认画质）：指定画质
+        // 有对应变体就用它；没有时就近选（不高于指定的最高，
+        // 全都更高时取最低）；0 = 自动，用模块的默认计划
+        var chosenURL = plan.url
+        var chosenHeaders = plan.headers
+        if let wanted = downloadPreferences?.quality, wanted != 0 {
+            let usable = plan.variants.filter { !$0.url.isEmpty }
+            if let exact = usable.first(where: { $0.quality == wanted }) {
+                chosenURL = exact.url
+                chosenHeaders = exact.headers
+            } else if !usable.isEmpty {
+                let sorted = usable.sorted { $0.quality < $1.quality }
+                let pick = sorted.last { $0.quality <= wanted } ?? sorted[0]
+                chosenURL = pick.url
+                chosenHeaders = pick.headers
+            }
+        }
+        guard !chosenURL.isEmpty, URL(string: chosenURL) != nil else {
             throw FileSourceFailure(
                 plan.playlistText.isEmpty
                     ? "模块没有返回可下载地址"
@@ -238,6 +342,9 @@ final class DownloadManager: ObservableObject {
         job.subtitle = chapter.episodeLabel.isEmpty
             ? "第 \(index + 1) 集" : "第 \(chapter.episodeLabel) 集"
         job.moduleId = provider.manifest.id
+        if resourceSettings?.downloadBySource == true {
+            job.sourceGroup = Self.sanitizedGroup(provider.manifest.id)
+        }
         job.dramaJSON = serializeJSON([
             "id": drama.id, "source": drama.source, "sourceId": drama.sourceId,
             "title": drama.title, "cover": drama.coverURL,
@@ -246,7 +353,7 @@ final class DownloadManager: ObservableObject {
         job.chapterJSON = serializeJSON(chapter.raw)
         job.episodeIndex = index
         job.episodeTotal = total
-        applyResolved(&job, url: plan.url, headers: plan.headers)
+        applyResolved(&job, url: chosenURL, headers: chosenHeaders)
         jobs.insert(job, at: 0)
         save()
         pump()
@@ -263,6 +370,9 @@ final class DownloadManager: ObservableObject {
         job.fileSourceId = source.id
         job.fileRef = entry.href
         job.total = entry.size
+        if resourceSettings?.downloadBySource == true {
+            job.sourceGroup = Self.sanitizedGroup(source.id)
+        }
         if source.type != .ftp || source.nativeMode {
             let target = try await createFileSourceClient(source).target(entry)
             applyResolved(&job, url: target.url, headers: target.headers)
@@ -271,6 +381,15 @@ final class DownloadManager: ObservableObject {
         save()
         pump()
         return job
+    }
+
+    /// 分类子目录名清洗（模块/源 id 一般已安全，兜底处理）
+    static func sanitizedGroup(_ raw: String) -> String {
+        let cleaned = raw
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "..", with: "_")
+            .trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? "_" : cleaned
     }
 
     private func applyResolved(_ job: inout DownloadJob, url: String, headers: [String: String]) {
@@ -311,7 +430,7 @@ final class DownloadManager: ObservableObject {
         }
         pauseRequested.insert(job.id)
         sessionDelegate.cancelTask(jobId: job.id)
-        runTask?.cancel()
+        runTasks[job.id]?.cancel()
     }
 
     /// 继续（对齐 Flutter 的 resume：paused/failed 都可继续）
@@ -361,29 +480,40 @@ final class DownloadManager: ObservableObject {
         sessionDelegate.cancel(jobId: job.id)
         sessionDelegate.cancelTask(jobId: job.id)
         pauseRequested.remove(job.id)
+        runTasks[job.id]?.cancel()
         jobs.removeAll { $0.id == job.id }
         try? FileManager.default.removeItem(at: jobDirectory(job.id))
         save()
-        if running {
-            // 正在下的被删时，任务取消回调会推进队列
-        }
+        // 正在下的被删时，run 收尾会清 runningIds 并推进队列
     }
 
     // MARK: - 执行
 
+    /// 仅 Wi-Fi 下载的闸门：打开且当前明确不在 Wi-Fi 上时
+    /// 不启动新任务（已在跑的由单请求 allowsCellularAccess 约束）
+    private var networkAllowsDownloads: Bool {
+        !DownloadPolicy.wifiOnlyDownloads || (pathIsWiFi ?? true)
+    }
+
     private func pump() {
-        guard !running else { return }
-        guard let next = jobs.first(where: { $0.state == "queued" }) else { return }
-        running = true
-        update(next.id) { $0.state = "downloading"; $0.error = "" }
-        runTask = Task { [weak self] in
-            await self?.run(next.id)
+        guard networkAllowsDownloads else { return }
+        let limit = max(1, resourceSettings?.downloadConcurrency ?? 2)
+        while runningIds.count < limit {
+            guard let next = jobs.first(where: { $0.state == "queued" })
+            else { return }
+            runningIds.insert(next.id)
+            update(next.id) { $0.state = "downloading"; $0.error = "" }
+            runTasks[next.id] = Task { [weak self] in
+                await self?.run(next.id)
+            }
         }
     }
 
     private func run(_ jobId: String) async {
         guard let job = jobs.first(where: { $0.id == jobId }) else {
-            running = false
+            runningIds.remove(jobId)
+            runTasks.removeValue(forKey: jobId)
+            pump()
             return
         }
         do {
@@ -415,9 +545,14 @@ final class DownloadManager: ObservableObject {
                     target.state = "failed"
                     target.error = error.localizedDescription
                 }
+                DiaryStore.shared.add(
+                    "下载失败：\(job.title) \(job.subtitle)："
+                        + error.localizedDescription
+                )
             }
         }
-        running = false
+        runningIds.remove(jobId)
+        runTasks.removeValue(forKey: jobId)
         pump()
     }
 
@@ -514,6 +649,7 @@ final class DownloadManager: ObservableObject {
             throw FileSourceFailure("下载地址无效")
         }
         var request = URLRequest(url: url)
+        request.allowsCellularAccess = !DownloadPolicy.wifiOnlyDownloads
         for (key, value) in current.resolvedHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
@@ -553,14 +689,18 @@ final class DownloadManager: ObservableObject {
             throw FileSourceFailure("播放列表地址无效")
         }
         let headers = current.resolvedHeaders
-        var playlist = try await fetchText(playlistURL, headers: headers)
+        var playlist = try await fetchText(
+            playlistURL, headers: headers, moduleId: job.moduleId
+        )
         var mediaURL = playlistURL
         if playlist.contains("#EXT-X-STREAM-INF") {
             guard let variant = Self.pickVariant(playlist, base: playlistURL) else {
                 throw FileSourceFailure("播放列表里没有可用的清晰度")
             }
             mediaURL = variant
-            playlist = try await fetchText(variant, headers: headers)
+            playlist = try await fetchText(
+                variant, headers: headers, moduleId: job.moduleId
+            )
         }
         if playlist.contains("METHOD="), !playlist.contains("METHOD=NONE") {
             throw FileSourceFailure("加密的播放列表暂不支持下载")
@@ -630,7 +770,9 @@ final class DownloadManager: ObservableObject {
             if existingSize(fileName) > 0 {
                 continue
             }
-            let (data, http) = try await FileNetwork.data(for: Self.request(url, headers: headers))
+            let (data, http) = try await fetchData(
+                Self.request(url, headers: headers), moduleId: job.moduleId
+            )
             guard (200...299).contains(http.statusCode) else {
                 throw FileSourceFailure("分片下载失败（HTTP \(http.statusCode)）")
             }
@@ -663,8 +805,45 @@ final class DownloadManager: ObservableObject {
         return request
     }
 
-    private func fetchText(_ url: URL, headers: [String: String]) async throws -> String {
-        let (data, http) = try await FileNetwork.data(for: Self.request(url, headers: headers))
+    /// HLS 拉取用的会话：按（代理 generation + 模块）缓存，
+    /// 代理改动自动换新会话；全局代理对文件源任务同样生效。
+    private var dataSessions: [String: URLSession] = [:]
+
+    private func dataSession(moduleId: String) -> URLSession {
+        let key = "\(ProxySettings.generation)|\(moduleId)"
+        if let existing = dataSessions[key] { return existing }
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        ProxySettings.configure(
+            config,
+            effective: ProxySettings.effective(
+                forModule: moduleId.isEmpty ? nil : moduleId
+            )
+        )
+        let created = URLSession(configuration: config)
+        dataSessions[key] = created
+        return created
+    }
+
+    private func fetchData(
+        _ request: URLRequest, moduleId: String
+    ) async throws -> (Data, HTTPURLResponse) {
+        var request = request
+        request.allowsCellularAccess = !DownloadPolicy.wifiOnlyDownloads
+        let (data, response) = try await dataSession(moduleId: moduleId)
+            .data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw FileSourceFailure("服务器响应异常")
+        }
+        return (data, http)
+    }
+
+    private func fetchText(
+        _ url: URL, headers: [String: String], moduleId: String = ""
+    ) async throws -> String {
+        let (data, http) = try await fetchData(
+            Self.request(url, headers: headers), moduleId: moduleId
+        )
         guard (200...299).contains(http.statusCode) else {
             throw FileSourceFailure("播放列表拉取失败（HTTP \(http.statusCode)）")
         }

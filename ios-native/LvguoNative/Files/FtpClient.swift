@@ -346,6 +346,16 @@ final class FtpConnection {
         self.serverHost = serverHost
     }
 
+
+    /// TCP 参数：仅 Wi-Fi 下载打开时把连接限定在 Wi-Fi 接口
+    static func tcpParameters() -> NWParameters {
+        let parameters = NWParameters.tcp
+        if DownloadPolicy.wifiOnlyDownloads {
+            parameters.requiredInterfaceType = .wifi
+        }
+        return parameters
+    }
+
     static func connect(
         host: String, port: Int, username: String, password: String
     ) async throws -> FtpConnection {
@@ -353,7 +363,7 @@ final class FtpConnection {
             throw FileSourceFailure("FTP 端口无效")
         }
         let connection = NWConnection(
-            host: NWEndpoint.Host(host), port: nwPort, using: .tcp
+            host: NWEndpoint.Host(host), port: nwPort, using: tcpParameters()
         )
         let channel = FtpLineChannel(connection: connection)
         let ftp = FtpConnection(channel: channel, serverHost: host)
@@ -442,7 +452,7 @@ final class FtpConnection {
             throw FileSourceFailure("FTP 数据端口无效")
         }
         let dataConnection = NWConnection(
-            host: NWEndpoint.Host(dataHost), port: nwPort, using: .tcp
+            host: NWEndpoint.Host(dataHost), port: nwPort, using: tcpParameters()
         )
         let dataChannel = FtpLineChannel(connection: dataConnection)
         try await dataChannel.start()

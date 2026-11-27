@@ -24,14 +24,32 @@ func createFileSourceClient(_ source: FileSource) -> FileSourceClient {
     return WebDavSourceClient(source: source)
 }
 
-/// 带超时的共享会话（文件源请求统一 20 秒量级，与 Dart 一致）
+/// 带超时的共享会话（文件源请求统一 20 秒量级，与 Dart 一致）。
+/// 全局代理（资源设置）通过 ProxySettings 快照接入：代理
+/// generation 变化时重建会话，改完即生效。
 enum FileNetwork {
-    static let session: URLSession = {
+    private static var cachedSession: URLSession?
+    private static var cachedGeneration = -1
+    private static let lock = NSLock()
+
+    static var session: URLSession {
+        lock.lock()
+        defer { lock.unlock() }
+        let generation = ProxySettings.generation
+        if let cachedSession, cachedGeneration == generation {
+            return cachedSession
+        }
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 25
         config.timeoutIntervalForResource = 60
-        return URLSession(configuration: config)
-    }()
+        ProxySettings.configure(
+            config, effective: ProxySettings.effective(forModule: nil)
+        )
+        let created = URLSession(configuration: config)
+        cachedSession = created
+        cachedGeneration = generation
+        return created
+    }
 
     static func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do {

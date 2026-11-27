@@ -213,6 +213,15 @@ final class PlaybackSession {
     var onlineFallback: ((PlaybackSession) async -> PlaybackRequest?)?
     /// handler 取址失败时的原始错误（播放页以 toast 透出）
     var lastError: String?
+    /// 弹幕数据源：站源详情页注入（模块声明弹幕能力才有），
+    /// 按集生成弹幕任务（与取流任务同源）；无则不渲染弹幕
+    var danmakuProvider: ModuleProvider?
+    var danmakuTaskForEpisode: ((Int) -> [String: Any]?)?
+
+    /// 指定集的弹幕任务（无数据源返回 nil）
+    func danmakuTask(for index: Int) -> [String: Any]? {
+        danmakuTaskForEpisode?(index)
+    }
 }
 
 // MARK: - 播放页
@@ -230,7 +239,9 @@ struct PlayerPage: View {
     var session: PlaybackSession? = nil
 
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var danmakuPreferences: DanmakuPreferencesStore
     @StateObject private var engine = PlaybackEngine()
+    @StateObject private var danmakuController = DanmakuController()
     @StateObject private var pipBridge = PiPBridge()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -297,6 +308,13 @@ struct PlayerPage: View {
                 fit: fit,
                 videoSize: engine.presentationSize,
                 pipBridge: pipBridge
+            )
+            .ignoresSafeArea()
+
+            // 弹幕层在画面之上、手势层之下（弹幕不吃手势）；
+            // 无弹幕数据源或开关关闭时自身不渲染
+            DanmakuOverlay(
+                engine: engine, controller: danmakuController
             )
             .ignoresSafeArea()
 
@@ -391,6 +409,12 @@ struct PlayerPage: View {
             }
         }
         .onChange(of: engine.isPlaying) { _, _ in scheduleControlsHide() }
+        .onChange(of: danmakuPreferences.words) { _, _ in
+            danmakuController.reprocess(preferences: danmakuPreferences)
+        }
+        .onChange(of: danmakuPreferences.merge) { _, _ in
+            danmakuController.reprocess(preferences: danmakuPreferences)
+        }
     }
 
     // MARK: 生命周期
@@ -408,7 +432,22 @@ struct PlayerPage: View {
         }
         wireEngine()
         engine.load(effectiveRequest(request), autoplay: true)
+        loadDanmaku()
         scheduleControlsHide()
+    }
+
+    /// 弹幕加载：会话带弹幕数据源（模块声明能力）才取；
+    /// 取不到数据时渲染层保持空（与原版一致）
+    private func loadDanmaku() {
+        danmakuController.reset()
+        guard let session, let provider = session.danmakuProvider,
+              let task = session.danmakuTask(for: session.index) else {
+            return
+        }
+        danmakuController.load(
+            provider: provider, task: task,
+            preferences: danmakuPreferences
+        )
     }
 
     /// 跳过片头：起始位置不足片头秒数时抬到片头结束处
@@ -510,6 +549,7 @@ struct PlayerPage: View {
         }
         currentRequest = next
         engine.load(effectiveRequest(next), autoplay: true, isSwitch: true)
+        loadDanmaku()
         showControls()
     }
 
@@ -1460,6 +1500,8 @@ struct PlaybackSettingsSheet: View {
     let onLock: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var danmakuPreferences: DanmakuPreferencesStore
+    @State private var showDanmakuSettings = false
 
     var body: some View {
         NavigationStack {
@@ -1544,6 +1586,13 @@ struct PlaybackSettingsSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Section("弹幕") {
+                    Toggle("显示弹幕", isOn: $danmakuPreferences.enabled)
+                    Button("弹幕设置…") { showDanmakuSettings = true }
+                    Text("弹幕仅在站源模块声明弹幕能力且返回数据时显示")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if engine.audioOptions.count > 1 {
                     Section("音轨") {
                         ForEach(engine.audioOptions) { option in
@@ -1597,6 +1646,9 @@ struct PlaybackSettingsSheet: View {
         // 定：能用原生液态玻璃的地方要用），List 自带底色已
         // 在上方 scrollContentBackground(.hidden) 让出
         .presentationBackground(.ultraThinMaterial)
+        .sheet(isPresented: $showDanmakuSettings) {
+            NavigationStack { DanmakuSettingsView() }
+        }
         .onChange(of: eqBrightness) { _, _ in applyEQ() }
         .onChange(of: eqContrast) { _, _ in applyEQ() }
         .onChange(of: eqSaturation) { _, _ in applyEQ() }

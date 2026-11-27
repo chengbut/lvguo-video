@@ -6,6 +6,8 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var store: ModuleStore
     @EnvironmentObject private var fileStore: FileSourceStore
+    @EnvironmentObject private var appearance: AppearanceStore
+    @EnvironmentObject private var blurState: CoverBlurState
     @State private var sourceKind: SourceKind = .station
 
     @State private var categories: [CatalogCategory] = []
@@ -33,6 +35,18 @@ struct HomeView: View {
             .navigationTitle("首页")
             .toolbar {
                 if sourceKind == .station {
+                    // 封面模糊眼睛按钮（外观设置开启「封面模糊
+                    // 按钮」才出现）：切换会话模糊模式 全部 ↔ 关闭
+                    if appearance.blurCoversButton {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                blurState.toggle()
+                            } label: {
+                                Image(systemName: blurState.mode == "off"
+                                    ? "eye.slash" : "eye")
+                            }
+                        }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         NavigationLink {
                             SearchView()
@@ -125,7 +139,9 @@ struct HomeView: View {
                         NavigationLink {
                             DramaDetailView(provider: provider, item: item)
                         } label: {
-                            DramaCell(item: item)
+                            DramaCell(
+                                item: item, moduleId: provider.manifest.id
+                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -248,6 +264,7 @@ struct HomeView: View {
 /// 列表格子：封面 + 标题 + 集数（封面为空时用玻璃占位）
 private struct DramaCell: View {
     let item: DramaItem
+    var moduleId: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -274,6 +291,7 @@ private struct DramaCell: View {
             }
             .aspectRatio(2.0 / 3.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 14))
+            .coverBlur(source: moduleId, explore: true)
 
             Text(item.title)
                 .font(.footnote.weight(.medium))
