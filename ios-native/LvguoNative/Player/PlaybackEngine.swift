@@ -1246,9 +1246,11 @@ final class PlaybackEngine: ObservableObject {
                 let uri = PlaybackResourceLoader.classify(
                     event.uri.flatMap { URL(string: $0) }
                 )
-                var line = "  \(uri) 服务器 \(event.serverAddress ?? "-")"
-                    + " HTTP \(event.errorStatusCode)"
-                    + " \(event.errorDomain) \(event.errorCode)"
+                let server = event.serverAddress ?? "-"
+                let status = event.errorStatusCode
+                let domain = event.errorDomain
+                let code = event.errorCode
+                var line = "  \(uri) 服务器 \(server) HTTP \(status) \(domain) \(code)"
                 if let comment = event.errorComment, !comment.isEmpty {
                     line += " \(Self.sanitizeDiagnosticText(comment))"
                 }
