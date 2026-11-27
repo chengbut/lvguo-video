@@ -1,9 +1,11 @@
 import SwiftUI
 
 /// 首页：站源模式接当前模块的真实数据（分类 + 列表），
-/// 文件源模式二期 B 段再接（暂留占位说明）。
+/// 文件源模式列出已配置的文件源（与资源页同一份数据），
+/// 点开进浏览页 / HTTP 直链直接播（对齐 Flutter 版信息架构）。
 struct HomeView: View {
     @EnvironmentObject private var store: ModuleStore
+    @EnvironmentObject private var fileStore: FileSourceStore
     @State private var sourceKind: SourceKind = .station
 
     @State private var categories: [CatalogCategory] = []
@@ -23,12 +25,23 @@ struct HomeView: View {
                     if sourceKind == .station {
                         stationContent
                     } else {
-                        filePlaceholder
+                        fileContent
                     }
                 }
                 .padding()
             }
             .navigationTitle("首页")
+            .toolbar {
+                if sourceKind == .station {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        NavigationLink {
+                            SearchView()
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                        }
+                    }
+                }
+            }
             .task(id: store.currentSourceId) {
                 await reloadFromModule()
             }
@@ -136,17 +149,33 @@ struct HomeView: View {
         }
     }
 
-    private var filePlaceholder: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("文件源模式")
-                .font(.headline)
-            Text("二期 B 段接入 WebDAV / FTP / HTTP 与云盘后，这里按文件夹浏览文件。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+    @ViewBuilder
+    private var fileContent: some View {
+        if fileStore.sources.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("还没有文件源")
+                    .font(.headline)
+                Text("去「资源」页添加 WebDAV / FTP / HTTP 直链，或天翼 / 移动云盘。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .glassEffect(.regular.tint(.green.opacity(0.10)), in: RoundedRectangle(cornerRadius: 20))
+        } else {
+            VStack(spacing: 10) {
+                ForEach(fileStore.sources) { source in
+                    NavigationLink {
+                        FileSourceOpenView(source: source)
+                    } label: {
+                        FileSourceRow(source: source)
+                            .padding(14)
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
+                }
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .glassEffect(.regular.tint(.green.opacity(0.10)), in: RoundedRectangle(cornerRadius: 20))
     }
 
     // MARK: - 数据加载

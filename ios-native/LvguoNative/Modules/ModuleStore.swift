@@ -217,7 +217,15 @@ final class ModuleStore: ObservableObject {
 
     /// 当前站源的调用入口；没有可用模块时返回 nil。
     func currentProvider() -> ModuleProvider? {
-        guard let module = currentModule, let manifest = module.manifest else {
+        guard let module = currentModule else { return nil }
+        return provider(for: module.id)
+    }
+
+    /// 任意已安装可用模块的调用入口（历史续播、下载重试按条目
+    /// 自带的模块 id 取，不要求它就是当前模块）。
+    func provider(for id: String) -> ModuleProvider? {
+        guard let module = modules.first(where: { $0.id == id && $0.enabled && $0.isUsable }),
+              let manifest = module.manifest else {
             return nil
         }
         if let provider = providers[manifest.id] {

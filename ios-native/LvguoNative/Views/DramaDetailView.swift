@@ -2,34 +2,45 @@ import SwiftUI
 
 /// 详情页：模块 detail() 拉剧目信息与集数列表，
 /// 点集 → resolveMedia() 拿播放计划 → PlayerPage 播放（headers 沿用一期注入）。
+/// 播放进度写站源历史（可续播），播完按设置自动连播下一集；
+/// 「下载」模式下点集改为入队下载（走 resolveMedia 取址）。
 struct DramaDetailView: View {
     let provider: ModuleProvider
     let item: DramaItem
+
+    @EnvironmentObject private var historyStore: HistoryStore
+    @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var downloads: DownloadManager
 
     @State private var drama: DramaItem?
     @State private var chapters: [ChapterItem] = []
     @State private var loading = true
     @State private var errorText: String?
+    @State private var message: String?
     @State private var resolvingIndex: Int?
     @State private var playRequest: PlaybackRequest?
+    @State private var playSession: PlaybackSession?
     @State private var showPlayer = false
+    @State private var downloadMode = false
 
     private var displayDrama: DramaItem { drama ?? item }
+
+    private var historyEntry: StationHistoryEntry? {
+        historyStore.entry(forDramaId: displayDrama.id)
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                if let entry = historyEntry, !entry.finished, entry.position > 5 {
+                    resumeButton(entry)
+                }
                 if let errorText {
-                    Text(errorText)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .glassEffect(
-                            .regular.tint(.red.opacity(0.08)),
-                            in: RoundedRectangle(cornerRadius: 16)
-                        )
+                    notice(errorText, isError: true)
+                }
+                if let message {
+                    notice(message, isError: false)
                 }
                 if loading && chapters.isEmpty {
                     ProgressView("正在加载详情…")
@@ -43,12 +54,37 @@ struct DramaDetailView: View {
         }
         .navigationTitle(displayDrama.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    downloadMode.toggle()
+                    message = downloadMode ? "下载模式：点一集就下载这一集" : nil
+                } label: {
+                    Label(
+                        downloadMode ? "完成" : "下载",
+                        systemImage: downloadMode ? "checkmark" : "arrow.down.circle"
+                    )
+                }
+            }
+        }
         .task { await loadDetail() }
         .fullScreenCover(isPresented: $showPlayer) {
             if let playRequest {
-                PlayerPage(request: playRequest)
+                PlayerPage(request: playRequest, session: playSession)
             }
         }
+    }
+
+    private func notice(_ text: String, isError: Bool) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(isError ? .red : .secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .glassEffect(
+                .regular.tint(isError ? .red.opacity(0.08) : .green.opacity(0.08)),
+                in: RoundedRectangle(cornerRadius: 16)
+            )
     }
 
     private var header: some View {
@@ -93,9 +129,28 @@ struct DramaDetailView: View {
         .glassEffect(.regular.tint(.green.opacity(0.08)), in: RoundedRectangle(cornerRadius: 20))
     }
 
+    private func resumeButton(_ entry: StationHistoryEntry) -> some View {
+        Button {
+            let index = min(entry.episodeIndex, max(0, chapters.count - 1))
+            guard chapters.indices.contains(index) else { return }
+            Task { await play(chapter: chapters[index], index: index, startPosition: entry.position) }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "play.fill")
+                Text("继续播放 第 \(entry.episodeLabel) 集 · \(clockText(entry.position))")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.tint(.green.opacity(0.25)), in: Capsule())
+    }
+
     private var episodeList: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("选集（\(chapters.count)）")
+            Text(downloadMode ? "点选要下载的集数（\(chapters.count)）" : "选集（\(chapters.count)）")
                 .font(.subheadline.weight(.semibold))
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 76), spacing: 10)],
@@ -103,12 +158,20 @@ struct DramaDetailView: View {
             ) {
                 ForEach(Array(chapters.enumerated()), id: \.offset) { index, chapter in
                     Button {
-                        Task { await play(chapter: chapter, index: index) }
+                        if downloadMode {
+                            Task { await enqueueDownload(chapter: chapter, index: index) }
+                        } else {
+                            Task { await play(chapter: chapter, index: index) }
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             if resolvingIndex == index {
                                 ProgressView()
                                     .controlSize(.small)
+                            }
+                            if downloadMode {
+                                Image(systemName: "arrow.down")
+                                    .font(.caption2)
                             }
                             Text(chapter.episodeLabel)
                                 .font(.footnote)
@@ -144,7 +207,78 @@ struct DramaDetailView: View {
         }
     }
 
-    private func play(chapter: ChapterItem, index: Int) async {
+    private func makeEntry(index: Int, position: Double, duration: Double) -> StationHistoryEntry {
+        var entry = StationHistoryEntry()
+        entry.dramaId = displayDrama.id
+        entry.source = displayDrama.source.isEmpty ? provider.manifest.id : displayDrama.source
+        entry.sourceId = displayDrama.sourceId
+        entry.title = displayDrama.title
+        entry.coverURL = displayDrama.coverURL
+        entry.totalEpisodes = displayDrama.totalEpisodes
+        entry.episodeIndex = index
+        entry.episodeLabel = chapters.indices.contains(index)
+            ? chapters[index].episodeLabel : "\(index + 1)"
+        entry.position = position
+        entry.duration = duration
+        entry.updatedAt = Date()
+        return entry
+    }
+
+    /// 组装一次播放会话：进度回调写历史，上下集 handler 自行
+    /// 推进 session.index 并重新取址。
+    private func makeSession(startIndex: Int) -> PlaybackSession {
+        let session = PlaybackSession()
+        session.index = startIndex
+        session.canPrevious = startIndex > 0
+        session.canNext = startIndex < chapters.count - 1
+        session.onProgress = { [self] session, position, duration in
+            guard settings.recordHistory else { return }
+            let entry = makeEntry(index: session.index, position: position, duration: duration)
+            historyStore.record(entry)
+        }
+        session.onNext = { [self] session in
+            let next = session.index + 1
+            guard chapters.indices.contains(next) else { return nil }
+            session.index = next
+            session.canPrevious = true
+            session.canNext = next < chapters.count - 1
+            return await resolveRequest(index: next, startPosition: 0)
+        }
+        session.onPrevious = { [self] session in
+            let previous = session.index - 1
+            guard chapters.indices.contains(previous) else { return nil }
+            session.index = previous
+            session.canPrevious = previous > 0
+            session.canNext = true
+            return await resolveRequest(index: previous, startPosition: 0)
+        }
+        return session
+    }
+
+    private func resolveRequest(index: Int, startPosition: Double) async -> PlaybackRequest? {
+        guard chapters.indices.contains(index) else { return nil }
+        do {
+            let plan = try await provider.resolveMedia(
+                drama: displayDrama,
+                chapter: chapters[index],
+                index: index,
+                total: chapters.count
+            )
+            guard !plan.url.isEmpty, let url = URL(string: plan.url) else {
+                return nil
+            }
+            return PlaybackRequest(
+                url: url,
+                headers: plan.headers,
+                title: "\(displayDrama.title) · \(chapters[index].episodeLabel)",
+                startPosition: startPosition
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private func play(chapter: ChapterItem, index: Int, startPosition: Double? = nil) async {
         resolvingIndex = index
         errorText = nil
         defer { resolvingIndex = nil }
@@ -156,10 +290,19 @@ struct DramaDetailView: View {
                 total: chapters.count
             )
             if !plan.url.isEmpty, let url = URL(string: plan.url) {
+                // 续播点：显式传入优先，否则查历史里同一集的进度
+                var start = startPosition ?? 0
+                if startPosition == nil,
+                   let entry = historyEntry,
+                   entry.episodeIndex == index, !entry.finished {
+                    start = entry.position
+                }
+                playSession = makeSession(startIndex: index)
                 playRequest = PlaybackRequest(
                     url: url,
                     headers: plan.headers,
-                    title: "\(displayDrama.title) · \(chapter.episodeLabel)"
+                    title: "\(displayDrama.title) · \(chapter.episodeLabel)",
+                    startPosition: start
                 )
                 showPlayer = true
             } else if !plan.playlistText.isEmpty {
@@ -172,4 +315,33 @@ struct DramaDetailView: View {
             errorText = error.localizedDescription
         }
     }
+
+    private func enqueueDownload(chapter: ChapterItem, index: Int) async {
+        resolvingIndex = index
+        defer { resolvingIndex = nil }
+        do {
+            _ = try await downloads.enqueueStation(
+                provider: provider,
+                drama: displayDrama,
+                chapter: chapter,
+                index: index,
+                total: chapters.count
+            )
+            message = "已加入下载：第 \(chapter.episodeLabel) 集（在「下载」页看进度）"
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+}
+
+/// 秒数 → m:ss / h:mm:ss（与 Flutter 版 _clock 同格式）
+func clockText(_ seconds: Double) -> String {
+    let total = Int(seconds.rounded())
+    let hours = total / 3600
+    let minutes = (total % 3600) / 60
+    let rest = total % 60
+    func two(_ part: Int) -> String { String(format: "%02d", part) }
+    return hours > 0
+        ? "\(hours):\(two(minutes)):\(two(rest))"
+        : "\(two(minutes)):\(two(rest))"
 }

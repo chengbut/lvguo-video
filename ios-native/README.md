@@ -51,10 +51,9 @@ LvguoNative/
   module-state/module-<id>-<name>   host.loadState/saveState 的持久化值（原文字符串）
 ```
 
-- `modules/<id>/` 布局与 Go 版 `<dataDir>/modules/<id>/` 一致，三期迁移
-  Flutter 版数据时可直接对位拷贝。
+- `modules/<id>/` 布局与 Go 版 `<dataDir>/modules/<id>/` 一致，首次启动
+  数据迁移时可直接对位拷贝（见下「二期 B 段」）。
 - 模块内存缓存（cacheGet/cacheSet）不落盘，与 Go 版一致。
-- 三期再加：历史、设置、文件源配置，以及首次启动从旧 Flutter 容器迁移。
 
 ### 与 Go 版桥接面的差异（已知）
 
@@ -71,15 +70,61 @@ LvguoNative/
 - AVURLAsset 的 headers 只作用于首个请求；HLS 分片不继承（沿用一期结论，
   后续可用 AVAssetResourceLoaderDelegate 处理带头分片）。
 
-## 一期骨架说明
+## 二期 B 段：文件源 / 历史 / 设置 / 下载 / 数据迁移（已完成）
 
-- 首页与历史页有原生玻璃分段控件（站源 / 文件源）；首页站源侧已接真实
-  模块数据，文件源侧与历史/下载/我的仍为占位（二期 B 段：文件源、历史与
-  数据层、下载、首次启动数据迁移）。
-- 数据迁移：原生版首次启动时读取旧 Flutter 版容器内数据
-  （SharedPreferences plist、应用支持目录的本地库等），迁移源模块、历史、
-  设置、文件源配置。覆盖安装保留容器是前提——同包名、同签名，工程里
-  不要加任何改变容器身份的设置。
+按 Flutter 现行版 1:1 移植（先照搬、再改）。新增存储（同在
+`Application Support/LvguoNative/`）：
+
+```
+  file-sources.json    文件源数组，字段与 Flutter FileSource.toJson 一致
+  file-progress.json   文件播放进度，定位 key 规则与 Flutter 一致
+  history.json         站源观看历史（WatchEntry 同构，cap 300）
+  settings.json        播放设置（PlaybackPreferences 同键名）
+  recent-searches.json 搜索历史词（最多 20，Flutter 的 recentSearches 同位）
+  downloads.json + downloads/<id>/   下载任务与文件
+```
+
+- 文件源访问层按 `lib/file_sources.dart` 移植：WebDAV（PROPFIND）、
+  HTTP 直链、FTP（Network.framework 自实现：PASV 数据通道 + LIST 解析）、
+  天翼（listFiles.action / getFileDownloadUrl.action）、移动
+  （personal_new：qryRoutePolicy 路由 + Mcloud-Sign 签名，canonicalJson /
+  calSign 与 Dart 逐项对齐）。天翼/移动原生登录走 WKWebView 登录页抓
+  cookie/storage 令牌，抓后立即用列表接口验活才算登录成功（与 Flutter
+  版 2.0.2 的判定一致）。
+- 历史页：站源按今天/昨天/更早分组（WatchPeriod 同规则）、文件源
+  单列，点开按保存进度续播；设置页项与 Flutter「我的」页一致。
+- 下载：站源集数走 resolveMedia 取址后下载（带 credentials 头），
+  文件源文件按定位符取址下载（FTP 走 RETR）；HLS 保存分片 + 改写后的
+  `playlist.m3u8`，本地播放走 127.0.0.1 环回 HTTP 服务（AVPlayer 不能
+  直接播本地 m3u8 的相对分片路径）。
+- 搜索：首页站源工具栏入口，调 ModuleProvider.search()，与 Flutter
+  版 SearchPage 同语义（最近搜索、分页加载）。
+
+### 首次启动数据迁移（`Data/Migration.swift`）
+
+覆盖安装保留容器是前提——同包名、同签名，工程里不要加任何改变容器
+身份的设置。迁移在任何 Store 读盘之前执行：只读旧数据、只写原生
+目录，合并语义（已有不覆盖、历史按时间取新），全部成功后写
+`migration-v1.json` 标记保证幂等；任一子项失败不写标记、下次启动
+重试，且不改动旧数据。来源与依据：
+
+- **模块**：旧 Go 核心数据目录 = Application Support 根目录下的
+  `modules/<id>/`（manifest.json + main.js）与状态文件
+  `module-<id>-<name>`；当前源/停用状态在 `store/settings.json` 的
+  sourceSwitches。依据：Flutter 版 `lib/go_core.dart` 的
+  `_resolveDataDir()` 在 iOS 返回 getApplicationSupportDirectory()
+  本身（无 App Group、无子目录）。
+- **历史**：`store/users/<active>/history.json`（active 见
+  `store/users.json`），文件有 `.bak` 兜底（LocalStore 同规则）。
+- **设置**：`store/users/<active>/settings.json` 的 playback 段 +
+  SharedPreferences 键 `flutter.playbackPrefs.v1`。
+- **文件源与文件进度**：SharedPreferences 键 `flutter.fileSources.v1`
+  / `flutter.fileProgress.v1`。SharedPreferences 在 iOS 存
+  UserDefaults（键自动加 `flutter.` 前缀；plist 为
+  `Library/Preferences/<bundleId>.plist`），代码经
+  UserDefaults.standard 读取。
+- 真机才能终验：迁移对真实旧容器数据的完整性、各文件源真实账号
+  访问、下载后本地播放与画中画。
 
 ## CI
 

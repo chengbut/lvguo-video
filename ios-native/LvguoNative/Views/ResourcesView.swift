@@ -1,14 +1,18 @@
 import SwiftUI
 
 /// 资源页：站源组 = 模块管理（安装 / 启用停用 / 设为当前 / 删除），
-/// 文件源组二期 B 段接入；播放测试保留一期公开测试流。
+/// 文件源组 = 文件源管理（添加 / 打开 / 删除，与首页文件模式
+/// 同一份数据）；播放测试保留一期公开测试流。
 struct ResourcesView: View {
     @EnvironmentObject private var store: ModuleStore
+    @EnvironmentObject private var fileStore: FileSourceStore
     @State private var showPlayer = false
     @State private var installURL = ""
     @State private var installing = false
     @State private var message: String?
     @State private var pendingDelete: InstalledModule?
+    @State private var showAddFileSource = false
+    @State private var pendingDeleteFileSource: FileSource?
 
     /// 公开测试流（Mux 官方测试 HLS），带一个示例头以证明 headers 注入路径
     private let testStream = PlaybackRequest(
@@ -60,8 +64,27 @@ struct ResourcesView: View {
                 }
 
                 Section("文件源") {
-                    Label("WebDAV / FTP / HTTP（二期 B 段）", systemImage: "externaldrive")
-                    Label("天翼云盘 / 移动云盘（二期 B 段）", systemImage: "cloud")
+                    if fileStore.sources.isEmpty {
+                        Text("还没有文件源")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(fileStore.sources) { source in
+                        NavigationLink {
+                            FileSourceOpenView(source: source)
+                        } label: {
+                            FileSourceRow(source: source)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button("删除", role: .destructive) {
+                                pendingDeleteFileSource = source
+                            }
+                        }
+                    }
+                    Button {
+                        showAddFileSource = true
+                    } label: {
+                        Label("添加文件源", systemImage: "plus.circle")
+                    }
                 }
                 Section("播放测试") {
                     Button {
@@ -74,6 +97,27 @@ struct ResourcesView: View {
             .navigationTitle("资源")
             .fullScreenCover(isPresented: $showPlayer) {
                 PlayerPage(request: testStream)
+            }
+            .sheet(isPresented: $showAddFileSource) {
+                FileSourceTypePickerView()
+            }
+            .confirmationDialog(
+                "删除文件源「\(pendingDeleteFileSource?.name ?? "")」？",
+                isPresented: Binding(
+                    get: { pendingDeleteFileSource != nil },
+                    set: { if !$0 { pendingDeleteFileSource = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("删除", role: .destructive) {
+                    if let target = pendingDeleteFileSource {
+                        fileStore.remove(id: target.id)
+                    }
+                    pendingDeleteFileSource = nil
+                }
+                Button("取消", role: .cancel) { pendingDeleteFileSource = nil }
+            } message: {
+                Text("只删这个文件源的连接信息，网盘和服务器上的文件不受影响。")
             }
             .confirmationDialog(
                 "删除模块「\(pendingDelete?.name ?? "")」？",

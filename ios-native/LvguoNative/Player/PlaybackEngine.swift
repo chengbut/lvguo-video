@@ -7,6 +7,8 @@ struct PlaybackRequest {
     var url: URL
     var headers: [String: String] = [:]
     var title: String = ""
+    /// 续播起始位置（秒），0 = 从头
+    var startPosition: Double = 0
 }
 
 /// AVPlayer 播放引擎。针对 Flutter 版实测痛点做架构级处理：
@@ -19,6 +21,23 @@ final class PlaybackEngine: ObservableObject {
 
     @Published private(set) var isPlaying = false
     @Published private(set) var statusText = "未加载"
+    @Published private(set) var currentTime: Double = 0
+    @Published private(set) var duration: Double = 0
+
+    /// 进度回调（约每 5 秒一次 + 暂停/结束时）：供历史记录用
+    var onProgress: ((Double, Double) -> Void)?
+    /// 播放结束回调：供自动连播用
+    var onEnded: (() -> Void)?
+    /// 到达片尾阈值回调（skipOutroSeconds > 0 时）：提前切下一集
+    var onOutroReached: (() -> Void)?
+    /// 片尾提前量（秒），0 = 关闭；每次 load 重置触发标记
+    var outroThreshold: Double = 0
+    private var outroFired = false
+
+    /// 播放倍速（play 时以此速率播放）
+    var playbackRate: Float = 1.0
+    private var pendingStartPosition: Double = 0
+    private var progressTick = 0
 
     /// 用户意图：只有为 true 时才允许自动恢复
     private var intentToPlay = false
@@ -27,6 +46,7 @@ final class PlaybackEngine: ObservableObject {
     private var itemStatusObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
     private var notificationObservers: [NSObjectProtocol] = []
+    private var timeObserver: Any?
 
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
@@ -38,14 +58,41 @@ final class PlaybackEngine: ObservableObject {
                    self.intentToPlay,
                    player.currentItem?.status == .readyToPlay {
                     // 非用户意图的暂停（路由变化 / 系统回收等）：恢复播放
-                    player.play()
+                    self.play()
                 }
+            }
+        }
+        // 每 0.5 秒发布进度；约每 5 秒回调一次 onProgress
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            guard let self else { return }
+            let position = time.seconds.isFinite ? time.seconds : 0
+            self.currentTime = position
+            if let itemDuration = self.player.currentItem?.duration.seconds,
+               itemDuration.isFinite {
+                self.duration = itemDuration
+            }
+            self.progressTick += 1
+            if self.progressTick % 10 == 0 {
+                self.onProgress?(self.currentTime, self.duration)
+            }
+            if self.outroThreshold > 0, !self.outroFired,
+               self.duration > 0,
+               self.duration - position <= self.outroThreshold,
+               position > 0 {
+                self.outroFired = true
+                self.onOutroReached?()
             }
         }
     }
 
     deinit {
         notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+        }
     }
 
     static func configureAudioSession() {
@@ -60,6 +107,11 @@ final class PlaybackEngine: ObservableObject {
 
     func load(_ request: PlaybackRequest, autoplay: Bool = true) {
         intentToPlay = autoplay
+        pendingStartPosition = request.startPosition
+        outroFired = false
+        progressTick = 0
+        currentTime = 0
+        duration = 0
         // AVURLAsset 的 HTTP 头注入点。
         // 注意：HLS 分片请求不继承该头，二期用 AVAssetResourceLoaderDelegate 处理带头分片。
         // 该键在 Swift 中没有桥接常量，用字面量字符串（值与 AVURLAssetHTTPHeaderFieldsKey 相同）
@@ -73,7 +125,19 @@ final class PlaybackEngine: ObservableObject {
                 switch item.status {
                 case .readyToPlay:
                     self.statusText = "就绪"
-                    if self.intentToPlay { self.player.play() }
+                    if self.pendingStartPosition > 1 {
+                        let target = self.pendingStartPosition
+                        self.pendingStartPosition = 0
+                        self.player.seek(
+                            to: CMTime(seconds: target, preferredTimescale: 600),
+                            toleranceBefore: .zero,
+                            toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)
+                        ) { _ in
+                            if self.intentToPlay { self.play() }
+                        }
+                    } else if self.intentToPlay {
+                        self.play()
+                    }
                 case .failed:
                     self.statusText = "加载失败：\(item.error?.localizedDescription ?? "未知错误")"
                 default:
@@ -88,12 +152,21 @@ final class PlaybackEngine: ObservableObject {
 
     func play() {
         intentToPlay = true
-        player.play()
+        player.rate = playbackRate
     }
 
     func pause() {
         intentToPlay = false
         player.pause()
+        onProgress?(currentTime, duration)
+    }
+
+    func seek(to seconds: Double) {
+        player.seek(
+            to: CMTime(seconds: max(0, seconds), preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)
+        )
     }
 
     func togglePlayPause() {
@@ -111,6 +184,17 @@ final class PlaybackEngine: ObservableObject {
         notificationObservers.removeAll()
         let center = NotificationCenter.default
 
+        // 播放结束：先落一次最终进度，再通知上层（自动连播）
+        notificationObservers.append(center.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if self.duration > 0 {
+                self.onProgress?(self.duration, self.duration)
+            }
+            self.onEnded?()
+        })
+
         // 播放卡顿：等 1 秒让缓冲恢复，再自动续播
         notificationObservers.append(center.addObserver(
             forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main
@@ -119,7 +203,7 @@ final class PlaybackEngine: ObservableObject {
             self.statusText = "网络卡顿，自动恢复中"
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self, self.intentToPlay else { return }
-                self.player.play()
+                self.play()
             }
         })
 
