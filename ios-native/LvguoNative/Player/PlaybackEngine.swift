@@ -720,7 +720,7 @@ final class PlaybackResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URL
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("#EXTM3U") else {
             DiaryStore.shared.add(
-                "子请求 \(requestDescription(key: whole.key, wrapped: loadingRequest.request.url, real: whole.response?.url)) 播放列表内容无效（非 #EXTM3U 开头，前 40 字：\(Self.sanitizeDiagnosticText(String(trimmed.prefix(40))))）"
+                "子请求 \(requestDescription(key: whole.key, wrapped: loadingRequest.request.url, real: whole.response?.url)) 播放列表内容无效（非 #EXTM3U 开头，前 40 字：\(PlaybackEngine.sanitizeDiagnosticText(String(trimmed.prefix(40))))）"
             )
             loadingRequest.finishLoading(with: NSError(
                 domain: "LvguoPlayback", code: -6,
@@ -1194,7 +1194,9 @@ final class PlaybackEngine: ObservableObject {
         guard let request = currentRequest, let url = request.url else { return }
         var options: [String: Any] = [:]
         if !request.headers.isEmpty {
-            options[AVURLAssetHTTPHeaderFieldsKey] = request.headers
+            // 键名即 AVURLAssetHTTPHeaderFieldsKey：该常量在本
+            // SDK 的 Swift 导入里不可见（一期已踩过），用字面量
+            options["AVURLAssetHTTPHeaderFieldsKey"] = request.headers
         }
         let asset = AVURLAsset(url: url, options: options)
         phase = .loading
@@ -1242,7 +1244,7 @@ final class PlaybackEngine: ObservableObject {
             DiaryStore.shared.add("错误日志（共 \(events.count) 条，记最近 8 条）：")
             for event in events.suffix(8) {
                 let uri = PlaybackResourceLoader.classify(
-                    event.URI.flatMap { URL(string: $0) }
+                    event.uri.flatMap { URL(string: $0) }
                 )
                 var line = "  \(uri) 服务器 \(event.serverAddress ?? "-")"
                     + " HTTP \(event.errorStatusCode)"
@@ -1254,8 +1256,9 @@ final class PlaybackEngine: ObservableObject {
             }
         }
         if let access = item.accessLog()?.events.last {
+            // 访问日志事件没有错误码字段，记地址类型与流量即可
             DiaryStore.shared.add(
-                "访问日志末条：HTTP \(access.errorStatusCode) \(access.errorDomain) \(access.errorCode)，已下载 \(access.numberOfBytesTransferred) 字节"
+                "访问日志末条：\(PlaybackResourceLoader.classify(access.uri.flatMap { URL(string: $0) }))，已下载 \(access.numberOfBytesTransferred) 字节，卡顿 \(access.numberOfStalls) 次"
             )
         }
     }
