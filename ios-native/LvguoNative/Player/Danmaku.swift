@@ -76,7 +76,7 @@ merge = Self.merges.contains { $0.0 == storedMerge}
 words = (source["danmakuWords"] as? [Any]) ?? []
 .compactMap { $0 as? String}
 loading = false
-if AppData.readJSONDictionary(file) == nil, dict!= nil {
+if AppData.readJSONDictionary(file) == nil, dict != nil {
 save()
 }
 }
@@ -162,7 +162,7 @@ var timeMS: Int64
 var count: Int = 1
 
 var displayText: String {
-count > 1? "\(text) ×\(count)": text
+count > 1 ? "\(text) ×\(count)" : text
 }
 }
 
@@ -328,7 +328,7 @@ let text = Text(item.displayText)
 .font(
 .system(
 size: fontSize,
-weight: preferences.bold?.bold:.regular
+weight: preferences.bold ? .bold : .regular
 )
 )
 .foregroundStyle(preferences.color)
@@ -349,7 +349,7 @@ y: [offset, offset, -offset, -offset][corner]
 }
 text
 .shadow(
-color:.black.opacity(preferences.shadow > 0? 0.55: 0),
+color:.black.opacity(preferences.shadow > 0 ? 0.55 : 0),
 radius: preferences.shadow / 2,
 x: 1, y: 1
 )
@@ -436,12 +436,12 @@ sliderRow(
 "描边", subtitle: preferences.stroke == 0
 ? "关闭": "描边越粗字越突出",
 value: $preferences.stroke, range: 0...6, step: 0.5
-) { $0 == 0? "关闭": String(format: "%.1f", $0)}
+) { $0 == 0 ? "关闭" : String(format: "%.1f", $0)}
 sliderRow(
 "阴影", subtitle: preferences.shadow == 0
 ? "关闭": "阴影越浓字越清晰",
 value: $preferences.shadow, range: 0...12, step: 1
-) { $0 == 0? "关闭": String(format: "%.1f", $0)}
+) { $0 == 0 ? "关闭" : String(format: "%.1f", $0)}
 section("滚动")
 sliderRow(
 "滚动速度", subtitle: "弹幕划过屏幕的快慢",
