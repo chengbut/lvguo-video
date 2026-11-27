@@ -48,7 +48,7 @@ struct FtpSourceClient: FileSourceClient {
         var components = URLComponents()
         components.scheme = "ftp"
         if !source.username.isEmpty {
-            components.userName = source.username
+            components.user = source.username
             components.password = source.password
         }
         components.host = source.server.trimmingCharacters(in: .whitespacesAndNewlines)
