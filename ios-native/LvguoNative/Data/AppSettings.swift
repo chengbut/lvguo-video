@@ -420,7 +420,11 @@ final class ResourceSettingsStore: ObservableObject {
     /// 自定义下载文件夹的书签解析（修复轮 11 第 9 项）：
     /// 成功返回文件夹 URL 与书签是否已过期（过期时地址
     /// 仍可用，但建议用户重新选择以刷新书签）；解析
-    /// 失败返回 nil，调用方回落默认位置并如实提示
+    /// 失败返回 nil，调用方回落默认位置并如实提示。
+    /// 注意：iOS 没有 macOS 的 .withSecurityScope 解析
+    /// 选项（该符号在 iOS 上 unavailable，CI 实证）——
+    /// iOS 书签天然是 security-scoped 的，解析用空选项，
+    /// 之后照常 startAccessingSecurityScopedResource
     static func resolveDownloadsFolder(
         bookmarkBase64: String
     ) -> (url: URL, stale: Bool)? {
@@ -431,7 +435,7 @@ final class ResourceSettingsStore: ObservableObject {
         var stale = false
         guard let url = try? URL(
             resolvingBookmarkData: data,
-            options: [.withSecurityScope],
+            options: [],
             relativeTo: nil,
             bookmarkDataIsStale: &stale
         ) else {
