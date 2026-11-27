@@ -14,6 +14,8 @@ struct PlaybackVariant {
     var headers: [String: String] = [:]
 
     var label: String { quality > 0 ? "\(quality)P" : "默认" }
+
+    var isPlayable: Bool { url != nil || playlistText != nil }
 }
 
 /// 一次播放请求：与 Flutter 版 PlaybackPlan 对齐。

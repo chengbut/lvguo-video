@@ -268,7 +268,7 @@ struct PlayerPage: View {
         case minutes(Int)
     }
 
-    private enum DragKind {
+    private enum DragKind: Equatable {
         case none
         case seek
         case level(brightness: Bool, start: Double)
